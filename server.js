@@ -3090,13 +3090,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static assets from humex-sms/static with revalidation
+// Boot-unique asset version so browsers cache JS/CSS aggressively in production and auto-refresh on restart
+const ASSET_BUILD_VER = Date.now().toString(36);
+
+// Serve static assets from humex-sms/static with fast ETag & production browser caching
 const staticOpts = {
-  etag: false,
+  etag: true,
   lastModified: true,
-  maxAge: 0,
-  setHeaders: (res, path) => {
-    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+  maxAge: process.env.NODE_ENV === 'production' ? '7d' : 0,
+  setHeaders: (res, filePath) => {
+    const ext = path.extname(filePath || '').toLowerCase();
+    if (process.env.NODE_ENV === 'production' && /\.(js|css|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|eot)$/.test(ext)) {
+      res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+    }
   }
 };
 // Intercept direct HTML file requests with strict role authorization
@@ -3694,6 +3702,13 @@ function sendInjectedHtml(res, filePath, req = null) {
       content = content.replace('</head>', `${injection}\n</head>`);
     } else {
       content = injection + content;
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      content = content.replace(
+        /((?:src|href)=["']\/static\/(?:js|css)\/[^"']+\.(?:js|css))(["'])/g,
+        `$1?v=${ASSET_BUILD_VER}$2`
+      );
     }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');

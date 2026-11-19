@@ -1,36 +1,81 @@
-# HUMEX SMS — Complete Step-by-Step VPS Deployment Guide (Windows CMD + Ubuntu VPS)
+# HUMAX SMS — Complete Production VPS Deployment Guide (Private GitHub + Ubuntu VPS)
 
-Yeh guide beginners ke liye bilkul asaan aur copy-paste **CMD / SSH commands** ke saath tayyar ki gayi hai.
+Yeh guide beginners ke liye bilkul asaan aur copy-paste **SSH / GitHub / VPS commands** ke saath tayyar ki gayi hai.
 
 ---
 
-## Step 0: Apne Computer (Windows CMD) se Production ZIP Upload Karein
+## Method A (Recommended): Private GitHub Repository ko VPS par Deploy Karein (SSH Deploy Key)
 
-Agar aap ne AI Studio / Owner Panel se project ZIP download kiya hai (e.g. `humex-sms-complete-project.zip` ya `humex-sms-vps-YYYYMMDD.zip`), ya project folder aap ke PC par hai:
+Private GitHub repo ko VPS par add karne ka **sabse safe aur professional tareeqa SSH Deploy Key** hai (is se aap ka personal GitHub password ya full account token VPS par save nahi hota — sirf is ek repo ko read-only access milta hai).
 
-1. Agar project folder aap ke PC par hai to pehle clean production ZIP banayein (Windows CMD mein project folder ke andar):
+### Step A1: VPS par Login Karein aur SSH Deploy Key Banayein
+```bash
+ssh root@YOUR_VPS_IP
+
+# VPS ke liye alag SSH key banayein (Enter dabate jayein, passphrase khali chhor dein)
+ssh-keygen -t ed25519 -C "humax-sms-vps" -f ~/.ssh/github_humax -N ""
+
+# Public key screen par print karein aur poori line copy kar lein
+cat ~/.ssh/github_humax.pub
+```
+
+### Step A2: GitHub Private Repo mein Deploy Key Add Karein
+1. Apne GitHub par **Private Repository** kholein.
+2. **Settings** -> **Deploy keys** (left sidebar) -> **Add deploy key** par click karein.
+3. **Title** likhein: `Production VPS`
+4. **Key** box mein woh poori `ssh-ed25519 ...` line paste karein.
+5. `Allow write access` **UNCHECKED** rehne dein (read-only sabse safe hai) aur **Add key** dabaa dein.
+
+### Step A3: VPS par Git ko SSH Key batayein aur Private Repo Clone Karein
+```bash
+# SSH config set karein taake github.com hamesha yeh key use kare
+cat << 'EOF' >> ~/.ssh/config
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/github_humax
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+
+# Connection test karein ("successfully authenticated" likha aana chahiye)
+ssh -T git@github.com
+
+# Code aur live Data folders alag banayein
+sudo mkdir -p /var/www/humexsms /var/lib/humex-sms/data /var/lib/humex-sms/backups
+sudo chown -R $USER:$USER /var/www/humexsms /var/lib/humex-sms
+
+# Private repo clone karein (apna GitHub username aur repo name dalein)
+git clone git@github.com:YOUR_GITHUB_USERNAME/YOUR_PRIVATE_REPO.git /var/www/humexsms
+cd /var/www/humexsms
+npm install --omit=dev
+```
+
+*(Future mein jab bhi GitHub par naya update push karein, VPS par sirf yeh 1 command chalani hogi: `cd /var/www/humexsms && bash scripts/deploy-vps.sh main` — aap ka live data bilkul safe rahega!)*
+
+---
+
+## Method B (Alternative): Production ZIP Upload Karein
+
+Agar aap GitHub ke bajaye ZIP upload karna chahein:
+1. PC par hardened production ZIP banayein:
 ```bat
 npm run pack:vps
 ```
-*(Is se `dist\humex-sms-vps-YYYYMMDD.zip` ban jayegi — is mein sirf production files hoti hain, faltu files nahi.)*
-
-2. Apne Windows CMD se ZIP file ko VPS par upload karein (`YOUR_VPS_IP` ki jagah apna VPS IP likhein):
+2. ZIP ko VPS par upload karein:
 ```bat
 scp dist\humex-sms-vps-*.zip root@YOUR_VPS_IP:/root/humex-sms.zip
 ```
-*(Agar ZIP Downloads folder mein ho to: `scp %USERPROFILE%\Downloads\humex-sms-complete-project.zip root@YOUR_VPS_IP:/root/humex-sms.zip`)*
-> **Alternative:** Agar `scp` use na karna chahein to **WinSCP** ya **FileZilla** se `/root/humex-sms.zip` par drag-drop upload kar sakte hain.
+3. VPS par unzip karein:
+```bash
+sudo mkdir -p /var/www/humexsms /var/lib/humex-sms/data /var/lib/humex-sms/backups
+unzip -o /root/humex-sms.zip -d /var/www/humexsms
+cd /var/www/humexsms && npm install --omit=dev
+```
 
 ---
 
-## Step 1: VPS par Login Karein aur Required Software Install Karein
-
-Apne Windows CMD mein yeh command chalayein aur VPS ka password dalein:
-```bat
-ssh root@YOUR_VPS_IP
-```
-
-Ab VPS ke andar yeh commands aik aik kar ke run karein:
+## Step 1: VPS par Required Software Install Karein (Node.js 20, PM2, Nginx, SSL)
 
 ```bash
 # 1. System update aur zaroori tools install karein
@@ -47,25 +92,6 @@ npm -v
 
 # 4. PM2 (24/7 background process manager) install karein
 sudo npm install -g pm2
-```
-
----
-
-## Step 2: Folders Banayein aur Project Unzip Karein
-
-Live database (`/var/lib/humex-sms`) ko code folder (`/var/www/humexsms`) se **alag** rakha gaya hai taake future mein code update karte waqt aap ke users, numbers aur SMS logs kabhi delete na hon:
-
-```bash
-# Code aur Data directories banayein
-sudo mkdir -p /var/www/humexsms /var/lib/humex-sms/data /var/lib/humex-sms/backups
-sudo chown -R $USER:$USER /var/www/humexsms /var/lib/humex-sms
-
-# ZIP file ko code folder mein extract karein
-unzip -o /root/humex-sms.zip -d /var/www/humexsms
-cd /var/www/humexsms
-
-# Production dependencies install karein
-npm install --omit=dev
 ```
 
 *(Agar aap apna purana `humex-sms/data` bhi import karna chahte hain to `/var/lib/humex-sms/data` mein copy karein, ya Owner Panel -> System Backup se `.zip` restore karein.)*

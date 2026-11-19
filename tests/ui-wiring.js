@@ -1565,7 +1565,8 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
 
   // 11. Services & CLI Manager Cleanup (no hardcoded/fixed payout_rate)
   const ownerFeaturesJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-features.js'), 'utf8');
-  const servicesSeedJson = fs.readFileSync(path.resolve('humex-sms/data/services.json'), 'utf8');
+  const servicesSeedPath = path.resolve('humex-sms/data/services.json');
+  const servicesSeedJson = fs.existsSync(servicesSeedPath) ? fs.readFileSync(servicesSeedPath, 'utf8') : '[]';
   const servicesCliSection = ownerEngineJs.slice(ownerEngineJs.indexOf('async function renderServicesManager'));
   assertCheck('CLI/Services Cleanup: no fixed payout_rate fields or inputs remain in Services/CLI Manager',
     servicesCliSection.length > 100 &&

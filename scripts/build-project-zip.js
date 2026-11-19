@@ -40,7 +40,9 @@ const ROOT_FILES_WHITELIST = [
   '.env.example',
   'README.md',
   'VPS_DEPLOYMENT_GUIDE.md',
-  'scripts/backup-vps.sh'
+  'scripts/backup-vps.sh',
+  'scripts/deploy-vps.sh',
+  'deploy/nginx-humax-sms.conf'
 ];
 
 // Production-only package.json with the 8 proven runtime dependencies

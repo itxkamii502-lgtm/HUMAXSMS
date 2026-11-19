@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# HUMEX SMS — Daily Production Backup Script for Linux VPS
+# HUMAX SMS — Daily Production Backup Script for Linux VPS
 # Reads DATA_DIR and BACKUP_DIR from .env (with safe defaults), creates compressed
 # tarball backups, and retains the most recent 30 backup archives.
 

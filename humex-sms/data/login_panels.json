@@ -1,0 +1,13 @@
+[
+  {
+    "id": 1,
+    "name": "GlobalSMS Web Scraper (Test)",
+    "url": "https://demo-globalsms.local/login",
+    "username": "demo_scraper",
+    "status": "stopped",
+    "interval": 30,
+    "total_sms": 46,
+    "last_sync": "2026-11-19T10:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  }
+]

@@ -1,0 +1,15555 @@
+import express from 'express';
+import compression from 'compression';
+import http from 'http';
+import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { WebSocketServer } from 'ws';
+import { fileURLToPath } from 'url';
+import net from 'net';
+import multer from 'multer';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const AdmZip = require('adm-zip');
+const QRCode = require('qrcode');
+const bcrypt = require('bcryptjs');
+const smpp = require('smpp');
+
+const execFileAsync = promisify(execFile);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load .env automatically if present (without overriding explicit shell/PM2 env vars)
+(function loadEnvFileIfPresent() {
+  try {
+    const envPath = path.join(__dirname, '.env');
+    if (!fs.existsSync(envPath)) return;
+    const raw = fs.readFileSync(envPath, 'utf-8');
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const clean = trimmed.startsWith('export ') ? trimmed.slice(7).trim() : trimmed;
+      const eq = clean.indexOf('=');
+      if (eq <= 0) continue;
+      const key = clean.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      if (process.env[key] !== undefined) continue;
+      let val = clean.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      process.env[key] = val;
+    }
+  } catch (err) {
+    console.warn('[BOOT] Could not parse .env file:', err.message);
+  }
+})();
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+const app = express();
+app.disable('x-powered-by');
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+// ── Rate Limiting Helper (Bounded & Self-Pruning) ─────────────
+const rateLimitBuckets = new Map();
+let rateLimitOps = 0;
+function isRateLimited(key, limit, windowMs) {
+  const now = Date.now();
+  rateLimitOps++;
+  if (rateLimitOps % 250 === 0 || rateLimitBuckets.size > 5000) {
+    for (const [k, b] of rateLimitBuckets.entries()) {
+      if (now >= (b.expiresAt || (b.start + windowMs))) {
+        rateLimitBuckets.delete(k);
+      }
+    }
+    if (rateLimitBuckets.size > 10000) {
+      let drop = rateLimitBuckets.size - 8000;
+      for (const k of rateLimitBuckets.keys()) {
+        rateLimitBuckets.delete(k);
+        if (--drop <= 0) break;
+      }
+    }
+  }
+  let bucket = rateLimitBuckets.get(key);
+  if (!bucket || now - bucket.start > windowMs) {
+    bucket = { start: now, expiresAt: now + windowMs, count: 1 };
+    rateLimitBuckets.set(key, bucket);
+    return false;
+  }
+  bucket.count++;
+  return bucket.count > limit;
+}
+
+// ── Strict Number Allocation Mutex / Serialization Lock ────────
+let allocationLockQueue = Promise.resolve();
+function withAllocationLock(fn) {
+  const result = allocationLockQueue.then(() => fn());
+  allocationLockQueue = result.catch(() => {});
+  return result;
+}
+
+// ── Secure Recipient-Filtered WebSocket Broadcast ──────────────
+function broadcastWs(data, targetFilter = null) {
+  try {
+    let payload = data;
+    if (data && data.type === 'otp' && data.data) {
+      payload = {
+        type: 'otp',
+        ...data.data,
+        data: data.data
+      };
+    }
+    const msg = JSON.stringify(payload);
+    wss.clients.forEach(client => {
+      if (client.readyState !== 1) return;
+      
+      // Unauthenticated sockets do NOT receive private system events
+      if (!client.user) {
+        if (data.type === 'heartbeat' || data.type === 'connected') {
+          client.send(msg);
+        }
+        return;
+      }
+
+      const u = client.user;
+      const uRole = (u.role || '').toLowerCase();
+      const isOwner = uRole === 'owner' || uRole === 'admin';
+
+      if (typeof targetFilter === 'function') {
+        if (isOwner || targetFilter(u)) {
+          client.send(msg);
+        }
+        return;
+      }
+
+      // Event-type based privacy routing
+      if (data.type === 'otp') {
+        const recipientUser = String(payload.user || payload.client_username || payload.client_name || '').toLowerCase();
+        const recipientClientId = Number(payload.client_id);
+        const recipientAgentId = Number(payload.agent_id);
+
+        if (isOwner) {
+          client.send(msg);
+        } else if (uRole === 'agent' && recipientAgentId && Number(u.id) === recipientAgentId) {
+          client.send(msg);
+        } else if (uRole === 'client' && ((recipientClientId && Number(u.id) === recipientClientId) || (recipientUser && u.username.toLowerCase() === recipientUser))) {
+          client.send(msg);
+        }
+        return;
+      }
+
+      if (data.type === 'agent_number_request') {
+        const agId = data.data && Number(data.data.agent_id);
+        const clId = data.data && Number(data.data.client_id);
+        if (isOwner ||
+          (uRole === 'agent' && agId && Number(u.id) === agId) ||
+          (uRole === 'client' && clId && Number(u.id) === clId)) {
+          client.send(msg);
+        }
+        return;
+      }
+
+      if (data.type === 'agent_request_updated') {
+        const agId = data.data && Number(data.data.agent_id);
+        const clId = data.data && Number(data.data.client_id);
+        if (isOwner ||
+          (uRole === 'agent' && agId && Number(u.id) === agId) ||
+          (uRole === 'client' && clId && Number(u.id) === clId)) {
+          client.send(msg);
+        }
+        return;
+      }
+
+      if (data.type === 'notification') {
+        const notif = data.notification || data.data || data;
+        const targetRole = String(notif.recipient_role || '').toLowerCase();
+        const targetId = notif.recipient_id ? Number(notif.recipient_id) : null;
+        const targetUsername = String(notif.recipient_username || '').toLowerCase();
+
+        if (isOwner) {
+          // Owner receives Owner/Admin/All notifications in real-time (strict role scoping)
+          if (!targetRole || targetRole === 'owner' || targetRole === 'admin' || targetRole === 'all') {
+            client.send(msg);
+          }
+        } else if (targetRole === 'all') {
+          client.send(msg);
+        } else if (targetId && Number(u.id) === targetId && (targetRole === uRole || !targetRole)) {
+          client.send(msg);
+        } else if (targetUsername && u.username.toLowerCase() === targetUsername && (targetRole === uRole || !targetRole)) {
+          client.send(msg);
+        } else if (targetRole && uRole === targetRole && !targetId && !targetUsername) {
+          client.send(msg);
+        }
+        return;
+      }
+
+      // Safe non-sensitive events
+      if (['heartbeat', 'connected', 'brand_theme_updated'].includes(data.type)) {
+        client.send(msg);
+      }
+    });
+  } catch (e) {
+    console.error('broadcastWs error:', e);
+  }
+}
+
+// ── Secure Password Hashing & Verification ─────────────────────
+function hashPassword(plain) {
+  if (!plain) return '';
+  return bcrypt.hashSync(String(plain), 10);
+}
+
+function verifyPassword(plain, stored) {
+  if (!plain || !stored) return false;
+  const s = String(stored).trim();
+  const p = String(plain).trim();
+  if (s.startsWith('$2a$') || s.startsWith('$2b$')) {
+    return bcrypt.compareSync(p, s);
+  }
+  // Safe migration fallback: verify against plaintext once
+  return p === s;
+}
+
+const portArgIdx = process.argv.indexOf('--port');
+const portFromArg = portArgIdx !== -1 && process.argv[portArgIdx + 1] ? Number(process.argv[portArgIdx + 1]) : null;
+const envPort = Number(process.env.PORT);
+const PORT = portFromArg || (envPort && envPort !== 8080 ? envPort : 3000);
+const HUMEX_DIR = path.join(__dirname, 'humex-sms');
+const STATIC_DIR = path.join(HUMEX_DIR, 'static');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(HUMEX_DIR, 'data');
+const AGENT_FILES_DIR = path.join(DATA_DIR, 'agent_files');
+console.log(`[BOOT] Resolved APP_DIR:  ${HUMEX_DIR}`);
+console.log(`[BOOT] Resolved DATA_DIR: ${DATA_DIR}`);
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(AGENT_FILES_DIR)) {
+  fs.mkdirSync(AGENT_FILES_DIR, { recursive: true });
+}
+
+// ── Database Helpers ──────────────────────────────────────────
+const DB_CACHE = new Map();
+const DB_MTIME = new Map();
+
+// SMS log persistence: every SMS is appended to a crash-safe journal immediately, the big
+// sms_log.json is rewritten in the background (debounced, atomic). Nothing is lost on a crash.
+const SMS_JOURNAL = path.join(DATA_DIR, 'sms_log.journal.ndjson');
+const ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
+const META_FILE = path.join(DATA_DIR, 'meta.json');
+const SMS_RETENTION_DAYS = Number(process.env.SMS_LOG_RETENTION_DAYS) || 90;
+const BACKUP_DIR = process.env.BACKUP_DIR ? path.resolve(process.env.BACKUP_DIR) : path.join(path.dirname(DATA_DIR), 'backups');
+const debounceTimers = new Map();
+function readMeta() { try { return JSON.parse(fs.readFileSync(META_FILE, 'utf-8')) || {}; } catch (e) { return {}; } }
+function writeMeta(m) { try { fs.writeFileSync(META_FILE + '.tmp', JSON.stringify(m)); fs.renameSync(META_FILE + '.tmp', META_FILE); } catch (e) { console.error('meta write error', e.message); } }
+
+function readDb(name) {
+  try {
+    const filePath = path.join(DATA_DIR, `${name}.json`);
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const stat = fs.statSync(filePath);
+    const lastMtime = DB_MTIME.get(name);
+    if (DB_CACHE.has(name) && lastMtime && stat.mtimeMs <= lastMtime) {
+      return DB_CACHE.get(name);
+    }
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (!raw || !raw.trim()) {
+      return [];
+    }
+    const data = JSON.parse(raw);
+    if (name === 'sms_ranges' && Array.isArray(data)) {
+      data.forEach(r => {
+        const rn = r.range_name || r.name || r.country || 'Range';
+        r.range_name = rn;
+        r.name = rn;
+      });
+    }
+    DB_CACHE.set(name, data);
+    DB_MTIME.set(name, stat.mtimeMs);
+    return data;
+  } catch (err) {
+    console.error(`Error reading ${name}.json:`, err);
+    return [];
+  }
+}
+
+function atomicWriteFileSync(filePath, content) {
+  const rand = crypto.randomBytes(6).toString('hex');
+  const tmpPath = `${filePath}.tmp.${process.pid}.${rand}`;
+  fs.writeFileSync(tmpPath, content, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function writeDb(name, data) {
+  try {
+    const filePath = path.join(DATA_DIR, `${name}.json`);
+    const jsonStr = (name === 'sms_log')
+      ? JSON.stringify(data)
+      : JSON.stringify(data, null, 2);
+    atomicWriteFileSync(filePath, jsonStr);
+    DB_CACHE.set(name, data);
+    try {
+      DB_MTIME.set(name, fs.statSync(filePath).mtimeMs || Date.now());
+    } catch (_) {
+      DB_MTIME.set(name, Date.now());
+    }
+    if (name === 'sms_log') {
+      // everything in the journal is now inside sms_log.json
+      try { fs.writeFileSync(SMS_JOURNAL, ''); } catch (e) { /* ignore */ }
+      const t = debounceTimers.get('sms_log'); if (t) { clearTimeout(t); debounceTimers.delete('sms_log'); }
+    }
+    return true;
+  } catch (err) {
+    console.error(`Error writing ${name}.json:`, err);
+    return false;
+  }
+}
+
+function nextId(data) {
+  if (!Array.isArray(data) || data.length === 0) return 1;
+  let max = 0;
+  for (let i = 0; i < data.length; i++) {
+    const n = Number(data[i] && data[i].id);
+    if (Number.isFinite(n) && n > 0 && n > max) max = n;
+  }
+  return max + 1;
+}
+
+// Debounced background write (always writes whatever is current in the cache at flush time)
+const DB_FLUSH_MS = process.env.DATA_DIR ? 50 : 1500;
+function debouncedWriteDb(name, ms = DB_FLUSH_MS) {
+  if (debounceTimers.has(name)) return;
+  const t = setTimeout(() => { debounceTimers.delete(name); const cur = DB_CACHE.get(name); if (cur) writeDb(name, cur); }, ms);
+  if (t.unref) t.unref();
+  debounceTimers.set(name, t);
+}
+function flushPendingWrites() {
+  for (const [name, t] of Array.from(debounceTimers.entries())) { clearTimeout(t); debounceTimers.delete(name); const cur = DB_CACHE.get(name); if (cur) writeDb(name, cur); }
+}
+
+// ── High-Performance Indexed In-Memory Lookup for Numbers & Ingestion ──
+let CACHED_NUMBERS_BY_DIGITS = null;
+let CACHED_NUMBERS_BY_RAW = null;
+let CACHED_NUMBERS_MTIME = 0;
+
+function getIndexedNumbers() {
+  const currentMtime = DB_MTIME.get('numbers') || 0;
+  if (!CACHED_NUMBERS_BY_DIGITS || CACHED_NUMBERS_MTIME !== currentMtime) {
+    const numbers = readDb('numbers') || [];
+    const byDigits = new Map();
+    const byRaw = new Map();
+    for (let i = 0; i < numbers.length; i++) {
+      const n = numbers[i];
+      if (!n) continue;
+      const raw = String(n.number || '').trim();
+      const d = raw.replace(/\D/g, '');
+      if (raw && !byRaw.has(raw)) byRaw.set(raw, n);
+      if (d && !byDigits.has(d)) byDigits.set(d, n);
+    }
+    CACHED_NUMBERS_BY_DIGITS = byDigits;
+    CACHED_NUMBERS_BY_RAW = byRaw;
+    CACHED_NUMBERS_MTIME = currentMtime;
+  }
+  return { byDigits: CACHED_NUMBERS_BY_DIGITS, byRaw: CACHED_NUMBERS_BY_RAW };
+}
+
+// SMS id counter (persisted, never recomputed from a huge array on every SMS)
+let smsLastId = null;
+function nextSmsId(log) {
+  if (smsLastId === null) {
+    smsLastId = Number(readMeta().sms_last_id) || 0;
+    for (let i = 0; i < log.length; i++) { const n = Number(log[i] && log[i].id) || 0; if (n > smsLastId) smsLastId = n; }
+  }
+  smsLastId += 1;
+  if (smsLastId % 50 === 0) { const m = readMeta(); m.sms_last_id = smsLastId; writeMeta(m); }
+  return smsLastId;
+}
+// Duplicate detection index (sms_id / ext_key) – rebuilt only if the array changed from outside
+const smsIdx = { set: new Set(), len: -1, ref: null };
+function smsIndexSync(log) {
+  if (smsIdx.ref !== log || smsIdx.len !== log.length) {
+    smsIdx.set = new Set();
+    for (let i = 0; i < log.length; i++) { const r = log[i]; if (!r) continue; if (r.ext_key) smsIdx.set.add('k:' + r.ext_key); if (r.sms_id) smsIdx.set.add('i:' + r.sms_id); }
+    smsIdx.ref = log; smsIdx.len = log.length;
+  }
+}
+function smsIndexHas(log, dedupeKey, smsId) {
+  smsIndexSync(log);
+  return (dedupeKey && smsIdx.set.has('k:' + dedupeKey)) || (smsId && smsIdx.set.has('i:' + smsId));
+}
+const periodStatsCache = new Map();
+function appendSmsLog(entry, log) {
+  smsIndexSync(log);
+  log.unshift(entry);
+  smsIdx.len = log.length;
+  if (entry.ext_key) smsIdx.set.add('k:' + entry.ext_key);
+  if (entry.sms_id) smsIdx.set.add('i:' + entry.sms_id);
+  periodStatsCache.clear();
+  try { fs.appendFileSync(SMS_JOURNAL, JSON.stringify(entry) + '\n'); } catch (e) { console.error('SMS journal error:', e.message); }
+  debouncedWriteDb('sms_log');
+}
+function recoverSmsJournal() {
+  try {
+    if (!fs.existsSync(SMS_JOURNAL)) return;
+    const lines = fs.readFileSync(SMS_JOURNAL, 'utf-8').split('\n').filter(Boolean);
+    if (!lines.length) return;
+    const log = readDb('sms_log') || [];
+    const have = new Set(log.map(r => r && r.id));
+    let added = 0;
+    for (const ln of lines) {
+      let r; try { r = JSON.parse(ln); } catch (e) { continue; }
+      if (!r || have.has(r.id)) continue;
+      log.unshift(r); have.add(r.id); added++;
+    }
+    log.sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+    writeDb('sms_log', log);
+    if (added) console.log(`[HUMEX SMS] Recovered ${added} SMS from journal`);
+  } catch (e) { console.error('Journal recovery error:', e); }
+}
+// Retention: rows older than SMS_RETENTION_DAYS move to data/archive/sms_log_YYYY-MM.json (never deleted)
+function rotateSmsLog() {
+  try {
+    const log = readDb('sms_log');
+    if (!Array.isArray(log) || !log.length) return;
+    const cutoff = Date.now() - SMS_RETENTION_DAYS * 86400000;
+    const keep = [], groups = new Map();
+    for (const r of log) {
+      const t = Date.parse(r && (r.timestamp || r.date));
+      if (isFinite(t) && t < cutoff) { const k = new Date(t).toISOString().slice(0, 7); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+      else keep.push(r);
+    }
+    if (!groups.size) return;
+    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+    for (const [month, rows] of groups) {
+      const f = path.join(ARCHIVE_DIR, `sms_log_${month}.json`);
+      let ex = []; try { ex = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch (e) { ex = []; }
+      const ids = new Set(ex.map(r => r.id)); for (const r of rows) if (!ids.has(r.id)) ex.push(r);
+      ex.sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+      fs.writeFileSync(f + '.tmp', JSON.stringify(ex)); fs.renameSync(f + '.tmp', f);
+    }
+    writeDb('sms_log', keep); // only after every archive file is safely written
+    console.log(`[HUMEX SMS] Archived ${log.length - keep.length} old SMS rows`);
+  } catch (e) { console.error('SMS rotation error:', e); }
+}
+// Current log + archives (for payments / long reports)
+const archiveFileCache = new Map();
+function readArchivedJsonCached(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    const cached = archiveFileCache.get(filePath);
+    if (cached && cached.mtime === stat.mtimeMs) {
+      return cached.data;
+    }
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const data = Array.isArray(parsed) ? parsed : [];
+    archiveFileCache.set(filePath, { mtime: stat.mtimeMs, data });
+    return data;
+  } catch (e) {
+    return [];
+  }
+}
+
+function readSmsWithArchive(fromDate) {
+  const current = readDb('sms_log') || [];
+  let archiveFiles = [];
+  try {
+    if (fs.existsSync(ARCHIVE_DIR)) {
+      const fromMonth = fromDate ? String(fromDate).slice(0, 7) : '0000-00';
+      const files = fs.readdirSync(ARCHIVE_DIR);
+      archiveFiles = files.filter(f => {
+        const m = /^sms_log_(\d{4}-\d{2})\.json$/.exec(f);
+        return m && m[1] >= fromMonth;
+      });
+    }
+  } catch (e) { /* ignore */ }
+
+  if (!archiveFiles.length) {
+    return current;
+  }
+
+  const out = current.slice();
+  const seenIds = new Set();
+  for (let i = 0; i < current.length; i++) {
+    const r = current[i];
+    if (r && r.id != null) seenIds.add(String(r.id));
+  }
+  for (const f of archiveFiles) {
+    const archived = readArchivedJsonCached(path.join(ARCHIVE_DIR, f));
+    for (let i = 0; i < archived.length; i++) {
+      const r = archived[i];
+      const idStr = r && r.id != null ? String(r.id) : null;
+      if (!idStr || !seenIds.has(idStr)) {
+        if (idStr) seenIds.add(idStr);
+        out.push(r);
+      }
+    }
+  }
+  return out;
+}
+// Real traffic counters (no random numbers)
+const recentSmsTs = [];
+function noteSmsArrival() { const now = Date.now(); recentSmsTs.push(now); while (recentSmsTs.length && recentSmsTs[0] < now - 60000) recentSmsTs.shift(); }
+
+let CACHED_SAMPLE_LOG = null;
+let CACHED_SAMPLE_MTIME = 0;
+let CACHED_SAMPLE_RATE = 0;
+
+function liveTrafficStats() {
+  const now = Date.now(); while (recentSmsTs.length && recentSmsTs[0] < now - 60000) recentSmsTs.shift();
+  const last10 = recentSmsTs.filter(t => t >= now - 10000).length;
+  const mtime = DB_MTIME.get('sms_log') || 0;
+  if (!CACHED_SAMPLE_LOG || CACHED_SAMPLE_MTIME !== mtime) {
+    const log = readDb('sms_log') || [];
+    const sample = log.slice(0, 200);
+    CACHED_SAMPLE_RATE = sample.length ? Math.round(sample.filter(r => r.status === 'delivered').length / sample.length * 100) : 0;
+    CACHED_SAMPLE_LOG = sample;
+    CACHED_SAMPLE_MTIME = mtime;
+  }
+  return { mps: Math.round(last10 / 10 * 10) / 10, per_minute: recentSmsTs.length, success_rate: CACHED_SAMPLE_RATE, dlr: CACHED_SAMPLE_RATE };
+}
+function newSecretToken(prefix = 'tok_') { return prefix + crypto.randomBytes(24).toString('hex'); }
+function sha256Hex(v) { return crypto.createHash('sha256').update(String(v)).digest('hex'); }
+function findTokenRecord(tokens, raw) {
+  if (!raw || !Array.isArray(tokens)) return null;
+  const h = sha256Hex(raw);
+  return tokens.find(t => t && ((t.token_hash && t.token_hash === h) || (t.token && t.token === raw))) || null;
+}
+function publicTokenView(t) { const { token, token_hash, ...rest } = t; return { ...rest, token_hint: t.token_hint || (token ? String(token).slice(-4) : '') }; }
+function migrateTokensToHashed() {
+  const tokens = readDb('api_tokens'); if (!Array.isArray(tokens)) return;
+  let changed = false;
+  for (const t of tokens) { if (t && t.token && !t.token_hash) { t.token_hash = sha256Hex(t.token); t.token_hint = String(t.token).slice(-4); delete t.token; changed = true; } }
+  if (changed) writeDb('api_tokens', tokens);
+}
+
+
+function logAudit(actor, action, details, module = 'General') {
+  try {
+    const logs = readDb('audit_logs');
+    const arr = Array.isArray(logs) ? logs : [];
+    arr.unshift({
+      id: nextId(arr),
+      actor: actor || 'Owner',
+      action: action || '',
+      details: details || '',
+      module: module || 'System',
+      ip: '127.0.0.1',
+      timestamp: new Date().toISOString()
+    });
+    if (arr.length > 500) arr.pop();
+    writeDb('audit_logs', arr);
+  } catch (e) {
+    console.error('Audit log error:', e);
+  }
+}
+
+// ── Startup Safe Password Migration ─────────────────────────────
+function migratePlaintextPasswords() {
+  try {
+    const tables = ['users', 'agents', 'clients'];
+    for (const tbl of tables) {
+      let rows = readDb(tbl);
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+      let changed = false;
+      rows = rows.map(r => {
+        if (r && r.password && typeof r.password === 'string' && !r.password.startsWith('$2a$') && !r.password.startsWith('$2b$')) {
+          changed = true;
+          return { ...r, password: hashPassword(r.password) };
+        }
+        return r;
+      });
+      if (changed) {
+        writeDb(tbl, rows);
+      }
+    }
+  } catch (e) {
+    console.error('Password migration error:', e);
+  }
+}
+// ── Fresh DATA_DIR Auto-Bootstrap (for Clean VPS Installs) ──────
+function bootstrapFreshDataDir() {
+  try {
+    const usersPath = path.join(DATA_DIR, 'users.json');
+    let needOwnerSeed = !fs.existsSync(usersPath);
+    if (!needOwnerSeed) {
+      const existingUsers = readDb('users');
+      if (!Array.isArray(existingUsers) || existingUsers.length === 0) {
+        needOwnerSeed = true;
+      }
+    }
+    if (needOwnerSeed) {
+      const envPass = String(process.env.OWNER_INITIAL_PASSWORD || '').trim();
+      const initialPass = envPass.length >= 6 ? envPass : crypto.randomBytes(12).toString('base64url');
+      const now = new Date().toISOString();
+      writeDb('users', [
+        {
+          id: 1,
+          username: 'Kamran_Bhatti',
+          password: hashPassword(initialPass),
+          role: 'Owner',
+          email: '',
+          balance: 0,
+          status: 'active',
+          numbers: 0,
+          created: now,
+          notes: 'System Owner',
+          updated_at: now
+        }
+      ]);
+      if (envPass.length >= 6) {
+        console.log('[BOOTSTRAP] Initialized fresh users.json for Owner (Kamran_Bhatti) using OWNER_INITIAL_PASSWORD.');
+      } else {
+        console.log('====================================================================');
+        console.log('[BOOTSTRAP] Fresh database initialized!');
+        console.log('[BOOTSTRAP] Owner Username: Kamran_Bhatti');
+        console.log(`[BOOTSTRAP] Generated One-Time Password: ${initialPass}`);
+        console.log('[BOOTSTRAP] Or change anytime via: node reset-owner-password.js "NewPass"');
+        console.log('====================================================================');
+      }
+    }
+
+    const settingsPath = path.join(DATA_DIR, 'settings.json');
+    if (!fs.existsSync(settingsPath)) {
+      writeDb('settings', {
+        site_name: 'HUMAX SMS',
+        tagline: 'Wholesale SMS Termination Gateway',
+        footer_text: '© 2026 HUMAX SMS. All rights reserved.',
+        default_currency: 'USD',
+        timezone: 'Asia/Karachi',
+        payterms: ['Weekly', 'Biweekly', 'Monthly'],
+        default_theme_key: 'daylight_cobalt',
+        theme_mode: 'light',
+        font_family: 'roboto',
+        logo_url: '/static/img/humex-sms-logo.png',
+        smpp_enabled: process.env.SMPP_ENABLED !== 'false',
+        smpp_host: process.env.SMPP_HOST || '0.0.0.0',
+        smpp_port: Number(process.env.SMPP_PORT) || 2775,
+        smpp_max_connections: 100,
+        smpp_max_mps: 500,
+        smpp_global_max_mps: 5000,
+        two_fa_enabled: true,
+        max_sessions: 3,
+        session_timeout: 60
+      });
+    }
+
+    const sessionsPath = path.join(DATA_DIR, 'sessions.json');
+    if (!fs.existsSync(sessionsPath)) {
+      atomicWriteFileSync(sessionsPath, JSON.stringify({}, null, 2));
+    }
+    if (!fs.existsSync(SMS_JOURNAL)) {
+      fs.writeFileSync(SMS_JOURNAL, '', 'utf-8');
+    }
+  } catch (err) {
+    console.error('[BOOTSTRAP] Error initializing fresh DATA_DIR:', err);
+  }
+}
+
+bootstrapFreshDataDir();
+migratePlaintextPasswords();
+migrateTokensToHashed();
+recoverSmsJournal();
+rotateSmsLog();
+{ const _t = setInterval(rotateSmsLog, 6 * 3600 * 1000); if (_t.unref) _t.unref(); }
+
+let isShuttingDown = false;
+function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[HUMEX SMS] Received ${signal}, shutting down gracefully...`);
+  const forceExitTimer = setTimeout(() => {
+    try { flushPendingWrites(); } catch (_) {}
+    process.exit(0);
+  }, 3500);
+  if (forceExitTimer.unref) forceExitTimer.unref();
+
+  try {
+    if (typeof wss !== 'undefined' && wss && wss.clients) {
+      wss.clients.forEach(client => {
+        try { client.close(1001, 'Server restarting'); } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  try {
+    if (typeof smppServerInstance !== 'undefined' && smppServerInstance) {
+      smppServerInstance.close();
+    }
+  } catch (_) {}
+  try {
+    if (typeof savePersistedSessions === 'function') savePersistedSessions();
+  } catch (_) {}
+  try { flushPendingWrites(); } catch (_) {}
+  try {
+    server.close(() => {
+      try { flushPendingWrites(); } catch (_) {}
+      process.exit(0);
+    });
+  } catch (_) {
+    process.exit(0);
+  }
+}
+for (const _sig of ['SIGINT', 'SIGTERM']) process.on(_sig, () => gracefulShutdown(_sig));
+process.on('exit', () => { try { flushPendingWrites(); } catch (e) { /* ignore */ } });
+
+// ── Real-Time Sensitive Notification Engine (Role-Aware) ─────
+const DEFAULT_NOTIFICATION_PREFS = {
+  live_toast: true,
+  sound_enabled: true,
+  categories: {
+    numbers: true,
+    requests: true,
+    payments: true,
+    system: true
+  }
+};
+
+function normalizeNotificationPrefs(raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const cats = (src.categories && typeof src.categories === 'object') ? src.categories : {};
+  return {
+    live_toast: src.live_toast !== false,
+    sound_enabled: src.sound_enabled !== false,
+    categories: {
+      numbers: cats.numbers !== false,
+      requests: cats.requests !== false,
+      payments: cats.payments !== false,
+      system: cats.system !== false
+    }
+  };
+}
+
+function formatNotifPayterm(ptKey, isWn = false) {
+  const k = String(ptKey || 'Weekly').trim().toLowerCase();
+  if (isWn || k.includes('month') || k === '30/5' || k === 'monthly30_5') {
+    return isWn ? 'Monthly (30/5) {W}' : 'Monthly (30/5)';
+  }
+  if (k.includes('biweek') || k === '15/3') return 'Biweekly (15/3)';
+  return 'Weekly (7/3)';
+}
+
+function cleanMoneyStr(val, maxDecimals = 4) {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num === 0) return '0';
+  const trimmed = num.toFixed(maxDecimals).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+  return trimmed === '-0' ? '0' : trimmed;
+}
+
+function formatNotifRate(rate, currency = 'USD') {
+  const num = Number(rate || 0);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  const clean = cleanMoneyStr(num, 4);
+  return currency === 'PKR' ? `Rs. ${clean}/SMS` : `$${clean}/SMS`;
+}
+
+function inferNotifCategory(type, explicitCategory) {
+  if (explicitCategory && ['numbers', 'requests', 'payments', 'system'].includes(String(explicitCategory).toLowerCase())) {
+    return String(explicitCategory).toLowerCase();
+  }
+  const t = String(type || '').toLowerCase();
+  if (t === 'allocation' || t === 'revocation' || t === 'numbers') return 'numbers';
+  if (t === 'request' || t === 'request_approved' || t === 'request_rejected') return 'requests';
+  if (t === 'payout' || t === 'payment') return 'payments';
+  return 'system';
+}
+
+function sendInstantNotification({
+  recipient_role,
+  recipient_id,
+  recipient_username,
+  title,
+  message,
+  type = 'info',
+  category = '',
+  action_page = '',
+  payterm = '',
+  rate_label = '',
+  status = '',
+  range_id = null,
+  range_name = '',
+  count = 0,
+  actor_role = 'System',
+  actor_name = 'System',
+  metadata = {}
+}) {
+  try {
+    let notifications = readDb('notifications');
+    if (!Array.isArray(notifications)) notifications = [];
+
+    const now = new Date().toISOString();
+    const resolvedCategory = inferNotifCategory(type, category || metadata?.category);
+    const mergedMeta = {
+      ...(metadata || {}),
+      category: resolvedCategory,
+      ...(payterm ? { payterm } : {}),
+      ...(rate_label ? { rate_label } : {}),
+      ...(action_page ? { action_page } : {}),
+      ...(status ? { status } : {})
+    };
+    const entry = {
+      id: nextId(notifications),
+      recipient_role: recipient_role ? String(recipient_role).toLowerCase() : 'all',
+      recipient_id: recipient_id ? Number(recipient_id) : null,
+      recipient_username: recipient_username || '',
+      title: title || 'Notification',
+      message: message || '',
+      body: message || '',
+      type: type || 'info',
+      category: resolvedCategory,
+      action_page: action_page || mergedMeta.action_page || '',
+      payterm: payterm || mergedMeta.payterm || '',
+      rate_label: rate_label || mergedMeta.rate_label || '',
+      status: status || mergedMeta.status || '',
+      range_id: range_id ? Number(range_id) : null,
+      range_name: range_name || '',
+      count: Number(count) || 0,
+      actor_role: actor_role || 'System',
+      actor_name: actor_name || 'System',
+      metadata: mergedMeta,
+      read: false,
+      created: now,
+      timestamp: now
+    };
+
+    notifications.unshift(entry);
+    if (notifications.length > 2000) notifications.pop();
+    writeDb('notifications', notifications);
+
+    // Broadcast in REAL-TIME over WebSockets (Instant within 1 second)
+    broadcastWs({
+      type: 'notification',
+      notification: entry,
+      data: entry,
+      recipient_role: entry.recipient_role,
+      recipient_id: entry.recipient_id,
+      recipient_username: entry.recipient_username,
+      title: entry.title,
+      message: entry.message,
+      category: entry.category,
+      notif_type: entry.type,
+      time: now
+    });
+
+    return entry;
+  } catch (err) {
+    console.error('sendInstantNotification error:', err);
+    return null;
+  }
+}
+
+// ── SMS Ingestion, Scraping & Polling Engine ───────────────────
+function md5(str) {
+  return crypto.createHash('md5').update(String(str || '')).digest('hex');
+}
+
+function detectApp(cli, message) {
+  const text = `${cli || ''} ${message || ''}`.toLowerCase();
+  if (/whatsapp|\bwa\b/i.test(text)) return 'WhatsApp';
+  if (/telegram/i.test(text)) return 'Telegram';
+  if (/google|gmail|g-|youtube/i.test(text)) return 'Google';
+  if (/apple|icloud/i.test(text)) return 'Apple';
+  if (/microsoft|msft|outlook|azure/i.test(text)) return 'Microsoft';
+  if (/amazon|aws/i.test(text)) return 'Amazon';
+  if (/facebook|meta|instagram|\big\b/i.test(text)) return 'Facebook';
+  if (/tiktok/i.test(text)) return 'TikTok';
+  if (/uber/i.test(text)) return 'Uber';
+  if (/dhl/i.test(text)) return 'DHL';
+  if (/netflix/i.test(text)) return 'Netflix';
+  if (/twitter|\bx\b/i.test(text)) return 'Twitter';
+  if (/binance/i.test(text)) return 'Binance';
+  if (/snapchat/i.test(text)) return 'Snapchat';
+  if (/imo/i.test(text)) return 'IMO';
+  if (/viber/i.test(text)) return 'Viber';
+  if (/tinder/i.test(text)) return 'Tinder';
+  if (cli && /^[a-zA-Z]{3,15}$/.test(cli.trim())) return cli.trim();
+  return 'General';
+}
+
+function detectCountry(number) {
+  const digits = String(number || '').replace(/\D/g, '');
+  if (!digits) return '—';
+  if (digits.startsWith('1')) return 'United States';
+  if (digits.startsWith('44')) return 'United Kingdom';
+  if (digits.startsWith('7')) return 'Russia';
+  if (digits.startsWith('33')) return 'France';
+  if (digits.startsWith('49')) return 'Germany';
+  if (digits.startsWith('91')) return 'India';
+  if (digits.startsWith('92')) return 'Pakistan';
+  if (digits.startsWith('86')) return 'China';
+  if (digits.startsWith('211')) return 'South Sudan';
+  if (digits.startsWith('212')) return 'Morocco';
+  if (digits.startsWith('213')) return 'Algeria';
+  if (digits.startsWith('216')) return 'Tunisia';
+  if (digits.startsWith('218')) return 'Libya';
+  if (digits.startsWith('220')) return 'Gambia';
+  if (digits.startsWith('221')) return 'Senegal';
+  if (digits.startsWith('222')) return 'Mauritania';
+  if (digits.startsWith('223')) return 'Mali';
+  if (digits.startsWith('224')) return 'Guinea';
+  if (digits.startsWith('225')) return 'Ivory Coast';
+  if (digits.startsWith('226')) return 'Burkina Faso';
+  if (digits.startsWith('227')) return 'Niger';
+  if (digits.startsWith('228')) return 'Togo';
+  if (digits.startsWith('229')) return 'Benin';
+  if (digits.startsWith('230')) return 'Mauritius';
+  if (digits.startsWith('231')) return 'Liberia';
+  if (digits.startsWith('232')) return 'Sierra Leone';
+  if (digits.startsWith('233')) return 'Ghana';
+  if (digits.startsWith('234')) return 'Nigeria';
+  if (digits.startsWith('235')) return 'Chad';
+  if (digits.startsWith('236')) return 'Central African Republic';
+  if (digits.startsWith('237')) return 'Cameroon';
+  if (digits.startsWith('240')) return 'Equatorial Guinea';
+  if (digits.startsWith('241')) return 'Gabon';
+  if (digits.startsWith('242')) return 'Congo';
+  if (digits.startsWith('243')) return 'DR Congo';
+  if (digits.startsWith('244')) return 'Angola';
+  if (digits.startsWith('245')) return 'Guinea-Bissau';
+  if (digits.startsWith('249')) return 'Sudan';
+  if (digits.startsWith('250')) return 'Rwanda';
+  if (digits.startsWith('251')) return 'Ethiopia';
+  if (digits.startsWith('252')) return 'Somalia';
+  if (digits.startsWith('253')) return 'Djibouti';
+  if (digits.startsWith('254')) return 'Kenya';
+  if (digits.startsWith('255')) return 'Tanzania';
+  if (digits.startsWith('256')) return 'Uganda';
+  if (digits.startsWith('257')) return 'Burundi';
+  if (digits.startsWith('258')) return 'Mozambique';
+  if (digits.startsWith('260')) return 'Zambia';
+  if (digits.startsWith('261')) return 'Madagascar';
+  if (digits.startsWith('263')) return 'Zimbabwe';
+  if (digits.startsWith('264')) return 'Namibia';
+  if (digits.startsWith('265')) return 'Malawi';
+  if (digits.startsWith('27')) return 'South Africa';
+  if (digits.startsWith('20')) return 'Egypt';
+  if (digits.startsWith('966')) return 'Saudi Arabia';
+  if (digits.startsWith('971')) return 'UAE';
+  if (digits.startsWith('90')) return 'Turkey';
+  if (digits.startsWith('55')) return 'Brazil';
+  if (digits.startsWith('52')) return 'Mexico';
+  if (digits.startsWith('62')) return 'Indonesia';
+  if (digits.startsWith('880')) return 'Bangladesh';
+  if (digits.startsWith('63')) return 'Philippines';
+  if (digits.startsWith('84')) return 'Vietnam';
+  if (digits.startsWith('380')) return 'Ukraine';
+  if (digits.startsWith('31')) return 'Netherlands';
+  if (digits.startsWith('32')) return 'Belgium';
+  if (digits.startsWith('34')) return 'Spain';
+  if (digits.startsWith('39')) return 'Italy';
+  if (digits.startsWith('40')) return 'Romania';
+  if (digits.startsWith('48')) return 'Poland';
+  if (digits.startsWith('351')) return 'Portugal';
+  return 'International';
+}
+
+function extractOtp(text) {
+  if (!text) return '';
+  const s = String(text).trim();
+  const patterns = [
+    // Prefix G-123456 or WA-123456, OTP-123456
+    /\b(?:G|WA|FB|TG|OTP|PIN)-?(\d{4,8})\b/i,
+    // Explicit prefix with colon/is: "code is: 123456", "code: 123456", "OTP: 123456", "PIN: 1234" (must contain at least one digit)
+    /(?:verification\s*(?:code|pin)?|verify\s*code|otp|o\.t\.p|pin|password|passcode|secret\s*code|kod|kodunuz|codice|c[oó]digo|senha)\s*(?:is|est|ist|es|:|:=|=|-)?\s*[:\-\s]?\s*([0-9A-Za-z]*\d[0-9A-Za-z]*)\b/i,
+    // Digits preceding "is your ... code/otp": "123456 is your Apple ID code", "<#> 136445 est votre code Facebook"
+    /(?:^|[^\d])(\d{4,8})\s+(?:is\s+your|is\s+the|est\s+votre|es\s+tu|es\s+su|ist\s+ihr|ist\s+dein|to\s+verify|for\s+verification)\b/i,
+    // Bracketed or quoted OTP: [123456], (123456), "123456", '123456'
+    /[\[\(\'\"](\d{4,8})[\]\)\'\"]/,
+    // Hyphenated code: 123-456 or 12-34-56
+    /\b(\d{2,4}[\s\-]\d{2,4}(?:[\s\-]\d{2,4})?)\b/,
+    // Any standalone 4 to 8 digits
+    /\b(\d{4,8})\b/
+  ];
+  for (const p of patterns) {
+    const m = s.match(p);
+    if (m && m[1]) {
+      const val = String(m[1]).trim();
+      const digits = val.replace(/\D/g, '');
+      if (digits.length >= 4 && digits.length <= 8) return digits;
+      if (val.length >= 4 && val.length <= 8 && /\d/.test(val) && /^[0-9A-Za-z]+$/.test(val)) return val;
+    }
+  }
+  return '';
+}
+
+function parseWhitenoiseTimestamp(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'number' || /^\d{10,13}$/.test(String(raw).trim())) {
+    const num = Number(raw);
+    const ms = num < 1e11 ? num * 1000 : num;
+    const d = new Date(ms);
+    return !isNaN(d.getTime()) ? d.toISOString() : null;
+  }
+  const s = String(raw).trim();
+  // Strict DD-MM-YYYY HH:mm:ss or DD/MM/YYYY HH:mm:ss BEFORE Date() so "05-12-2025 09:16:14" parses as Dec 5, not May 12
+  const dmy = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})(?:[T\s]+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+  if (dmy) {
+    const day = parseInt(dmy[1], 10);
+    const month = parseInt(dmy[2], 10) - 1;
+    const year = parseInt(dmy[3], 10);
+    const hour = parseInt(dmy[4] || '0', 10);
+    const min = parseInt(dmy[5] || '0', 10);
+    const sec = parseInt(dmy[6] || '0', 10);
+    const d = new Date(Date.UTC(year, month, day, hour, min, sec));
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+  return null;
+}
+
+function normalizeIsoTimestamp(raw) {
+  if (!raw) return new Date().toISOString();
+  if (typeof raw === 'number' || /^\d{10,13}$/.test(String(raw).trim())) {
+    const num = Number(raw);
+    const ms = num < 1e11 ? num * 1000 : num;
+    const d = new Date(ms);
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+  let s = String(raw).trim();
+  const dmyIso = parseWhitenoiseTimestamp(s);
+  if (dmyIso) return dmyIso;
+
+  let d = new Date(s);
+  if (!isNaN(d.getTime())) return d.toISOString();
+
+  if (s.includes(' ')) s = s.replace(' ', 'T');
+  d = new Date(s);
+  if (!isNaN(d.getTime())) return d.toISOString();
+
+  return new Date().toISOString();
+}
+
+function extractDateStr(s) {
+  if (!s) return '';
+  if (typeof s === 'string') {
+    const raw = s.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+    if (/^\d{10,13}$/.test(raw)) {
+      const ms = Number(raw) < 1e11 ? Number(raw) * 1000 : Number(raw);
+      const d = new Date(ms);
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
+    const d = new Date(raw);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    return raw.slice(0, 10);
+  }
+  const raw = String(s.date || s.timestamp || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  if (/^\d{10,13}$/.test(raw)) {
+    const ms = Number(raw) < 1e11 ? Number(raw) * 1000 : Number(raw);
+    const d = new Date(ms);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  const d = new Date(raw);
+  if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return raw.slice(0, 10);
+}
+
+function getDateRangeBuckets() {
+  const now = new Date();
+  const utcToday = now.toISOString().slice(0, 10);
+  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const todaySet = new Set([utcToday, localToday]);
+
+  const yestUtc = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const yestLocalObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yestLocal = `${yestLocalObj.getFullYear()}-${String(yestLocalObj.getMonth() + 1).padStart(2, '0')}-${String(yestLocalObj.getDate()).padStart(2, '0')}`;
+  const yesterdaySet = new Set([yestUtc, yestLocal]);
+  yesterdaySet.delete(utcToday);
+  yesterdaySet.delete(localToday);
+
+  const dayOfWeek = (now.getDay() + 6) % 7;
+  const startOfWeekObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek);
+  const weekStartStr = `${startOfWeekObj.getFullYear()}-${String(startOfWeekObj.getMonth() + 1).padStart(2, '0')}-${String(startOfWeekObj.getDate()).padStart(2, '0')}`;
+
+  const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const yearStartStr = `${now.getFullYear()}-01-01`;
+
+  return { todaySet, yesterdaySet, weekStartStr, monthStartStr, yearStartStr, now, todayStr: utcToday, yesterdayStr: yestUtc };
+}
+
+function parseRateValue(val) {
+  if (val === undefined || val === null || val === '' || typeof val === 'boolean') return undefined;
+  if (typeof val === 'number') return Number.isFinite(val) && val >= 0 ? val : undefined;
+  let s = String(val).trim();
+  if (!s || /^(-|—|n\/?a|null|undefined)$/i.test(s)) return undefined;
+  if (!s.includes('.') && /^[+-]?[$€£¥₹]?\s*\d+,\d+(?:\s*[A-Za-z]{0,5})?$/.test(s)) {
+    s = s.replace(',', '.');
+  } else {
+    s = s.replace(/,/g, '');
+  }
+  const m = s.match(/[-+]?\d+(?:\.\d+)?/);
+  if (!m) return undefined;
+  const num = parseFloat(m[0]);
+  return Number.isFinite(num) && num >= 0 ? num : undefined;
+}
+
+function isLikelyRateToken(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 && raw <= 50;
+  const s = String(raw ?? '').trim();
+  if (!s || s.length > 24) return false;
+  if (/\d{4}-\d{2}-\d{2}|:\d{2}|\d+\.\d+\.\d+\.\d+/.test(s)) return false;
+  if (/^\+?\d{6,}$/.test(s.replace(/[\s()-]/g, ''))) return false;
+  const num = parseRateValue(s);
+  return num !== undefined && num >= 0 && num <= 50;
+}
+
+function extractCrApiRate(row) {
+  if (!row) return undefined;
+  if (Array.isArray(row)) {
+    if (row.length === 5 && /^\+?\d{6,16}$/.test(String(row[1] || '').trim().replace(/[\s()-]/g, '')) && isLikelyRateToken(row[4])) {
+      return parseRateValue(row[4]);
+    }
+    for (let i = 5; i < row.length; i++) {
+      if (isLikelyRateToken(row[i])) {
+        const val = parseRateValue(row[i]);
+        if (val !== undefined && val > 0) return val;
+      }
+    }
+    for (let i = 5; i < row.length; i++) {
+      if (isLikelyRateToken(row[i])) {
+        const val = parseRateValue(row[i]);
+        if (val !== undefined) return val;
+      }
+    }
+    return undefined;
+  }
+  if (typeof row === 'object') {
+    const keys = [
+      'company_rate', 'company_payout', 'my_payout', 'payout', 'payout_rate',
+      'rate', 'price', 'cost', 'amount', 'sms_rate', 'carrier_rate',
+      'buy_rate', 'sell_rate', 'client_payout', 'agent_payout',
+      'earning', 'revenue', 'usd', 'fee', 'value'
+    ];
+    let zeroFallback;
+    const lowerMap = new Map();
+    for (const k of Object.keys(row)) {
+      lowerMap.set(k.toLowerCase(), row[k]);
+    }
+    for (const k of keys) {
+      const rawVal = row[k] !== undefined ? row[k] : lowerMap.get(k);
+      const parsed = parseRateValue(rawVal);
+      if (parsed !== undefined) {
+        if (parsed > 0) return parsed;
+        if (zeroFallback === undefined) zeroFallback = parsed;
+      }
+    }
+    return zeroFallback;
+  }
+  return undefined;
+}
+
+function getRangeCompanyCost(rng) {
+  if (!rng) return 0;
+  const candidates = [rng.company_cost, rng.cost, rng.buy_rate, rng.carrier_rate, rng.company_rate];
+  for (const c of candidates) {
+    const v = parseRateValue(c);
+    if (v !== undefined && v > 0) return v;
+  }
+  return 0;
+}
+
+// ── Master 3-Payterm System (Weekly 7/3, Biweekly 15/3, Monthly 30/5 {W}) ──
+const DEFAULT_PAYTERMS = ['Weekly', 'Biweekly', 'Monthly'];
+
+const PAYTERM_DEFINITIONS = {
+  Weekly: {
+    key: 'Weekly',
+    code: '7/3',
+    label: 'Weekly (7/3)',
+    cycle_days: 7,
+    hold_days: 3,
+    schedule: 'weekly7_3',
+    description: 'Weekly payment · 3 day hold'
+  },
+  Biweekly: {
+    key: 'Biweekly',
+    code: '15/3',
+    label: 'Biweekly (15/3)',
+    cycle_days: 15,
+    hold_days: 3,
+    schedule: 'biweekly15_3',
+    description: '2 weeks payment · 3 day hold'
+  },
+  Monthly: {
+    key: 'Monthly',
+    code: '30/5 {W}',
+    label: 'Monthly (30/5) {W}',
+    cycle_days: 30,
+    hold_days: 5,
+    schedule: 'monthly30_5',
+    description: 'Monthly payment · 5 day hold'
+  }
+};
+
+function getPaytermMeta(term) {
+  const norm = normalizePaytermKey(term || 'Weekly');
+  if (PAYTERM_DEFINITIONS[norm]) return PAYTERM_DEFINITIONS[norm];
+  return PAYTERM_DEFINITIONS.Weekly;
+}
+
+function getMasterPayterms() {
+  try {
+    const settings = readDb('settings');
+    if (settings && Array.isArray(settings.payterms) && settings.payterms.length > 0) {
+      return settings.payterms;
+    }
+  } catch (e) {}
+  return [...DEFAULT_PAYTERMS];
+}
+
+function normalizePaytermKey(k) {
+  if (!k || typeof k !== 'string') return k;
+  const s = k.trim();
+  const sl = s.toLowerCase().replace(/\s+/g, ' ');
+  if (sl === 'weekly' || sl === '7/3' || sl === 'weekly 7/3' || sl === 'weekly (7/3)') return 'Weekly';
+  if (sl === 'biweekly' || sl === 'bi-weekly' || sl === 'bi weekly' || sl === '15/3' || sl === 'biweekly 15/3' || sl === 'biweekly (15/3)') return 'Biweekly';
+  if (sl === 'monthly' || sl === '30/5' || sl === '30/5 {w}' || sl === 'monthly 30/5' || sl === 'monthly (30/5)' || sl === 'monthly 30/5 {w}' || sl === 'monthly (30/5) {w}') return 'Monthly';
+  return s;
+}
+
+function migrateLegacyPayterm(k) {
+  if (!k || typeof k !== 'string') return 'Weekly';
+  const norm = normalizePaytermKey(k);
+  if (DEFAULT_PAYTERMS.includes(norm)) return norm;
+  const sl = k.trim().toLowerCase();
+  if (['1/1', '7/1', '7/7', 'daily', 'weekly (7/1)'].includes(sl)) return 'Weekly';
+  if (['15/1', '15/15', '15/30', 'bi-weekly'].includes(sl)) return 'Biweekly';
+  if (['30/1', '30/15', '30/30', '30/45', '30/60', 'monthly60', 'monthly10', '30/10', 'monthly (30/30)', 'monthly (10th fixed)', 'monthly10 (10th fixed)', '10th'].includes(sl)) return 'Monthly';
+  return norm;
+}
+
+function isValidPayterm(term) {
+  if (!term || typeof term !== 'string') return false;
+  const s = term.trim();
+  const list = getMasterPayterms();
+  const norm = normalizePaytermKey(s);
+  return list.includes(s) || list.includes(norm);
+}
+
+function runPaytermMigration() {
+  try {
+    // 1. Settings -> clean up legacy extra payterms to the 3 active terms
+    let settings = readDb('settings');
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
+    let settingsChanged = false;
+    if (!settings.payterms || !Array.isArray(settings.payterms) || settings.payterms.length === 0) {
+      settings.payterms = [...DEFAULT_PAYTERMS];
+      settingsChanged = true;
+    } else {
+      const migrated = Array.from(new Set(settings.payterms.map(migrateLegacyPayterm).filter(Boolean)));
+      if (JSON.stringify(migrated) !== JSON.stringify(settings.payterms)) {
+        settings.payterms = migrated;
+        settingsChanged = true;
+      }
+    }
+    if (settingsChanged) writeDb('settings', settings);
+
+    // 2. SMS Ranges -> migrate payterms object & default payterm cleanly
+    let ranges = readDb('sms_ranges') || [];
+    let rangesChanged = false;
+    ranges.forEach(r => {
+      if (r.payterms && typeof r.payterms === 'object') {
+        const newPts = {};
+        for (const [k, v] of Object.entries(r.payterms)) {
+          const normK = migrateLegacyPayterm(k);
+          if (newPts[normK] === undefined) newPts[normK] = v;
+        }
+        if (JSON.stringify(newPts) !== JSON.stringify(r.payterms)) {
+          r.payterms = newPts;
+          rangesChanged = true;
+        }
+      }
+      if (r.payterm) {
+        const norm = migrateLegacyPayterm(r.payterm);
+        if (norm !== r.payterm) {
+          r.payterm = norm;
+          rangesChanged = true;
+        }
+      }
+    });
+    if (rangesChanged) writeDb('sms_ranges', ranges);
+
+    // 3. Numbers -> migrate payterm & client_payterm cleanly
+    let numbers = readDb('numbers') || [];
+    let numbersChanged = false;
+    numbers.forEach(n => {
+      if (n.payterm) {
+        const norm = migrateLegacyPayterm(n.payterm);
+        if (norm !== n.payterm) { n.payterm = norm; numbersChanged = true; }
+      }
+      if (n.client_payterm) {
+        const norm = migrateLegacyPayterm(n.client_payterm);
+        if (norm !== n.client_payterm) { n.client_payterm = norm; numbersChanged = true; }
+      }
+    });
+    if (numbersChanged) writeDb('numbers', numbers);
+  } catch (err) {
+    console.error('Payterm migration error:', err);
+  }
+}
+
+function getRangeAgentRate(rng, payterm = 'Weekly') {
+  if (!rng) return 0;
+  const normPt = normalizePaytermKey(payterm);
+  if (rng.payterms && typeof rng.payterms === 'object') {
+    if (rng.payterms[normPt] !== undefined && rng.payterms[normPt] !== 'NA' && !isNaN(Number(rng.payterms[normPt]))) {
+      return Number(rng.payterms[normPt]);
+    }
+    if (rng.payterms[payterm] !== undefined && rng.payterms[payterm] !== 'NA' && !isNaN(Number(rng.payterms[payterm]))) {
+      return Number(rng.payterms[payterm]);
+    }
+    if (normPt === 'Weekly') {
+      const v = rng.payterms['Weekly'] ?? rng.payterms['7/3'];
+      if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
+    }
+    if (normPt === 'Biweekly') {
+      const v = rng.payterms['Biweekly'] ?? rng.payterms['15/3'] ?? rng.payterms['Weekly'];
+      if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
+    }
+    if (normPt === 'Monthly') {
+      const v = rng.payterms['Monthly'] ?? rng.payterms['30/5'] ?? rng.payterms['Biweekly'] ?? rng.payterms['Weekly'];
+      if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
+    }
+    if (rng.payterms['Weekly'] !== undefined && rng.payterms['Weekly'] !== 'NA' && !isNaN(Number(rng.payterms['Weekly']))) {
+      return Number(rng.payterms['Weekly']);
+    }
+    for (const v of Object.values(rng.payterms)) {
+      if (v !== 'NA' && v !== undefined && v !== null && !isNaN(Number(v)) && Number(v) > 0) {
+        return Number(v);
+      }
+    }
+  }
+  if (rng.payout !== undefined && rng.payout !== null && !isNaN(Number(rng.payout))) return Number(rng.payout);
+  if (rng.sell_rate !== undefined && rng.sell_rate !== null && !isNaN(Number(rng.sell_rate))) return Number(rng.sell_rate);
+  return 0;
+}
+
+const round2 = v => Math.round((Number(v) || 0) * 100) / 100;
+const round4 = v => Math.round((Number(v) || 0) * 10000) / 10000;
+const round6 = v => Math.round((Number(v) || 0) * 1000000) / 1000000;
+
+function getUsdToPkrRate() {
+  const settings = readDb('settings');
+  if (settings && !Array.isArray(settings)) {
+    const r = Number(settings.usd_to_pkr_rate);
+    if (Number.isFinite(r) && r > 0) return r;
+  }
+  return 280;
+}
+
+function getMinPayoutPkr() {
+  const settings = readDb('settings');
+  if (settings && !Array.isArray(settings)) {
+    if (settings.min_payout_pkr !== undefined && settings.min_payout_pkr !== null && settings.min_payout_pkr !== '') {
+      const mp = Number(settings.min_payout_pkr);
+      if (Number.isFinite(mp) && mp >= 0) return round2(mp);
+    }
+    const usdMin = Number(settings.min_payout || 0);
+    if (Number.isFinite(usdMin) && usdMin > 0) {
+      return round2(usdMin * getUsdToPkrRate());
+    }
+  }
+  return 0;
+}
+
+function safeClientForOwner(c) {
+  if (!c || typeof c !== 'object') return c;
+  return {
+    id: c.id,
+    username: c.username,
+    role: c.role || 'Client',
+    agent_id: c.agent_id ?? null,
+    agent_username: c.agent_username || '',
+    status: c.status || 'active',
+    created: c.created || c.created_at || c.timestamp || '',
+    created_at: c.created_at || c.created || c.timestamp || '',
+    two_fa_enabled: Boolean(c.two_fa_enabled || c.two_fa),
+    alloc_mode: c.alloc_mode || null,
+    alloc_daily_limit: c.alloc_daily_limit ?? null,
+    alloc_total_limit: c.alloc_total_limit ?? null,
+    whitenoise_access: Boolean(c.whitenoise_access),
+    privacy_redacted: true
+  };
+}
+
+// ── Whitenoise Isolation, Permission & Monthly10 Helpers ──────────
+function isWhitenoiseText(val) {
+  return typeof val === 'string' && /whitenoise/i.test(val);
+}
+
+function getWhitenoiseProviderTags() {
+  const conns = readDb('whitenoise_connections') || [];
+  const tags = new Set(['whitenoise']);
+  if (Array.isArray(conns)) {
+    for (const c of conns) {
+      if (!c) continue;
+      if (c.provider_tag) tags.add(String(c.provider_tag).trim().toLowerCase());
+      if (c.name) tags.add(String(c.name).trim().toLowerCase());
+    }
+  }
+  return tags;
+}
+
+function buildRangesLookupMap() {
+  const ranges = readDb('sms_ranges') || [];
+  const map = new Map();
+  for (const r of ranges) {
+    if (!r) continue;
+    if (r.id != null) map.set(`id:${Number(r.id)}`, r);
+    const rn = String(r.range_name || r.name || '').trim().toLowerCase();
+    if (rn) map.set(`name:${rn}`, r);
+  }
+  return map;
+}
+
+function normalizeYmd(val) {
+  const s = String(val || '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return Number.isNaN(d.getTime()) ? null : s;
+}
+
+function addDaysYmd(ymd, days) {
+  const clean = normalizeYmd(ymd);
+  if (!clean) return null;
+  const dt = new Date(`${clean}T00:00:00.000Z`);
+  dt.setUTCDate(dt.getUTCDate() + (parseInt(days, 10) || 0));
+  return dt.toISOString().slice(0, 10);
+}
+
+function getDefaultMonthlyCycle(refDate = new Date()) {
+  const y = refDate.getUTCFullYear();
+  const m = refDate.getUTCMonth();
+  const startDt = new Date(Date.UTC(y, m, 1));
+  const endDt = new Date(Date.UTC(y, m + 1, 0));
+  const clearDt = new Date(Date.UTC(y, m + 1, 5));
+  const start_date = startDt.toISOString().slice(0, 10);
+  const end_date = endDt.toISOString().slice(0, 10);
+  const clear_date = clearDt.toISOString().slice(0, 10);
+  return {
+    start_date,
+    end_date,
+    clear_date,
+    label: `${start_date} to ${end_date}`
+  };
+}
+
+function normalizeMonthlyCycleInput(raw, fallbackRef = new Date()) {
+  const def = getDefaultMonthlyCycle(fallbackRef);
+  if (!raw || typeof raw !== 'object') return def;
+  const start_date = normalizeYmd(raw.start_date) || def.start_date;
+  let end_date = normalizeYmd(raw.end_date) || def.end_date;
+  if (end_date < start_date) end_date = start_date;
+  let clear_date = normalizeYmd(raw.clear_date) || addDaysYmd(end_date, 5) || def.clear_date;
+  if (clear_date < end_date) clear_date = end_date;
+  const label = String(raw.label || '').trim() || `${start_date} to ${end_date}`;
+  return { start_date, end_date, clear_date, label };
+}
+
+function getMonthlyCycleConfig(refDate = new Date()) {
+  const settings = readDb('settings');
+  const raw = (settings && !Array.isArray(settings) && settings.monthly_cycle) ? settings.monthly_cycle : null;
+  const cfg = normalizeMonthlyCycleInput(raw, refDate);
+  const todayYmd = refDate.toISOString().slice(0, 10);
+  return {
+    ...cfg,
+    is_cleared_window: todayYmd >= cfg.clear_date
+  };
+}
+
+function computeMonthlyClearIso(timestampIso, refDate = new Date()) {
+  const cfg = getMonthlyCycleConfig(refDate);
+  const tsStr = String(timestampIso || '').trim();
+  const tsYmd = normalizeYmd(tsStr.replace('T', ' ').slice(0, 10)) || refDate.toISOString().slice(0, 10);
+  if (tsYmd >= cfg.start_date && tsYmd <= cfg.end_date) {
+    return `${cfg.clear_date}T00:00:00.000Z`;
+  }
+  const dt = new Date(`${tsYmd}T00:00:00.000Z`);
+  if (!Number.isNaN(dt.getTime())) {
+    const clearDt = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 5));
+    return clearDt.toISOString();
+  }
+  return `${cfg.clear_date}T00:00:00.000Z`;
+}
+
+function phoneDigitsVariantsMatch(storedRaw, queryRaw) {
+  const stored = String(storedRaw || '').replace(/\D/g, '');
+  const q = String(queryRaw || '').replace(/\D/g, '');
+  if (!stored || !q) return false;
+  if (stored === q || stored.includes(q)) return true;
+  const qNo00 = q.replace(/^00+/, '');
+  const qNo0 = qNo00.replace(/^0+/, '');
+  if (qNo00.length >= 6 && (stored === qNo00 || stored.endsWith(qNo00) || stored.includes(qNo00))) return true;
+  if (qNo0.length >= 6 && (stored === qNo0 || stored.endsWith(qNo0) || stored.includes(qNo0))) return true;
+  const sNo0 = stored.replace(/^0+/, '');
+  if (sNo0.length >= 6 && qNo0.length >= 6 && (sNo0.endsWith(qNo0) || qNo0.endsWith(sNo0))) return true;
+  return false;
+}
+
+function maskProviderLabel(val, isOwner = false, wnTags = null) {
+  const str = String(val || '');
+  if (isOwner) return str;
+  const trimmed = str.trim();
+  if (!trimmed) return '';
+  const tags = wnTags || getWhitenoiseProviderTags();
+  if (isWhitenoiseText(trimmed) || tags.has(trimmed.toLowerCase())) {
+    return 'Carrier 2';
+  }
+  return str;
+}
+
+function scrubWhitenoiseName(val, isOwner = false) {
+  const str = String(val || '');
+  if (isOwner || !str) return str;
+  return str.replace(/whitenoise/ig, 'Monthly');
+}
+
+function sanitizeNumberForRole(numObj, isOwner = false, wnTags = null) {
+  if (!numObj || typeof numObj !== 'object' || isOwner) return numObj;
+  const copy = { ...numObj };
+  const tags = wnTags || getWhitenoiseProviderTags();
+  if (copy.provider) copy.provider = maskProviderLabel(copy.provider, false, tags);
+  if (copy.company) copy.company = maskProviderLabel(copy.company, false, tags);
+  if (copy.source && isWhitenoiseText(copy.source)) copy.source = 'monthly_route';
+  if (copy.range_name) copy.range_name = scrubWhitenoiseName(copy.range_name, false);
+  if (copy.range_label) copy.range_label = scrubWhitenoiseName(copy.range_label, false);
+  if (copy.range) copy.range = scrubWhitenoiseName(copy.range, false);
+  if (copy.panel_name && (isWhitenoiseText(copy.panel_name) || tags.has(String(copy.panel_name).trim().toLowerCase()))) {
+    copy.panel_name = 'Carrier 2';
+  }
+  return copy;
+}
+
+function isWhitenoiseRecord(obj, rangesMap = null, wnTags = null) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (obj.is_whitenoise === true) return true;
+  if (String(obj.source || '').trim().toLowerCase() === 'whitenoise') return true;
+  if (obj.whitenoise_sms_id != null && obj.whitenoise_sms_id !== '') return true;
+  const tags = wnTags || getWhitenoiseProviderTags();
+  const candidates = [obj.provider, obj.panel_name, obj.range_name, obj.range_label, obj.range, obj.name];
+  for (const c of candidates) {
+    const s = String(c || '').trim().toLowerCase();
+    if (!s) continue;
+    if (s.includes('whitenoise') || tags.has(s)) return true;
+  }
+  if (rangesMap) {
+    let linked = null;
+    if (obj.range_id != null) linked = rangesMap.get(`id:${Number(obj.range_id)}`);
+    if (!linked && (obj.range_name || obj.range)) {
+      linked = rangesMap.get(`name:${String(obj.range_name || obj.range).trim().toLowerCase()}`);
+    }
+    if (linked && linked !== obj) {
+      return isWhitenoiseRecord(linked, null, tags);
+    }
+  }
+  return false;
+}
+
+function hasWhitenoiseAccess(userOrRef) {
+  if (!userOrRef) return false;
+  const role = normRole(userOrRef.role);
+  if (role === 'owner') return true;
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    const ag = agents.find(a => Number(a.id) === Number(userOrRef.id) || (userOrRef.username && String(a.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
+    return Boolean(ag ? ag.whitenoise_access : userOrRef.whitenoise_access);
+  }
+  if (role === 'client') {
+    const clients = readDb('clients') || [];
+    const cl = clients.find(c => Number(c.id) === Number(userOrRef.id) || (userOrRef.username && String(c.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
+    if (!cl || !cl.whitenoise_access) return false;
+    const agId = cl.agent_id || userOrRef.agent_id;
+    if (agId) {
+      const agents = readDb('agents') || [];
+      const ag = agents.find(a => Number(a.id) === Number(agId));
+      if (!ag || !ag.whitenoise_access) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date()) {
+  const nowMs = refDate.getTime();
+  const sRole = normRole(role);
+  const monthlyCfg = getMonthlyCycleConfig(refDate);
+  const byTerm = {
+    Weekly: { ...PAYTERM_DEFINITIONS.Weekly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null },
+    Biweekly: { ...PAYTERM_DEFINITIONS.Biweekly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null },
+    Monthly: { ...PAYTERM_DEFINITIONS.Monthly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null }
+  };
+  let clearedUsd = 0, heldUsd = 0, clearedPkr = 0, heldPkr = 0;
+  let wnUsd = 0, wnHeldUsd = 0, wnClearedUsd = 0, wnPkr = 0, wnHeldPkr = 0, wnClearedPkr = 0;
+  let wnSmsCount = 0;
+  let nextReleaseMs = null;
+
+  for (const s of (smsList || [])) {
+    if (!s) continue;
+    const isWn = Boolean(
+      s.is_whitenoise ||
+      String(s.source || '').toLowerCase() === 'whitenoise' ||
+      String(s.provider || '').toLowerCase().includes('whitenoise') ||
+      String(s.payout_schedule || '').toLowerCase() === 'monthly30_5'
+    );
+    const rawPt = isWn ? 'Monthly' : migrateLegacyPayterm(s.payterm || s.payterms || 'Weekly');
+    const ptKey = PAYTERM_DEFINITIONS[rawPt] ? rawPt : 'Weekly';
+    const meta = PAYTERM_DEFINITIONS[ptKey];
+
+    const amtUsd = sRole === 'client'
+      ? (Number(s.client_amount) || 0)
+      : (sRole === 'agent' ? (Number(s.agent_amount) || 0) : (Number(s.owner_amount) || 0));
+    const amtPkr = sRole === 'client'
+      ? (s.client_amount_pkr != null ? Number(s.client_amount_pkr) : amtUsd * (Number(s.fx_usd_to_pkr) || fxRate))
+      : amtUsd * fxRate;
+
+    const tsMs = s.timestamp ? new Date(s.timestamp).getTime() : nowMs;
+    const tsYmd = normalizeYmd(String(s.timestamp || s.date || '').replace('T', ' ').slice(0, 10));
+    let clearsMs;
+    if (isWn || ptKey === 'Monthly') {
+      if (tsYmd && tsYmd >= monthlyCfg.start_date && tsYmd <= monthlyCfg.end_date) {
+        clearsMs = new Date(`${monthlyCfg.clear_date}T00:00:00.000Z`).getTime();
+      } else {
+        clearsMs = s.clears_at ? new Date(s.clears_at).getTime() : new Date(computeMonthlyClearIso(s.timestamp || s.date, refDate)).getTime();
+      }
+    } else {
+      clearsMs = s.clears_at ? new Date(s.clears_at).getTime() : ((Number.isFinite(tsMs) ? tsMs : nowMs) + meta.hold_days * 86400000);
+    }
+    const isCleared = nowMs >= clearsMs;
+
+    const b = byTerm[ptKey];
+    b.sms_count += 1;
+    if (isCleared) {
+      clearedUsd += amtUsd;
+      clearedPkr += amtPkr;
+      b.cleared_usd += amtUsd;
+      b.cleared_pkr += amtPkr;
+      if (isWn) { wnClearedUsd += amtUsd; wnClearedPkr += amtPkr; }
+    } else {
+      heldUsd += amtUsd;
+      heldPkr += amtPkr;
+      b.held_usd += amtUsd;
+      b.held_pkr += amtPkr;
+      if (isWn) { wnHeldUsd += amtUsd; wnHeldPkr += amtPkr; }
+      const relIso = new Date(clearsMs).toISOString();
+      if (!b.next_release_at || relIso < b.next_release_at) b.next_release_at = relIso;
+      if (nextReleaseMs === null || clearsMs < nextReleaseMs) nextReleaseMs = clearsMs;
+    }
+    if (isWn) {
+      wnSmsCount += 1;
+      wnUsd += amtUsd;
+      wnPkr += amtPkr;
+    }
+  }
+
+  for (const k of Object.keys(byTerm)) {
+    byTerm[k].cleared_usd = round4(byTerm[k].cleared_usd);
+    byTerm[k].held_usd = round4(byTerm[k].held_usd);
+    byTerm[k].cleared_pkr = round2(byTerm[k].cleared_pkr);
+    byTerm[k].held_pkr = round2(byTerm[k].held_pkr);
+  }
+
+  return {
+    cleared_usd: round4(clearedUsd),
+    held_usd: round4(heldUsd),
+    cleared_pkr: round2(clearedPkr),
+    held_pkr: round2(heldPkr),
+    whitenoise_usd: round4(wnUsd),
+    whitenoise_held_usd: round4(wnHeldUsd),
+    whitenoise_cleared_usd: round4(wnClearedUsd),
+    whitenoise_pkr: round2(wnPkr),
+    whitenoise_held_pkr: round2(wnHeldPkr),
+    whitenoise_cleared_pkr: round2(wnClearedPkr),
+    whitenoise_sms_count: wnSmsCount,
+    monthly_cycle: monthlyCfg,
+    next_release_date: nextReleaseMs ? new Date(nextReleaseMs).toISOString().slice(0, 10) : monthlyCfg.clear_date,
+    by_payterm: byTerm
+  };
+}
+
+function getMonthly30_5ScheduleInfo(holdSummary = null, refDate = new Date()) {
+  const cfg = (holdSummary && holdSummary.monthly_cycle) ? holdSummary.monthly_cycle : getMonthlyCycleConfig(refDate);
+  const mHold = holdSummary && holdSummary.by_payterm ? holdSummary.by_payterm.Monthly : null;
+  return {
+    payterm: 'Monthly',
+    code: '30/5 {W}',
+    label: 'Monthly (30/5) {W}',
+    cycle_days: 30,
+    hold_days: 5,
+    schedule: 'monthly30_5',
+    cycle_start: cfg.start_date,
+    cycle_end: cfg.end_date,
+    clear_date: cfg.clear_date,
+    cycle_label: cfg.label,
+    is_cleared_window: Boolean(cfg.is_cleared_window),
+    sms_count: holdSummary ? (holdSummary.whitenoise_sms_count || 0) : 0,
+    next_release_date: cfg.clear_date || (mHold && mHold.next_release_at ? mHold.next_release_at.slice(0, 10) : cfg.clear_date),
+    held_usd: holdSummary ? holdSummary.whitenoise_held_usd : 0,
+    cleared_usd: holdSummary ? holdSummary.whitenoise_cleared_usd : 0,
+    held_pkr: holdSummary ? holdSummary.whitenoise_held_pkr : 0,
+    cleared_pkr: holdSummary ? holdSummary.whitenoise_cleared_pkr : 0
+  };
+}
+
+function normalizeAllowedQuantities(raw) {
+  const arr = Array.isArray(raw)
+    ? raw
+    : (typeof raw === 'string' ? raw.split(/[\s,;]+/) : []);
+  const clean = Array.from(new Set(
+    arr.map(x => parseInt(x, 10)).filter(n => Number.isFinite(n) && n > 0 && n <= 10000)
+  )).sort((a, b) => a - b);
+  return clean.length ? clean : [25, 50];
+}
+
+function getAllAgentClientRates() {
+  const list = readDb('agent_client_rates');
+  return Array.isArray(list) ? list : [];
+}
+
+function getAgentClientRates(agentId) {
+  const aid = Number(agentId);
+  if (!aid) return [];
+  return getAllAgentClientRates().filter(r => r && Number(r.agent_id) === aid);
+}
+
+function findAgentClientRate(agentId, rangeId, rangeName = '') {
+  const aid = Number(agentId);
+  if (!aid) return null;
+  const rows = getAgentClientRates(aid);
+  if (rangeId != null && rangeId !== '') {
+    const byId = rows.find(r => Number(r.range_id) === Number(rangeId));
+    if (byId) return byId;
+  }
+  const cleanName = String(rangeName || '').trim().toLowerCase();
+  if (cleanName) {
+    const byName = rows.find(r => String(r.range_name || '').trim().toLowerCase() === cleanName);
+    if (byName) return byName;
+  }
+  return null;
+}
+
+function getAgentRangeClientPkrRate(acr, payterm = 'Weekly') {
+  if (!acr) return 0;
+  if (acr.payterms && typeof acr.payterms === 'object') {
+    const normPt = normalizePaytermKey(payterm);
+    if (acr.payterms[normPt] !== undefined && Number(acr.payterms[normPt]) > 0) return round2(acr.payterms[normPt]);
+    if (acr.payterms[payterm] !== undefined && Number(acr.payterms[payterm]) > 0) return round2(acr.payterms[payterm]);
+  }
+  return round2(acr.client_rate_pkr || 0);
+}
+
+function getAgentClientWeeklyPkrStats(agentId) {
+  const aid = Number(agentId);
+  const agents = readDb('agents') || [];
+  const ag = agents.find(a => Number(a.id) === aid) || {};
+  const targetPkr = Math.max(0, round2(ag.weekly_pkr_target || 0));
+  const enforceMode = ag.weekly_pkr_enforce_mode === 'block' ? 'block' : 'warn';
+
+  const now = new Date();
+  const dayOffset = (now.getUTCDay() + 6) % 7;
+  const mondayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - dayOffset, 0, 0, 0, 0));
+  const weekStartIso = mondayUtc.toISOString();
+
+  const fx = getUsdToPkrRate();
+  const sms = readSmsWithArchive();
+  let usedPkr = 0;
+  for (const s of sms) {
+    if (!s || Number(s.agent_id) !== aid || !s.client_id) continue;
+    const ts = String(s.timestamp || s.date || '');
+    if (ts < weekStartIso) continue;
+    if (s.client_amount_pkr != null && Number(s.client_amount_pkr) > 0) {
+      usedPkr += Number(s.client_amount_pkr);
+    } else if (s.client_amount != null && Number(s.client_amount) > 0) {
+      usedPkr += Number(s.client_amount) * (Number(s.fx_usd_to_pkr) || fx);
+    }
+  }
+  usedPkr = round2(usedPkr);
+  const remainingPkr = targetPkr > 0 ? Math.max(0, round2(targetPkr - usedPkr)) : null;
+  const pct = targetPkr > 0 ? Math.min(100, Math.round((usedPkr / targetPkr) * 1000) / 10) : 0;
+
+  return {
+    weekly_pkr_target: targetPkr,
+    weekly_pkr_used: usedPkr,
+    weekly_pkr_remaining: remainingPkr,
+    weekly_pkr_percent: pct,
+    weekly_pkr_enforce_mode: enforceMode,
+    week_start: weekStartIso.slice(0, 10)
+  };
+}
+
+function resolveClientRatePair({ agentId, rangeId, rangeName, payterm = 'Weekly', agentRateUsd = 0, explicitClientRate = null, clientRecord = null }) {
+  const fx = getUsdToPkrRate();
+  if (explicitClientRate !== undefined && explicitClientRate !== null && explicitClientRate !== '' && !isNaN(Number(explicitClientRate))) {
+    const usd = round6(explicitClientRate);
+    return {
+      error: (agentRateUsd > 0 && usd >= agentRateUsd)
+        ? `Client rate ($${usd}) must be strictly less than agent rate ($${agentRateUsd}) for this range.`
+        : null,
+      client_rate: usd,
+      client_rate_pkr: round2(usd * fx),
+      client_currency: 'PKR',
+      fx_usd_to_pkr: fx,
+      source: 'explicit'
+    };
+  }
+  const acr = agentId ? findAgentClientRate(agentId, rangeId, rangeName) : null;
+  if (acr && acr.published !== false && Number(acr.client_rate_pkr) > 0) {
+    const pkr = getAgentRangeClientPkrRate(acr, payterm);
+    let usd = round6(pkr / fx);
+    if (agentRateUsd > 0 && usd >= agentRateUsd) {
+      usd = round6(agentRateUsd * 0.9999);
+    }
+    return {
+      error: null,
+      client_rate: usd,
+      client_rate_pkr: pkr,
+      client_currency: 'PKR',
+      fx_usd_to_pkr: fx,
+      source: 'agent_client_rates'
+    };
+  }
+  let usd = 0;
+  if (clientRecord && clientRecord.client_rate !== undefined && clientRecord.client_rate !== null && Number(clientRecord.client_rate) > 0 && (agentRateUsd <= 0 || Number(clientRecord.client_rate) < agentRateUsd)) {
+    usd = round6(clientRecord.client_rate);
+  } else if (agentRateUsd > 0) {
+    usd = Math.round(agentRateUsd * 0.9 * 10000) / 10000;
+  }
+  return {
+    error: null,
+    client_rate: usd,
+    client_rate_pkr: round2(usd * fx),
+    client_currency: 'PKR',
+    fx_usd_to_pkr: fx,
+    source: 'fallback'
+  };
+}
+
+
+function ingestSms({
+  sender = '',
+  to_number = '',
+  message = '',
+  otp = '',
+  sms_id = '',
+  company = '',
+  provider: customProvider = '',
+  range: customRange = '',
+  country: customCountry = '',
+  source = 'api',
+  panel_id = null,
+  panel_name = '',
+  ext_key = '',
+  timestamp = null,
+  currency: customCurrency = '',
+  payout: customPayout = undefined,
+  company_rate: customCompanyRate = undefined,
+  agent_rate: customAgentRate = undefined,
+  client_rate: customClientRate = undefined,
+  whitenoise_sms_id = null,
+  conversion_sent = false,
+  conversion_at = null
+}) {
+  try {
+    const cleanTo = String(to_number || '').trim();
+    const cleanMsg = String(message || '').trim();
+    if (!cleanTo || !cleanMsg) {
+      return { status: 'error', error: 'Missing number or message' };
+    }
+
+    const { byDigits, byRaw } = getIndexedNumbers();
+    const digits = cleanTo.replace(/\D/g, '');
+    let numberRec = byRaw.get(cleanTo) || byDigits.get(digits) || null;
+    const assignedNumberRec = (numberRec && (numberRec.agent_id || numberRec.client_id)) ? numberRec : null;
+
+    const smsLog = readDb('sms_log') || [];
+    const dedupeKey = ext_key || (sms_id ? `smsid-${sms_id}` : '');
+    if (dedupeKey && smsIndexHas(smsLog, dedupeKey, sms_id)) {
+      return { status: 'ok', duplicate: true, sms_id: sms_id || dedupeKey };
+    }
+
+    if (!numberRec && digits.length >= 7) {
+      const allNums = readDb('numbers') || [];
+      numberRec = allNums.find(n => n && n.number && phoneDigitsVariantsMatch(n.number, digits)) || null;
+    }
+
+    const ranges = readDb('sms_ranges') || [];
+    const rateCard = readDb('rate_card') || [];
+
+    let rng = null;
+    // 1. Prioritize range lookup by range_name
+    if (numberRec && numberRec.range_name) {
+      const rn = String(numberRec.range_name).trim().toLowerCase();
+      rng = ranges.find(r => (r.range_name && String(r.range_name).trim().toLowerCase() === rn) || (r.name && String(r.name).trim().toLowerCase() === rn));
+    }
+    // 2. Fallback to range_id
+    if (!rng && numberRec && numberRec.range_id) {
+      rng = ranges.find(r => Number(r.id) === Number(numberRec.range_id));
+    }
+    // 3. Fallback to prefix
+    if (!rng && digits) {
+      rng = ranges.find(r => (r.prefix && digits.startsWith(String(r.prefix).replace(/\D/g, ''))) ||
+                             (r.dial_code && digits.startsWith(String(r.dial_code).replace(/\D/g, ''))));
+    }
+
+    const detectedCountry = detectCountry(cleanTo);
+    const cleanCustomCountry = cleanSmsMetaVal(customCountry);
+    const country = (rng && rng.country) || (numberRec && numberRec.country) || (cleanCustomCountry && cleanCustomCountry !== 'International' ? cleanCustomCountry : '') || detectedCountry;
+    const panelFallbackProvider = (source === 'cr_api' || source === 'login_panel') ? (panel_name || company) : '';
+    const rawProvider = (rng && rng.provider) || (numberRec && numberRec.provider) || customProvider || panelFallbackProvider || '';
+    const provider = cleanSmsMetaVal(rawProvider);
+    const rawRange = (rng && (rng.range_name || rng.name)) || (numberRec && (numberRec.range_name || numberRec.range)) || cleanSmsMetaVal(customRange);
+    const fallbackRange = (country && provider && country !== 'International') ? `${country} ${provider}` : (country || '');
+    const rangeLabel = rawRange || fallbackRange;
+
+    // ── STAGE C: Precise Ledger Stamping & Rate Calculations ──
+    // 1. Company Rate (Owner buy cost: custom override -> live CR API/panel rate -> number override -> range -> rate card -> custom payout fallback)
+    let company_rate = 0;
+    const parsedCustomCompanyRate = parseRateValue(customCompanyRate);
+    const parsedCustomPayout = parseRateValue(customPayout);
+    if (parsedCustomCompanyRate != null && parsedCustomCompanyRate > 0) {
+      company_rate = round6(parsedCustomCompanyRate);
+    }
+    if (!company_rate && (source === 'cr_api' || source === 'login_panel') && parsedCustomPayout != null && parsedCustomPayout > 0) {
+      company_rate = round6(parsedCustomPayout);
+    }
+    if (!company_rate && numberRec) {
+      const numCost = parseRateValue(numberRec.company_rate) ?? parseRateValue(numberRec.company_cost) ?? parseRateValue(numberRec.cost) ?? parseRateValue(numberRec.carrier_rate);
+      if (numCost != null && numCost > 0) {
+        company_rate = round6(numCost);
+      }
+    }
+    if (!company_rate && rng) {
+      company_rate = round6(getRangeCompanyCost(rng));
+    }
+    if (!company_rate) {
+      const rc = rateCard.find(c => c && c.active && (
+        (country && c.country && String(c.country).toLowerCase() === String(country).toLowerCase()) ||
+        (provider && c.provider && String(c.provider).toLowerCase() === String(provider).toLowerCase())
+      ));
+      if (rc && rc.buy_rate != null) company_rate = round6(parseRateValue(rc.buy_rate) || 0);
+    }
+    if (!company_rate && parsedCustomPayout != null && parsedCustomPayout > 0) {
+      company_rate = round6(parsedCustomPayout);
+    }
+
+    // 2. Payterm & Agent Rate (number override -> range -> rate card; Monthly 30/5 {W} locked for Whitenoise)
+    const isWnTraffic = source === 'whitenoise' ||
+      isWhitenoiseRecord({ provider, source, panel_name, range: rangeLabel }) ||
+      isWhitenoiseRecord(rng) ||
+      isWhitenoiseRecord(numberRec);
+    const payterm = isWnTraffic ? 'Monthly' : migrateLegacyPayterm((numberRec && (numberRec.payterm || numberRec.payterms)) || 'Weekly');
+    const ptMeta = getPaytermMeta(payterm);
+    let agent_rate = 0;
+    if (customAgentRate !== undefined && customAgentRate !== null && !isNaN(Number(customAgentRate)) && Number(customAgentRate) > 0) {
+      agent_rate = round6(customAgentRate);
+    }
+    if (!agent_rate && numberRec && numberRec.agent_rate != null && Number(numberRec.agent_rate) > 0) {
+      agent_rate = round6(numberRec.agent_rate);
+    }
+    if (!agent_rate && rng) {
+      agent_rate = round6(getRangeAgentRate(rng, payterm));
+    }
+    if (!agent_rate) {
+      const rc = rateCard.find(c => c && c.active && (
+        (country && c.country && String(c.country).toLowerCase() === String(country).toLowerCase()) ||
+        (provider && c.provider && String(c.provider).toLowerCase() === String(provider).toLowerCase())
+      ));
+      if (rc && rc.sell_rate != null) agent_rate = round6(rc.sell_rate);
+    }
+
+    let resolvedAgentId = numberRec && numberRec.agent_id;
+    let resolvedClientId = numberRec && numberRec.client_id;
+
+    // Check if numberRec.user is a client
+    if (!resolvedClientId && numberRec && numberRec.user && numberRec.user !== 'unallocated') {
+      const c = (readDb('clients') || []).find(x => String(x.username).toLowerCase() === String(numberRec.user).toLowerCase());
+      if (c) resolvedClientId = c.id;
+    }
+
+    if (!resolvedClientId && numberRec && numberRec.client_username) {
+      const c = (readDb('clients') || []).find(x => String(x.username).toLowerCase() === String(numberRec.client_username).toLowerCase());
+      if (c) resolvedClientId = c.id;
+    }
+
+    // Resolve up the chain from client -> agent
+    if (resolvedClientId) {
+      const c = (readDb('clients') || []).find(x => Number(x.id) === Number(resolvedClientId));
+      if (c && !resolvedAgentId && c.agent_id) resolvedAgentId = c.agent_id;
+    }
+
+    if (!resolvedAgentId && numberRec && numberRec.agent_username) {
+      const a = (readDb('agents') || []).find(x => String(x.username).toLowerCase() === String(numberRec.agent_username).toLowerCase());
+      if (a) resolvedAgentId = a.id;
+    }
+
+    const hasClient = Boolean(resolvedClientId);
+    const hasAgent = Boolean(resolvedAgentId);
+
+    // 3. Client Rate (number override / agent_client_rates -> client record -> range/card fallback)
+    const fxUsdToPkr = getUsdToPkrRate();
+    const acrRec = (hasClient && hasAgent)
+      ? findAgentClientRate(resolvedAgentId, (rng && rng.id) || (numberRec && numberRec.range_id), rangeLabel)
+      : null;
+    let client_rate = 0;
+    let client_rate_pkr = 0;
+    if (hasClient) {
+      const hasExplicitNumUsd = numberRec && (numberRec.client_rate != null || numberRec.client_payout != null) && Number(numberRec.client_rate ?? numberRec.client_payout) > 0;
+      const numFromAcr = numberRec && numberRec.rate_source === 'agent_client_rates';
+      if (hasExplicitNumUsd && !numFromAcr) {
+        client_rate = round6(numberRec.client_rate ?? numberRec.client_payout);
+        if (numberRec.client_rate_pkr != null && Number(numberRec.client_rate_pkr) > 0) {
+          client_rate_pkr = round2(numberRec.client_rate_pkr);
+        } else {
+          client_rate_pkr = round2(client_rate * fxUsdToPkr);
+        }
+      } else if (acrRec && acrRec.published !== false && Number(acrRec.client_rate_pkr) > 0) {
+        client_rate_pkr = getAgentRangeClientPkrRate(acrRec, payterm);
+        client_rate = round6(client_rate_pkr / fxUsdToPkr);
+      } else if (numberRec && numberRec.client_rate_pkr != null && Number(numberRec.client_rate_pkr) > 0) {
+        client_rate_pkr = round2(numberRec.client_rate_pkr);
+        client_rate = round6(client_rate_pkr / fxUsdToPkr);
+      }
+      if (!client_rate) {
+        const clients = readDb('clients') || [];
+        const cl = clients.find(c => (resolvedClientId && Number(c.id) === Number(resolvedClientId)) || (numberRec && numberRec.client_username && String(c.username).toLowerCase() === String(numberRec.client_username).toLowerCase()));
+        if (cl && cl.client_rate != null) {
+          client_rate = round6(cl.client_rate);
+        } else {
+          client_rate = agent_rate;
+        }
+        if (!client_rate_pkr) client_rate_pkr = round2(client_rate * fxUsdToPkr);
+      }
+      if (agent_rate > 0 && client_rate > agent_rate) {
+        client_rate = agent_rate;
+      }
+    } else {
+      client_rate = 0;
+      client_rate_pkr = 0;
+    }
+
+    // 4. STRICT 3-TIER LEDGER AMOUNTS (Owner -> Agent -> Client)
+    // Invariant: company_rate === owner_amount + agent_amount + client_amount
+    const client_amount = hasClient ? round6(client_rate) : 0;
+    const client_amount_pkr = hasClient ? round2(client_rate_pkr) : 0;
+    const agent_amount = hasAgent ? (hasClient ? round6(agent_rate - client_rate) : round6(agent_rate)) : 0;
+    const owner_amount = hasAgent ? Math.max(0, round6(company_rate - agent_rate)) : round6(company_rate);
+
+    const finalTimestamp = (source === 'whitenoise' ? parseWhitenoiseTimestamp(timestamp) : null) || normalizeIsoTimestamp(timestamp);
+    const datePart = finalTimestamp.slice(0, 10);
+    const timePart = finalTimestamp.slice(11, 19);
+
+    const cleanHierarchyStr = (val) => {
+      const s = String(val || '').trim();
+      if (!s) return '';
+      const sl = s.toLowerCase();
+      if (['unallocated', 'unassigned', 'direct', 'general', '—', '-', 'unknown', 'none', 'null'].includes(sl)) return '';
+      return s;
+    };
+
+    const appName = (numberRec && numberRec.app) || detectApp(sender, cleanMsg);
+    let agent_username = cleanHierarchyStr(numberRec && (numberRec.agent_username || numberRec.agent));
+    let client_username = cleanHierarchyStr(numberRec && (numberRec.client_username || numberRec.client_name || numberRec.user));
+    if (!agent_username && hasAgent) {
+      const aRec = (readDb('agents') || []).find(a => Number(a.id) === Number(resolvedAgentId));
+      if (aRec) agent_username = cleanHierarchyStr(aRec.username);
+    }
+    if (!client_username && hasClient) {
+      const cRec = (readDb('clients') || []).find(c => Number(c.id) === Number(resolvedClientId));
+      if (cRec) client_username = cleanHierarchyStr(cRec.username);
+    }
+
+    const smsType = 'General';
+    const finalOtp = otp || extractOtp(cleanMsg);
+
+    const entry = {
+      id: nextSmsId(smsLog),
+      number: cleanTo,
+      cli: sender || '',
+      message: cleanMsg,
+      timestamp: finalTimestamp,
+      date: datePart,
+      time: timePart,
+      otp: finalOtp,
+      range_label: rangeLabel,
+      range_name: rangeLabel,
+      range: rangeLabel,
+      country: country || '',
+      provider: provider || '',
+      range_id: rng ? rng.id : null,
+      app: appName,
+      type: smsType,
+      status: 'delivered',
+      cause: 'Success',
+      currency: (rng && rng.currency) || cleanSmsMetaVal(customCurrency) || 'USD',
+      company_rate: company_rate,
+      agent_rate: agent_rate,
+      client_rate: client_rate,
+      client_currency: 'PKR',
+      fx_usd_to_pkr: fxUsdToPkr,
+      client_rate_pkr: client_rate_pkr,
+      client_amount_pkr: client_amount_pkr,
+      payterm: ptMeta.key,
+      payterms: ptMeta.key,
+      payout_schedule: ptMeta.schedule,
+      cycle_days: ptMeta.cycle_days,
+      hold_days: ptMeta.hold_days,
+      clears_at: (isWnTraffic || ptMeta.schedule === 'monthly30_5')
+        ? computeMonthlyClearIso(finalTimestamp)
+        : new Date((new Date(finalTimestamp).getTime() || Date.now()) + ptMeta.hold_days * 86400000).toISOString(),
+      is_whitenoise: isWnTraffic,
+      whitenoise_sms_id: whitenoise_sms_id != null ? whitenoise_sms_id : null,
+      conversion_sent: Boolean(conversion_sent),
+      conversion_at: conversion_at || null,
+      client_amount: client_amount,
+      agent_amount: agent_amount,
+      owner_amount: owner_amount,
+      has_rate: Boolean(company_rate > 0 || agent_rate > 0),
+      no_rate: !(company_rate > 0 || agent_rate > 0),
+      payout: hasClient ? client_amount : (hasAgent ? agent_amount : 0),
+      client_payout: hasClient ? client_amount : 0,
+      agent_payout: hasAgent ? agent_rate : 0,
+      company_payout: company_rate,
+      profit: owner_amount,
+      carrier_revenue: company_rate,
+      payout_cost: round6(agent_rate),
+      admin_profit: owner_amount,
+      agent_id: resolvedAgentId != null ? Number(resolvedAgentId) : null,
+      client_id: resolvedClientId != null ? Number(resolvedClientId) : null,
+      agent_username: agent_username || null,
+      client_username: client_username || null,
+      user: client_username || '',
+      source: source || 'api',
+      panel_id: panel_id || null,
+      panel_name: panel_name || '',
+      sms_id: sms_id || '',
+      company: company || (numberRec ? numberRec.company : '') || '',
+      ext_key: dedupeKey || md5(`${panel_id || 'api'}|${cleanTo}|${finalTimestamp}|${cleanMsg}`)
+    };
+
+    appendSmsLog(entry, smsLog);
+    noteSmsArrival();
+
+    // ── STAGE D: Live Money Flow Balances Update (Strict 3-Tier Waterfall) ──
+    try {
+      const allClients = readDb('clients') || [];
+      const allAgents = readDb('agents') || [];
+      const allUsers = readDb('users') || [];
+
+      // 1. Client balance += client_amount (USD) & balance_pkr += client_amount_pkr (PKR)
+      if (hasClient && (client_amount > 0 || client_amount_pkr > 0)) {
+        const cIdx = allClients.findIndex(c => c && (
+          (client_username && String(c.username).trim().toLowerCase() === String(client_username).trim().toLowerCase()) ||
+          (resolvedClientId && Number(c.id) === Number(resolvedClientId))
+        ));
+        if (cIdx !== -1) {
+          const curBal = Number(allClients[cIdx].balance || 0);
+          allClients[cIdx].balance = Math.round((curBal + client_amount) * 1000000) / 1000000;
+          const curBalPkr = Number(allClients[cIdx].balance_pkr != null ? allClients[cIdx].balance_pkr : round2(curBal * fxUsdToPkr));
+          allClients[cIdx].balance_pkr = round2(curBalPkr + client_amount_pkr);
+          debouncedWriteDb('clients');
+        }
+      }
+
+      // 2. Agent balance += agent_amount
+      if (hasAgent && agent_amount > 0) {
+        const aIdx = allAgents.findIndex(a => a && (
+          (agent_username && String(a.username).trim().toLowerCase() === String(agent_username).trim().toLowerCase()) ||
+          (resolvedAgentId && Number(a.id) === Number(resolvedAgentId))
+        ));
+        if (aIdx !== -1) {
+          const curBal = Number(allAgents[aIdx].balance || 0);
+          allAgents[aIdx].balance = Math.round((curBal + agent_amount) * 1000000) / 1000000;
+          debouncedWriteDb('agents');
+        }
+      }
+
+      // 3. Owner profit += owner_amount
+      if (owner_amount > 0) {
+        const oIdx = allUsers.findIndex(u => u && (
+          (u.role || '').toLowerCase() === 'owner' ||
+          String(u.username || '').toLowerCase() === 'kamran_bhatti'
+        ));
+        if (oIdx !== -1) {
+          const curBal = Number(allUsers[oIdx].balance || 0);
+          allUsers[oIdx].balance = Math.round((curBal + owner_amount) * 1000000) / 1000000;
+          debouncedWriteDb('users');
+        }
+      }
+    } catch (balErr) {
+      console.error('Error updating money flow balances:', balErr);
+    }
+
+    if (numberRec) {
+      numberRec.sms_count = (numberRec.sms_count || 0) + 1;
+      numberRec.last_sms = entry.timestamp;
+      debouncedWriteDb('numbers');
+    }
+
+    if (company) {
+      const accounts = readDb('smpp_accounts') || [];
+      const acc = accounts.find(a => (a.company || '').toLowerCase() === String(company).toLowerCase() ||
+                                     (a.system_id || '').toLowerCase() === String(company).toLowerCase());
+      if (acc) {
+        acc.messages_today = (acc.messages_today || 0) + 1;
+        writeDb('smpp_accounts', accounts);
+      }
+    }
+
+    broadcastWs({
+      type: 'otp',
+      data: entry
+    });
+
+    const live = liveTrafficStats();
+    broadcastWs({
+      type: 'traffic',
+      mps: live.mps,
+      timestamp: new Date().toISOString(),
+      total: smsLog.length,
+      success_rate: live.success_rate
+    });
+
+    return { status: 'ok', logged: true, matched_number: Boolean(numberRec), entry };
+  } catch (err) {
+    console.error('ingestSms error:', err);
+    return { status: 'error', error: err.message };
+  }
+}
+
+const loginPanelsInFlight = new Set();
+
+async function pollSingleLoginPanel(panelId, force = false) {
+  const panels = readDb('login_panels') || [];
+  const panel = panels.find(p => p.id === panelId);
+  if (!panel || (!force && panel.status !== 'running')) return 0;
+  if (loginPanelsInFlight.has(panelId)) {
+    return panel.total_sms || 0;
+  }
+  loginPanelsInFlight.add(panelId);
+  let added = 0;
+
+  try {
+    const scraperScript = path.join(HUMEX_DIR, 'panel_scraper.py');
+    if (!fs.existsSync(scraperScript)) {
+      panel.last_run = new Date().toISOString();
+      panel.last_error = 'Scraper engine not installed';
+      return 0;
+    }
+    const { stdout } = await execFileAsync('python3', [scraperScript, 'poll', JSON.stringify(panel)], { timeout: 60000 });
+    const result = JSON.parse(stdout || '{}');
+
+    if (result.success && Array.isArray(result.rows)) {
+      // Reverse rows so newest unshifts to the top of smsLog
+      const rowsToProcess = [...result.rows].reverse();
+      for (const row of rowsToProcess) {
+        if (!row.number || !row.message) continue;
+        const key = md5(`${panel.id}|${row.number}|${row.date || ''}|${row.message}`);
+        const panelRate = extractCrApiRate(row);
+        const ingestRes = ingestSms({
+          sender: row.cli,
+          to_number: row.number,
+          message: row.message,
+          otp: row.otp || '',
+          timestamp: row.date,
+          range: row.range || row.range_name || '',
+          country: row.country || '',
+          provider: row.provider || panel.name || '',
+          payout: panelRate,
+          source: 'login_panel',
+          panel_id: panel.id,
+          panel_name: panel.name,
+          ext_key: key
+        });
+        if (ingestRes && ingestRes.logged) {
+          added++;
+        }
+      }
+      panel.last_run = new Date().toISOString();
+      panel.last_error = '';
+      panel.total_sms = (panel.total_sms || 0) + added;
+    } else {
+      panel.last_run = new Date().toISOString();
+      panel.last_error = (result && result.error) ? String(result.error).slice(0, 200) : 'Failed to parse table';
+    }
+  } catch (err) {
+    panel.last_run = new Date().toISOString();
+    const errorMsg = err.killed ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
+    panel.last_error = String(errorMsg).slice(0, 200);
+  } finally {
+    loginPanelsInFlight.delete(panelId);
+  }
+
+  const allPanels = readDb('login_panels') || [];
+  const idx = allPanels.findIndex(p => p.id === panelId);
+  if (idx !== -1) {
+    allPanels[idx] = panel;
+    writeDb('login_panels', allPanels);
+  }
+  return added;
+}
+
+async function pollSingleCrApiConnection(connId, force = false) {
+  const conns = readDb('cr_api_connections') || [];
+  const conn = conns.find(c => c.id === connId);
+  if (!conn || (!force && !conn.active)) return 0;
+  let pulled = 0;
+
+  try {
+    const base = conn.panel_url.trim();
+    const sep = base.includes('?') ? '&' : '?';
+    // Use records=100 for reliable fast polling, deduplicating locally via ingestSms
+    const hasTokenParam = /[?&]token=/i.test(base);
+    const hasRecordsParam = /[?&]records=/i.test(base);
+    const pollUrl = hasTokenParam
+      ? (hasRecordsParam ? base : `${base}${sep}records=100`)
+      : `${base}${sep}token=${encodeURIComponent(conn.token)}${hasRecordsParam ? '' : '&records=100'}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const resp = await fetch(pollUrl, { signal: controller.signal, headers: { 'User-Agent': 'HUMEX-SMS/1.0' } });
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+
+    const json = await resp.json();
+    const rowsCandidate = Array.isArray(json)
+      ? json
+      : (json && (json.data || json.aaData || json.rows || json.records || json.messages || json.list || json.result));
+    const statusStr = json && json.status != null ? String(json.status).trim().toLowerCase() : '';
+    const isOkStatus = Array.isArray(json)
+      || statusStr === 'success'
+      || statusStr === 'ok'
+      || json?.status === true
+      || json?.status === 1
+      || (!statusStr && Array.isArray(rowsCandidate) && !json?.error);
+
+    if (!isOkStatus) {
+      const errTxt = (json && (json.msg || json.message || json.error)) || '';
+      if (errTxt && /no records found|no data|empty/i.test(errTxt)) {
+        conn.last_pulled_at = new Date().toISOString();
+        conn.last_status = 'Active — Waiting for new SMS';
+        const allConns = readDb('cr_api_connections') || [];
+        const idx = allConns.findIndex(c => c.id === connId);
+        if (idx !== -1) {
+          allConns[idx] = conn;
+          writeDb('cr_api_connections', allConns);
+        }
+        return 0;
+      }
+      throw new Error(errTxt || 'Panel returned non-success status');
+    }
+
+    const rows = Array.isArray(rowsCandidate) ? rowsCandidate : [];
+    for (const row of rows) {
+      let num = '';
+      let cli = '';
+      let msg = '';
+      let dt = '';
+      let rowRange = '';
+      let rowCountry = '';
+      let rowProvider = '';
+      let rowCurrency = '';
+      let payoutVal;
+
+      if (Array.isArray(row)) {
+        // Support [dt, num, cli, msg], [dt, num, cli, msg, payout], [dt, range, num, cli, msg, payout?]
+        if (row.length === 5 && /^\+?\d{6,16}$/.test(String(row[1] || '').trim().replace(/[\s()-]/g, '')) && isLikelyRateToken(row[4])) {
+          dt = String(row[0] || '').trim();
+          num = String(row[1] || '').trim();
+          cli = String(row[2] || '').trim();
+          msg = String(row[3] || '').trim();
+          payoutVal = extractCrApiRate(row);
+        } else if (row.length >= 5) {
+          dt = String(row[0] || '').trim();
+          rowRange = String(row[1] || '').trim();
+          num = String(row[2] || '').trim();
+          cli = String(row[3] || '').trim();
+          msg = String(row[4] || '').trim();
+          payoutVal = extractCrApiRate(row);
+        } else {
+          dt = String(row[0] || '').trim();
+          num = String(row[1] || '').trim();
+          cli = String(row[2] || '').trim();
+          msg = String(row[3] || '').trim();
+        }
+      } else if (row && typeof row === 'object') {
+        num = String(row.num ?? row.number ?? row.to ?? row.destination ?? row.msisdn ?? row.phone ?? '').trim();
+        cli = String(row.cli ?? row.sender ?? row.from ?? row.sender_id ?? row.sid ?? '').trim();
+        msg = String(row.message ?? row.sms ?? row.text ?? row.msg ?? row.body ?? row.content ?? '').trim();
+        dt = String(row.dt ?? row.timestamp ?? row.date ?? row.created_at ?? row.time ?? row.datetime ?? '').trim();
+        rowRange = String(row.range_name ?? row.range ?? row.range_label ?? row.termination ?? '').trim();
+        rowCountry = String(row.country ?? row.country_name ?? '').trim();
+        rowProvider = String(row.provider ?? row.carrier ?? row.route ?? '').trim();
+        rowCurrency = String(row.currency ?? row.curr ?? row.cur ?? '').trim().toUpperCase();
+        payoutVal = extractCrApiRate(row);
+      }
+
+      if (!num || !msg) continue;
+
+      const smsId = `crapi-${conn.id}-${md5(dt + num + cli + msg).slice(0, 16)}`;
+      const ingestRes = ingestSms({
+        sender: cli,
+        to_number: num,
+        message: msg,
+        sms_id: smsId,
+        company: conn.panel_name || 'CR API',
+        provider: rowProvider || conn.panel_name || '',
+        range: rowRange,
+        country: rowCountry,
+        currency: rowCurrency,
+        source: 'cr_api',
+        panel_id: conn.id,
+        panel_name: conn.panel_name,
+        timestamp: dt,
+        payout: Number.isFinite(payoutVal) ? payoutVal : undefined
+      });
+      if (ingestRes && ingestRes.logged) {
+        pulled++;
+      }
+    }
+
+    conn.last_pulled_at = new Date().toISOString();
+    conn.last_status = pulled > 0 ? `OK — pulled ${pulled} new message(s)` : 'Active — Up to date';
+    conn.total_pulled = (conn.total_pulled || 0) + pulled;
+  } catch (err) {
+    conn.last_pulled_at = new Date().toISOString();
+    conn.last_status = `Error — ${String(err.message).slice(0, 180)}`;
+  }
+
+  const allConns = readDb('cr_api_connections') || [];
+  const idx = allConns.findIndex(c => c.id === connId);
+  if (idx !== -1) {
+    allConns[idx] = conn;
+    writeDb('cr_api_connections', allConns);
+  }
+  return pulled;
+}
+
+// Background poller intervals — 10-second automatic real-time ingestion
+setInterval(async () => {
+  try {
+    const panels = readDb('login_panels') || [];
+    for (const p of panels) {
+      if (p.status !== 'running') continue;
+      if (loginPanelsInFlight.has(p.id)) continue;
+      const intervalSec = Math.max(5, parseInt(p.interval) || 10);
+      const lastRunMs = p.last_run ? new Date(p.last_run).getTime() : 0;
+      if (Date.now() - lastRunMs >= intervalSec * 1000) {
+        pollSingleLoginPanel(p.id)
+          .catch(e => console.error('Login panel worker error:', e));
+      }
+    }
+  } catch (e) {
+    console.error('Login panel poller loop error:', e);
+  }
+}, 1500);
+
+const crApiInFlight = new Set();
+setInterval(async () => {
+  try {
+    const conns = readDb('cr_api_connections') || [];
+    for (const c of conns) {
+      if (!c.active) continue;
+      if (crApiInFlight.has(c.id)) continue;
+      const intervalSec = c.interval ? Math.max(3, parseInt(c.interval)) : 5;
+      const lastPullMs = c.last_pulled_at ? new Date(c.last_pulled_at).getTime() : 0;
+      if (Date.now() - lastPullMs >= intervalSec * 1000) {
+        crApiInFlight.add(c.id);
+        pollSingleCrApiConnection(c.id)
+          .catch(e => console.error('CR API poller error:', e))
+          .finally(() => crApiInFlight.delete(c.id));
+      }
+    }
+  } catch (e) {
+    console.error('CR API poller loop error:', e);
+  }
+}, 2000);
+
+// ── Whitenoise Pure-Node Provider Adapter (Mode A API + Mode B Web Feed Hybrid) ──
+const whitenoiseInFlight = new Set();
+const whitenoisePhoneCooldown = new Map();
+const whitenoiseRoundRobinCursor = new Map();
+const whitenoiseClientCursor = new Map();
+const whitenoisePoolCursor = new Map();
+const whitenoiseLastClientSweepAt = new Map();
+const whitenoiseLastPoolSweepAt = new Map();
+const whitenoiseOnDemandFetchedAt = new Map();
+
+function formatWhitenoisePhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '').replace(/^00+/, '');
+  if (!digits) return '';
+  return '+' + digits;
+}
+
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)));
+}
+
+function parseWhitenoiseWebSmsHtml(html) {
+  if (!html || typeof html !== 'string') return [];
+  const tbodyMatch = html.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i);
+  const bodySlice = tbodyMatch ? tbodyMatch[1] : html;
+  const rows = [];
+  const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trRegex.exec(bodySlice)) !== null) {
+    const trHtml = trMatch[1];
+    if (/<th\b/i.test(trHtml)) continue;
+    const cells = [];
+    const tdRegex = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+    let tdMatch;
+    while ((tdMatch = tdRegex.exec(trHtml)) !== null) {
+      const stripped = tdMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      cells.push(decodeHtmlEntities(stripped));
+    }
+    // Columns: #, Service, Source, Destination, SMSC, Text, Provider, Time sent, Time received
+    if (cells.length >= 8) {
+      const destDigits = String(cells[3] || '').replace(/\D/g, '');
+      if (destDigits.length < 6 || !cells[5]) continue;
+      rows.push({
+        rowNum: cells[0] || '',
+        service_name: cells[1] || '',
+        src: cells[2] || '',
+        dst: formatWhitenoisePhone(cells[3]),
+        smsc: cells[4] || '',
+        text: cells[5] || '',
+        provider_col: cells[6] || '',
+        time_sent: cells[7] || '',
+        time_received: cells[8] || cells[7] || ''
+      });
+    }
+  }
+  return rows;
+}
+
+async function callWhitenoiseApi(conn, endpointPath, payload = {}, method = 'POST') {
+  const baseUrl = String(conn.base_url || 'https://api.whitenoise.one').trim().replace(/\/+$/, '');
+  const fullPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
+  const reqBody = { api_key: String(conn.api_key || '').trim(), ...payload };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    let targetUrl = `${baseUrl}${fullPath}`;
+    const opts = {
+      method: method.toUpperCase(),
+      signal: controller.signal,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'HUMEX-SMS-Whitenoise/1.0'
+      }
+    };
+    if (opts.method === 'GET') {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(reqBody)) {
+        if (v !== undefined && v !== null && v !== '') qs.append(k, String(v));
+      }
+      targetUrl += (targetUrl.includes('?') ? '&' : '?') + qs.toString();
+    } else {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(reqBody);
+    }
+
+    const resp = await fetch(targetUrl, opts);
+    const rawText = await resp.text();
+    let json = {};
+    try { json = JSON.parse(rawText); } catch (_) { json = { raw: rawText }; }
+    if (!resp.ok || (json && json.status && String(json.status).toLowerCase() !== 'ok')) {
+      const errMsg = (json && (json.error || json.message || json.detail)) || `HTTP ${resp.status}`;
+      const err = new Error(String(errMsg));
+      err.httpStatus = resp.status;
+      throw err;
+    }
+    return json;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runWithConcurrency(items, concurrency, workerFn) {
+  const cap = Math.max(1, Math.min(20, parseInt(concurrency, 10) || 6));
+  let idx = 0;
+  const results = new Array(items.length);
+  const runners = Array.from({ length: Math.min(cap, items.length || 1) }, async () => {
+    while (idx < items.length) {
+      const myIdx = idx++;
+      try {
+        results[myIdx] = await workerFn(items[myIdx], myIdx);
+      } catch (e) {
+        results[myIdx] = { error: e.message };
+      }
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+function sendWhitenoiseConversionNonBlocking(conn, { smsId, phone, serviceName, logEntryId }) {
+  if (!conn || !conn.api_key || conn.conversion_mode === 'off') return;
+  if (smsId == null || smsId === '' || isNaN(Number(smsId))) return;
+  const body = {
+    sms_id: Number(smsId),
+    phone: formatWhitenoisePhone(phone)
+  };
+  if (serviceName) body.service_name = String(serviceName);
+  callWhitenoiseApi(conn, '/sms/register-sms-conversion', body, 'POST')
+    .then(res => {
+      if (res && res.conversion !== false && logEntryId != null) {
+        const smsLog = readDb('sms_log') || [];
+        const rec = smsLog.find(s => Number(s.id) === Number(logEntryId));
+        if (rec) {
+          rec.conversion_sent = true;
+          rec.conversion_at = new Date().toISOString();
+          debouncedWriteDb('sms_log');
+        }
+      }
+    })
+    .catch(err => {
+      console.warn(`[Whitenoise conversion warning] sms_id=${smsId}:`, err.message);
+    });
+}
+
+async function fetchWhitenoiseSinglePhone(conn, rawPhone, opts = {}) {
+  const formattedPhone = formatWhitenoisePhone(rawPhone);
+  if (!formattedPhone) {
+    return { checked: false, skipped: 'invalid_phone', new_sms: 0, conversions: 0, sms_count: null, latest_sms: [] };
+  }
+  const cooldownMs = opts.cooldownMs != null ? Number(opts.cooldownMs) : 15000;
+  const cooldownKey = `${conn.id}:${formattedPhone}`;
+  const nowMs = Date.now();
+  const lastAt = whitenoisePhoneCooldown.get(cooldownKey) || 0;
+  if (!opts.bypassCooldown && cooldownMs > 0 && (nowMs - lastAt) < cooldownMs) {
+    const remainSec = Math.ceil((cooldownMs - (nowMs - lastAt)) / 1000);
+    return { checked: false, cooldown_active: true, retry_after_sec: remainSec, new_sms: 0, conversions: 0, sms_count: null, latest_sms: [] };
+  }
+  whitenoisePhoneCooldown.set(cooldownKey, nowMs);
+  if (opts.onDemand) {
+    const digits = formattedPhone.replace(/\D/g, '');
+    if (digits) whitenoiseOnDemandFetchedAt.set(`${conn.id}:${digits}`, nowMs);
+  }
+
+  const sinceSec = Math.max(15, Math.min(600, parseInt(opts.since ?? conn.since ?? conn.since_seconds ?? 600, 10) || 600));
+  const payload = { phone: formattedPhone, since: sinceSec };
+  const svc = opts.service_name || conn.default_service_name || '';
+  if (svc) payload.service_name = svc;
+
+  const data = await callWhitenoiseApi(conn, '/sms/get-phone-last-sms', payload, 'POST');
+  let smsCount = null;
+  if (opts.includeCount) {
+    try {
+      const cntRes = await callWhitenoiseApi(conn, '/sms/get-phone-sms-count', { phone: formattedPhone }, 'POST');
+      if (cntRes && cntRes.count !== undefined) smsCount = Number(cntRes.count);
+    } catch (_) {}
+  }
+
+  const rawRows = Array.isArray(data && data.sms) ? data.sms : [];
+  // Sort ascending by numeric id so newest is processed last (and unshifted to top)
+  const ordered = [...rawRows].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+  const newEntries = [];
+  let conversions = 0;
+
+  for (const row of ordered) {
+    if (!row || !row.text) continue;
+    const wnId = row.id != null ? String(row.id) : md5(`${row.dst || formattedPhone}|${row.time || ''}|${row.text}`).slice(0, 16);
+    const extKey = `wn-${conn.id}-${wnId}`;
+    const targetDst = formatWhitenoisePhone(row.dst || formattedPhone);
+    const ingestRes = ingestSms({
+      sender: row.src || row.service_name || 'Whitenoise',
+      to_number: targetDst,
+      message: row.text,
+      sms_id: wnId,
+      company: conn.name || 'Whitenoise',
+      provider: conn.provider_tag || conn.name || 'Whitenoise',
+      country: row.country || '',
+      source: 'whitenoise',
+      panel_id: conn.id,
+      panel_name: conn.name || 'Whitenoise',
+      ext_key: extKey,
+      timestamp: row.time || new Date().toISOString(),
+      whitenoise_sms_id: row.id != null ? Number(row.id) : null
+    });
+
+    if (ingestRes && ingestRes.logged && ingestRes.entry) {
+      newEntries.push(ingestRes.entry);
+      const convMode = String(conn.conversion_mode || 'on_client_match').toLowerCase();
+      const shouldConvert = convMode === 'always' || (convMode === 'on_client_match' && ingestRes.entry.client_id != null);
+      if (shouldConvert && row.id != null && !isNaN(Number(row.id))) {
+        conversions++;
+        sendWhitenoiseConversionNonBlocking(conn, {
+          smsId: row.id,
+          phone: targetDst,
+          serviceName: row.service_name || svc || '',
+          logEntryId: ingestRes.entry.id
+        });
+      }
+    }
+  }
+
+  return {
+    checked: true,
+    phone: formattedPhone,
+    sms_count: smsCount,
+    fetched_count: ordered.length,
+    new_sms: newEntries.length,
+    conversions,
+    latest_sms: rawRows
+  };
+}
+
+function formatWhitenoiseWebTime(dateObj) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${dateObj.getUTCFullYear()}-${pad(dateObj.getUTCMonth() + 1)}-${pad(dateObj.getUTCDate())}.${pad(dateObj.getUTCHours())}.${pad(dateObj.getUTCMinutes())}`;
+}
+
+async function pollWhitenoiseWebFeed(conn) {
+  if (!conn.web_url || !conn.web_cookie) {
+    throw new Error('Mode B hybrid feed requires web_url and web_cookie');
+  }
+  const baseWeb = String(conn.web_url).trim().replace(/\/+$/, '');
+  const now = new Date();
+  const windowMin = Math.max(5, parseInt(conn.web_window_minutes, 10) || 30);
+  const startDt = new Date(now.getTime() - windowMin * 60000);
+  const targetUrl = `${baseWeb}/sms?sms_time_start=${encodeURIComponent(formatWhitenoiseWebTime(startDt))}&sms_time_end=${encodeURIComponent(formatWhitenoiseWebTime(now))}&order=id:desc`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  let html = '';
+  try {
+    const resp = await fetch(targetUrl, {
+      signal: controller.signal,
+      headers: {
+        'Cookie': String(conn.web_cookie).trim(),
+        'User-Agent': 'Mozilla/5.0 HUMEX-SMS/1.0',
+        'Accept': 'text/html,application/xhtml+xml'
+      }
+    });
+    if (!resp.ok) throw new Error(`Web feed HTTP ${resp.status}`);
+    html = await resp.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const parsedRows = parseWhitenoiseWebSmsHtml(html);
+  const ordered = [...parsedRows].reverse();
+  let newCount = 0;
+
+  for (const row of ordered) {
+    const hashKey = md5(`${row.dst}|${row.src}|${row.time_received}|${row.text}`).slice(0, 16);
+    const extKey = `wn-web-${conn.id}-${hashKey}`;
+    const ingestRes = ingestSms({
+      sender: row.src || row.service_name || 'Whitenoise',
+      to_number: row.dst,
+      message: row.text,
+      sms_id: hashKey,
+      company: conn.name || 'Whitenoise',
+      provider: conn.provider_tag || conn.name || 'Whitenoise',
+      source: 'whitenoise',
+      panel_id: conn.id,
+      panel_name: conn.name || 'Whitenoise',
+      ext_key: extKey,
+      timestamp: row.time_received || row.time_sent
+    });
+    if (ingestRes && ingestRes.logged) {
+      newCount++;
+      // Optional conversion lookup if api_key is present & client-matched
+      if (conn.api_key && conn.conversion_mode !== 'off' && ingestRes.entry?.client_id != null) {
+        callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: row.dst, since: 120 }, 'POST')
+          .then(apiRes => {
+            const list = Array.isArray(apiRes && apiRes.sms) ? apiRes.sms : [];
+            const matched = list.find(x => x && String(x.text || '').trim() === String(row.text || '').trim());
+            if (matched && matched.id != null) {
+              sendWhitenoiseConversionNonBlocking(conn, {
+                smsId: matched.id,
+                phone: row.dst,
+                serviceName: matched.service_name || row.service_name || '',
+                logEntryId: ingestRes.entry.id
+              });
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  }
+  return { rows_parsed: parsedRows.length, new_sms: newCount };
+}
+
+function getNumbersForWhitenoiseConnection(conn, scopeFilter = {}) {
+  const numbers = readDb('numbers') || [];
+  const rangesMap = buildRangesLookupMap();
+  const connTags = new Set(['whitenoise']);
+  if (conn.provider_tag) connTags.add(String(conn.provider_tag).trim().toLowerCase());
+  if (conn.name) connTags.add(String(conn.name).trim().toLowerCase());
+
+  let list = numbers.filter(n => {
+    if (!n || !n.number) return false;
+    if (!isWhitenoiseRecord(n, rangesMap, connTags)) return false;
+    if (scopeFilter.client_id != null && Number(n.client_id) !== Number(scopeFilter.client_id)) return false;
+    if (scopeFilter.agent_id != null && Number(n.agent_id) !== Number(scopeFilter.agent_id)) return false;
+    if (scopeFilter.range) {
+      const rq = String(scopeFilter.range).trim().toLowerCase();
+      const nRng = String(n.range_name || n.range || '').trim().toLowerCase();
+      if (String(n.range_id || '') !== String(scopeFilter.range) && !nRng.includes(rq)) return false;
+    }
+    if (scopeFilter.number) {
+      const nq = String(scopeFilter.number).replace(/\D/g, '');
+      const nd = String(n.number || '').replace(/\D/g, '');
+      if (nq && !nd.includes(nq)) return false;
+    }
+    return true;
+  });
+
+  // Priority sorting: 1. Client-assigned numbers, 2. Agent-assigned numbers, 3. Unassigned
+  list.sort((a, b) => {
+    const tierA = a.client_id ? 0 : (a.agent_id ? 1 : 2);
+    const tierB = b.client_id ? 0 : (b.agent_id ? 1 : 2);
+    if (tierA !== tierB) return tierA - tierB;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+  return list;
+}
+
+async function pollSingleWhitenoiseConnection(connId, force = false) {
+  const conns = readDb('whitenoise_connections') || [];
+  const conn = conns.find(c => Number(c.id) === Number(connId));
+  if (!conn || (!force && !conn.active)) return 0;
+  let pulled = 0;
+
+  try {
+    const mode = String(conn.mode || 'api_key').toLowerCase();
+    let statusDetail = '';
+    if (mode === 'hybrid' && conn.web_url && conn.web_cookie) {
+      const webRes = await pollWhitenoiseWebFeed(conn);
+      pulled += webRes.new_sms;
+      statusDetail = webRes.new_sms > 0
+        ? `OK (Hybrid) — pulled ${webRes.new_sms} new from ${webRes.rows_parsed} web row(s)`
+        : `Active (Hybrid) — scanned ${webRes.rows_parsed} web row(s)`;
+    } else if (conn.api_key) {
+      const wnNumbers = getNumbersForWhitenoiseConnection(conn);
+      const nowMs = Date.now();
+      let batch = [];
+
+      if (force) {
+        const cycleMax = Math.max(1, Math.min(200, parseInt(conn.max_numbers_per_cycle, 10) || 40));
+        if (wnNumbers.length <= cycleMax) {
+          batch = wnNumbers;
+        } else {
+          const cursor = whitenoiseRoundRobinCursor.get(conn.id) || 0;
+          for (let i = 0; i < cycleMax; i++) {
+            batch.push(wnNumbers[(cursor + i) % wnNumbers.length]);
+          }
+          whitenoiseRoundRobinCursor.set(conn.id, (cursor + cycleMax) % wnNumbers.length);
+        }
+      } else {
+        const skipRecentOnDemand = (numObj) => {
+          const d = String(numObj?.number || '').replace(/\D/g, '');
+          if (!d) return false;
+          const lastOd = whitenoiseOnDemandFetchedAt.get(`${conn.id}:${d}`) || 0;
+          return (nowMs - lastOd) < 180000; // Skip 3 min if recently manually fetched on-demand
+        };
+        const clientNums = wnNumbers.filter(n => Boolean(n.client_id) && !skipRecentOnDemand(n));
+        const poolNums = wnNumbers.filter(n => !n.client_id && !skipRecentOnDemand(n));
+
+        const clientIntervalMs = Math.max(30, parseInt(conn.client_interval_sec ?? conn.interval, 10) || 240) * 1000;
+        const poolIntervalMs = Math.max(60, parseInt(conn.pool_interval_sec, 10) || 540) * 1000; // ~9 min default safety sweep
+
+        const pickBatch = (list, cursorMap, cap) => {
+          if (!list.length) return [];
+          if (list.length <= cap) return list.slice();
+          const cur = cursorMap.get(conn.id) || 0;
+          const picked = [];
+          for (let i = 0; i < cap; i++) picked.push(list[(cur + i) % list.length]);
+          cursorMap.set(conn.id, (cur + cap) % list.length);
+          return picked;
+        };
+
+        const lastClientAt = whitenoiseLastClientSweepAt.get(conn.id) || 0;
+        if (clientNums.length > 0 && (nowMs - lastClientAt) >= clientIntervalMs) {
+          whitenoiseLastClientSweepAt.set(conn.id, nowMs);
+          const clientCap = Math.min(15, parseInt(conn.max_numbers_per_cycle, 10) || 15);
+          batch.push(...pickBatch(clientNums, whitenoiseClientCursor, clientCap));
+        }
+
+        const lastPoolAt = whitenoiseLastPoolSweepAt.get(conn.id) || 0;
+        if (poolNums.length > 0 && (nowMs - lastPoolAt) >= poolIntervalMs) {
+          whitenoiseLastPoolSweepAt.set(conn.id, nowMs);
+          batch.push(...pickBatch(poolNums, whitenoisePoolCursor, 20));
+        }
+      }
+
+      if (batch.length > 0) {
+        const effConcurrency = force ? Math.min(6, conn.concurrency || 6) : Math.min(3, conn.concurrency || 3);
+        const resList = await runWithConcurrency(batch, effConcurrency, (numObj) =>
+          fetchWhitenoiseSinglePhone(conn, numObj.number, {
+            bypassCooldown: force,
+            since: conn.since || 600
+          })
+        );
+        for (const r of resList) {
+          if (r && r.new_sms) pulled += r.new_sms;
+        }
+        statusDetail = pulled > 0
+          ? `OK — pulled ${pulled} new SMS across ${batch.length} number(s)`
+          : `Active — swept ${batch.length} number(s)`;
+      } else {
+        statusDetail = conn.last_status || 'Idle (waiting for next paced sweep or on-demand fetch)';
+      }
+    } else {
+      statusDetail = 'Warning — Missing API Key or Web Cookie';
+    }
+
+    conn.last_pulled_at = new Date().toISOString();
+    conn.last_status = statusDetail;
+    conn.total_pulled = (conn.total_pulled || 0) + pulled;
+  } catch (err) {
+    conn.last_pulled_at = new Date().toISOString();
+    conn.last_status = `Error — ${String(err.message).slice(0, 180)}`;
+  }
+
+  const allConns = readDb('whitenoise_connections') || [];
+  const idx = allConns.findIndex(c => Number(c.id) === Number(connId));
+  if (idx !== -1) {
+    allConns[idx] = conn;
+    writeDb('whitenoise_connections', allConns);
+  }
+  return pulled;
+}
+
+setInterval(async () => {
+  try {
+    const conns = readDb('whitenoise_connections') || [];
+    for (const c of conns) {
+      if (!c || !c.active) continue;
+      if (whitenoiseInFlight.has(c.id)) continue;
+      const clientSec = Math.max(10, parseInt(c.client_interval_sec ?? c.interval, 10) || 240);
+      const poolSec = Math.max(60, parseInt(c.pool_interval_sec, 10) || 540);
+      const tickSec = Math.min(clientSec, poolSec, 30);
+      const lastPullMs = c.last_pulled_at ? new Date(c.last_pulled_at).getTime() : 0;
+      if (Date.now() - lastPullMs >= tickSec * 1000) {
+        whitenoiseInFlight.add(c.id);
+        pollSingleWhitenoiseConnection(c.id)
+          .catch(e => console.error('Whitenoise poller error:', e))
+          .finally(() => whitenoiseInFlight.delete(c.id));
+      }
+    }
+  } catch (e) {
+    console.error('Whitenoise poller loop error:', e);
+  }
+}, 10000);
+
+// ── Middleware ───────────────────────────────────────────────
+// Enable high-efficiency gzip/deflate compression for fast responses over slow networks
+app.use(compression({
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  },
+  threshold: 512
+}));
+
+// Large bodies only on the few routes that really need them; everything else is capped at 1 MB
+app.use(['/api/numbers/import-to-range', '/api/numbers/bulk-range-import', '/api/numbers/upload', '/api/backup/restore'], express.json({ limit: '25mb' }));
+app.use(['/api/settings', '/api/settings/upload-logo'], express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+if (process.env.TRUST_PROXY === 'false') {
+  app.set('trust proxy', false);
+} else if (process.env.TRUST_PROXY && process.env.TRUST_PROXY !== 'true') {
+  app.set('trust proxy', isNaN(Number(process.env.TRUST_PROXY)) ? process.env.TRUST_PROXY : Number(process.env.TRUST_PROXY));
+} else {
+  app.set('trust proxy', 1);
+}
+
+// ── Global Firewall Helpers & Middleware ─────────────────────
+function isIpBlocked(ip) {
+  if (!ip) return false;
+  const cleanIp = String(ip).trim().replace(/^::ffff:/, '');
+  const blocked = readDb('blocked_ips');
+  if (!Array.isArray(blocked) || blocked.length === 0) return false;
+  return blocked.some(b => {
+    if (!b || !b.ip) return false;
+    const bIp = String(b.ip).trim().replace(/^::ffff:/, '');
+    return bIp === cleanIp || bIp === String(ip).trim();
+  });
+}
+
+function logFirewallEvent(ip, reason = 'Blocked IP attempted access', targetPath = '') {
+  try {
+    const events = readDb('firewall_events') || [];
+    const entry = {
+      id: nextId(events),
+      ip: String(ip).replace(/^::ffff:/, ''),
+      event_type: 'ip_blocked',
+      severity: 'high',
+      reason: String(reason),
+      path: String(targetPath),
+      timestamp: new Date().toISOString()
+    };
+    events.unshift(entry);
+    if (events.length > 500) events.length = 500;
+    writeDb('firewall_events', events);
+  } catch (err) {
+    console.error('Failed to log firewall event:', err);
+  }
+}
+
+// Global firewall: first check before static, API, or webhooks
+app.use((req, res, next) => {
+  const clientIp = req.ip || (req.socket && req.socket.remoteAddress) || '127.0.0.1';
+  if (isIpBlocked(clientIp)) {
+    logFirewallEvent(clientIp, 'Global Firewall Block', req.originalUrl || req.url);
+    return res.status(403).json({ error: 'Access denied — IP blocked' });
+  }
+  next();
+});
+
+const ALLOWED_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function getEffectiveHosts(req) {
+  const hosts = new Set();
+  if (!req || !req.headers) return hosts;
+  const h = String(req.headers.host || '').split(',')[0].trim().toLowerCase();
+  if (h) hosts.add(h);
+  if (process.env.TRUST_PROXY !== 'false') {
+    const xfh = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim().toLowerCase();
+    if (xfh) hosts.add(xfh);
+  }
+  return hosts;
+}
+
+function isRequestHttps(req) {
+  if (!req) return false;
+  if (req.secure) return true;
+  const xfp = String((req.headers && req.headers['x-forwarded-proto']) || '').toLowerCase();
+  if (xfp.includes('https')) return true;
+  const origin = String((req.headers && req.headers.origin) || '').toLowerCase();
+  if (origin.startsWith('https://')) return true;
+  const referer = String((req.headers && req.headers.referer) || '').toLowerCase();
+  if (referer.startsWith('https://')) return true;
+  const xfh = String((req.headers && req.headers['x-forwarded-host']) || '').split(',')[0].trim().toLowerCase();
+  if (xfh && (xfh.endsWith('.run.app') || xfh.endsWith('.googleusercontent.com'))) return true;
+  return false;
+}
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const effectiveHosts = getEffectiveHosts(req);
+  let isAllowed = false;
+
+  if (origin) {
+    const originLower = origin.toLowerCase();
+    let isSameOrigin = false;
+    try {
+      const parsedOrigin = new URL(originLower);
+      isSameOrigin = effectiveHosts.has(parsedOrigin.host.toLowerCase());
+    } catch (_) {}
+    if (isSameOrigin || ALLOWED_ORIGINS.has(originLower)) {
+      isAllowed = true;
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Token, X-Agent-ID, X-Client-ID, X-Inbound-Token');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (isRequestHttps(req)) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src 'self' data: blob: https:; connect-src 'self' ws: wss:; frame-ancestors *; object-src 'none'; base-uri 'self';"
+  );
+  // X-Frame-Options omitted to allow embedding in AI Studio preview iframe
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(isAllowed || !origin ? 200 : 403);
+  }
+  next();
+});
+
+// Serve static assets from humex-sms/static with revalidation
+const staticOpts = {
+  etag: false,
+  lastModified: true,
+  maxAge: 0,
+  setHeaders: (res, path) => {
+    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+  }
+};
+// Intercept direct HTML file requests with strict role authorization
+const DIRECT_HTML_ROLES = {
+  'index.html': ['owner', 'admin'],
+  'agent.html': ['agent'],
+  'client.html': ['client']
+};
+
+app.get(['/dashboard.html', '/static/dashboard.html'], (req, res) => res.redirect('/login'));
+
+app.get(['/static/:file(*.html)', '/:file(*.html)'], (req, res, next) => {
+  const baseName = path.basename(req.params.file || '').toLowerCase();
+  if (baseName === 'login.html') {
+    return sendInjectedHtml(res, path.join(STATIC_DIR, 'login.html'), req);
+  }
+  if (DIRECT_HTML_ROLES[baseName]) {
+    const user = getSessionUser(req);
+    if (!user) {
+      return res.redirect('/login');
+    }
+    const userRole = (user.role || '').toLowerCase();
+    const isOwner = userRole === 'owner' || userRole === 'admin';
+    const allowed = DIRECT_HTML_ROLES[baseName];
+    if (!allowed.includes(userRole) && !(isOwner && allowed.includes('owner'))) {
+      return res.redirect(ROLE_HOME_URL[userRole] || '/login');
+    }
+  }
+  const filePath = path.join(STATIC_DIR, path.basename(req.params.file || ''));
+  if (fs.existsSync(filePath)) {
+    return sendInjectedHtml(res, filePath, req);
+  }
+  next();
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   HUMEX SMS REBRANDING COMPATIBILITY ALIAS MIDDLEWARE (START)
+   Maps legacy asset names to unified humex-sms conventions. Can be safely deleted once
+   browsers and proxies have fully cleared cache.
+   ══════════════════════════════════════════════════════════════════════════ */
+const ASSET_RENAME_MAP = {
+  // Brand Images
+  'humax-sms-logo.png': 'humex-sms-logo.png',
+  'custom-logo.png': 'humex-sms-logo.png',
+  'humex-sms-dp.jpg': 'humex-sms-logo.png',
+  'alphasms-logo.svg': 'humex-sms-logo.svg',
+  'alphasms-circle-logo.svg': 'humex-sms-circle-logo.svg',
+  'alphasms-icon.svg': 'humex-sms-icon.svg',
+  // Stylesheets
+  'speed-panel.css': 'humex-panel.css',
+  'speed-admin-skin.css': 'humex-admin-skin.css',
+  'apx-telecom.css': 'humex-telecom.css',
+  'style.css': 'humex-global.css',
+  // JavaScript - Owner
+  'app.js': 'owner-engine.js',
+  'speed-admin.js': 'owner-shell.js',
+  'new_features.js': 'owner-features.js',
+  // JavaScript - Agent
+  'agent.js': 'agent-engine.js',
+  'speed-agent.js': 'agent-shell.js',
+  'speed-agent-pages.js': 'agent-pages.js',
+  'agent_features.js': 'agent-features.js',
+  // JavaScript - Client
+  'client.js': 'client-engine.js',
+  'speed-client.js': 'client-shell.js',
+  'speed-client-pages.js': 'client-pages.js',
+  // JavaScript - Shared
+  'speed-kit.js': 'shared-ui-kit.js',
+  'brand-theme.js': 'shared-brand-theme.js',
+  'speed-auth-guard.js': 'shared-auth-guard.js',
+  'speed-profile-security.js': 'shared-profile-security.js',
+  'speed-url.js': 'shared-url-router.js',
+  'speed-flash.js': 'shared-flash.js',
+  'speed-loginpanel.js': 'shared-login-modal.js'
+};
+
+app.use((req, res, next) => {
+  const urlPath = req.path;
+  // Never serve source maps or backup artifacts
+  if (/\.(map|bak|tmp)$/i.test(urlPath)) {
+    return res.status(404).end();
+  }
+  const m = urlPath.match(/^(?:\/static)?\/(js|css|img)\/([^/?#]+)$/i);
+  if (m) {
+    const sub = m[1].toLowerCase();
+    const oldBase = m[2];
+    if (ASSET_RENAME_MAP[oldBase]) {
+      if (sub === 'img' && fs.existsSync(path.join(uploadsDir, oldBase))) {
+        return next();
+      }
+      if (fs.existsSync(path.join(STATIC_DIR, sub, oldBase))) {
+        return next();
+      }
+      const newBase = ASSET_RENAME_MAP[oldBase];
+      const targetPath = path.join(STATIC_DIR, sub, newBase);
+      if (fs.existsSync(targetPath)) return res.sendFile(targetPath);
+    }
+  }
+  next();
+});
+/* ══════════════════════════════════════════════════════════════════════════
+   HUMEX SMS REBRANDING COMPATIBILITY ALIAS MIDDLEWARE (END)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const uploadsDir = path.join(DATA_DIR, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  try { fs.mkdirSync(uploadsDir, { recursive: true }); } catch (_) {}
+}
+app.use('/static/img', express.static(uploadsDir, staticOpts));
+app.use('/uploads', express.static(uploadsDir, staticOpts));
+app.use('/static', express.static(STATIC_DIR, staticOpts));
+app.use('/css', express.static(path.join(STATIC_DIR, 'css'), staticOpts));
+app.use('/js', express.static(path.join(STATIC_DIR, 'js'), staticOpts));
+app.use('/img', express.static(path.join(STATIC_DIR, 'img'), staticOpts));
+
+// ── HTML Page Routes ──────────────────────────────────────────
+// ── Unified Role-Based Theme Architecture ─────────────────────
+const DEFAULT_ROLE_THEMES = [
+  {
+    key: 'daylight_cobalt',
+    name: 'Daylight Crisp & Cobalt',
+    description: 'White header & sidebar, Slate table headers, Cobalt buttons, Amber exports',
+    is_builtin: true,
+    structure_tone: 'light',
+    structure_bg: '#ffffff',
+    structure_side_bg: '#ffffff',
+    structure_text: '#0f172a',
+    structure_muted: '#64748b',
+    structure_item_bg: '#f1f5f9',
+    structure_item_hover: '#eff6ff',
+    structure_border: '#e2e8f0',
+    structure_table_bg: '#f1f5f9',
+    structure_table_text: '#334155',
+    primary_btn: '#2563eb',
+    primary_btn_hover: '#1d4ed8',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  },
+  {
+    key: 'emerald_executive',
+    name: 'Emerald Executive',
+    description: 'Forest Emerald header & sidebar, crisp white cards, Pine primary actions',
+    is_builtin: true,
+    structure_tone: 'dark',
+    structure_bg: '#064e3b',
+    structure_side_bg: '#064e3b',
+    structure_text: '#ffffff',
+    structure_muted: '#a7f3d0',
+    structure_item_bg: 'rgba(255, 255, 255, 0.08)',
+    structure_item_hover: 'rgba(255, 255, 255, 0.16)',
+    structure_border: '#047857',
+    structure_table_bg: '#065f46',
+    structure_table_text: '#ffffff',
+    primary_btn: '#059669',
+    primary_btn_hover: '#047857',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  },
+  {
+    key: 'midnight_navy',
+    name: 'Midnight Navy Command',
+    description: 'Deep Navy frame & table headers, white workspace cards, Electric Blue CTAs',
+    is_builtin: true,
+    structure_tone: 'dark',
+    structure_bg: '#0f172a',
+    structure_side_bg: '#0f172a',
+    structure_text: '#ffffff',
+    structure_muted: '#94a3b8',
+    structure_item_bg: 'rgba(255, 255, 255, 0.07)',
+    structure_item_hover: 'rgba(255, 255, 255, 0.15)',
+    structure_border: '#1e293b',
+    structure_table_bg: '#1e293b',
+    structure_table_text: '#f8fafc',
+    primary_btn: '#2563eb',
+    primary_btn_hover: '#1d4ed8',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  },
+  {
+    key: 'teal_meridian',
+    name: 'Teal Meridian',
+    description: 'Ocean Teal structure frame, Jade table headers, Teal action buttons',
+    is_builtin: true,
+    structure_tone: 'dark',
+    structure_bg: '#134e4a',
+    structure_side_bg: '#134e4a',
+    structure_text: '#ffffff',
+    structure_muted: '#99f6e4',
+    structure_item_bg: 'rgba(255, 255, 255, 0.08)',
+    structure_item_hover: 'rgba(255, 255, 255, 0.16)',
+    structure_border: '#115e59',
+    structure_table_bg: '#115e59',
+    structure_table_text: '#ffffff',
+    primary_btn: '#0d9488',
+    primary_btn_hover: '#0f766e',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  },
+  {
+    key: 'indigo_command',
+    name: 'Indigo Command',
+    description: 'Royal Indigo frame & table headers, white cards, Vivid Indigo buttons',
+    is_builtin: true,
+    structure_tone: 'dark',
+    structure_bg: '#1e1b4b',
+    structure_side_bg: '#1e1b4b',
+    structure_text: '#ffffff',
+    structure_muted: '#c7d2fe',
+    structure_item_bg: 'rgba(255, 255, 255, 0.08)',
+    structure_item_hover: 'rgba(255, 255, 255, 0.16)',
+    structure_border: '#312e81',
+    structure_table_bg: '#312e81',
+    structure_table_text: '#ffffff',
+    primary_btn: '#4f46e5',
+    primary_btn_hover: '#4338ca',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  }
+];
+
+function normalizeHexColor(hex, fallback = '#2563eb') {
+  if (typeof hex !== 'string') return fallback;
+  let s = hex.trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+    s = '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+  }
+  return /^#[0-9a-fA-F]{6}$/.test(s) ? s.toLowerCase() : fallback;
+}
+
+function hexToRgb(hex) {
+  const clean = normalizeHexColor(hex, '#2563eb').slice(1);
+  return {
+    r: parseInt(clean.slice(0, 2), 16),
+    g: parseInt(clean.slice(2, 4), 16),
+    b: parseInt(clean.slice(4, 6), 16)
+  };
+}
+
+function hexLuminance(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  const chan = [r, g, b].map(v => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2];
+}
+
+function autoContrastText(hex) {
+  return hexLuminance(hex) > 0.36 ? '#0f172a' : '#ffffff';
+}
+
+function shadeHex(hex, amount = -0.14) {
+  const { r, g, b } = hexToRgb(hex);
+  const clamp = v => Math.max(0, Math.min(255, Math.round(v)));
+  const adj = c => (amount < 0 ? c * (1 + amount) : c + (255 - c) * amount);
+  return '#' + [clamp(adj(r)), clamp(adj(g)), clamp(adj(b))]
+    .map(n => n.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function hexToRgba(hex, alpha = 0.2) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function buildCompleteRoleTheme(input = {}, isBuiltin = false) {
+  const structBg = normalizeHexColor(input.structure_bg || input.structureBg, '#0f172a');
+  const isLightStruct = hexLuminance(structBg) > 0.36;
+  const tone = isLightStruct ? 'light' : 'dark';
+  const primaryBtn = normalizeHexColor(input.primary_btn || input.primaryBtn, '#2563eb');
+  const warningBtn = normalizeHexColor(input.warning_btn || input.warningBtn, '#d97706');
+  const dangerBtn = normalizeHexColor(input.danger_btn || input.dangerBtn, '#dc2626');
+  const structTableBg = normalizeHexColor(
+    input.structure_table_bg || input.structureTableBg,
+    isLightStruct ? '#f1f5f9' : shadeHex(structBg, 0.06)
+  );
+  const cleanKey = String(input.key || ('custom_' + Date.now()))
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || ('custom_' + Date.now());
+
+  return {
+    key: cleanKey,
+    name: String(input.name || cleanKey).trim().slice(0, 80),
+    description: String(input.description || input.desc || `${structBg} frame · ${primaryBtn} CTA · ${warningBtn} warn`).trim().slice(0, 140),
+    is_builtin: Boolean(isBuiltin || input.is_builtin),
+    structure_tone: tone,
+    structure_bg: structBg,
+    structure_side_bg: normalizeHexColor(input.structure_side_bg, structBg),
+    structure_text: input.structure_text || (isLightStruct ? '#0f172a' : '#ffffff'),
+    structure_muted: input.structure_muted || (isLightStruct ? '#64748b' : 'rgba(255, 255, 255, 0.72)'),
+    structure_item_bg: input.structure_item_bg || (isLightStruct ? '#f1f5f9' : 'rgba(255, 255, 255, 0.08)'),
+    structure_item_hover: input.structure_item_hover || (isLightStruct ? hexToRgba(primaryBtn, 0.1) : 'rgba(255, 255, 255, 0.16)'),
+    structure_border: input.structure_border || (isLightStruct ? '#e2e8f0' : shadeHex(structBg, 0.12)),
+    structure_table_bg: structTableBg,
+    structure_table_text: input.structure_table_text || (hexLuminance(structTableBg) > 0.36 ? '#334155' : '#ffffff'),
+    primary_btn: primaryBtn,
+    primary_btn_hover: input.primary_btn_hover ? normalizeHexColor(input.primary_btn_hover, shadeHex(primaryBtn, -0.14)) : shadeHex(primaryBtn, -0.14),
+    primary_btn_text: autoContrastText(primaryBtn),
+    warning_btn: warningBtn,
+    warning_btn_hover: input.warning_btn_hover ? normalizeHexColor(input.warning_btn_hover, shadeHex(warningBtn, -0.14)) : shadeHex(warningBtn, -0.14),
+    warning_btn_text: autoContrastText(warningBtn),
+    danger_btn: dangerBtn,
+    danger_btn_hover: input.danger_btn_hover ? normalizeHexColor(input.danger_btn_hover, shadeHex(dangerBtn, -0.14)) : shadeHex(dangerBtn, -0.14)
+  };
+}
+
+function getThemeCatalog(settings) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  const custom = Array.isArray(s.custom_themes) ? s.custom_themes : [];
+  const builtins = DEFAULT_ROLE_THEMES.map(t => buildCompleteRoleTheme(t, true));
+  const byKey = new Map();
+  builtins.forEach(t => byKey.set(t.key, t));
+  custom.forEach(ct => {
+    if (!ct || !ct.key) return;
+    const built = buildCompleteRoleTheme(ct, byKey.has(ct.key) ? byKey.get(ct.key).is_builtin : false);
+    byKey.set(built.key, built);
+  });
+  return Array.from(byKey.values());
+}
+
+function resolveEffectiveTheme(settings, userThemeKey = '') {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  const catalog = getThemeCatalog(s);
+  const byKey = new Map(catalog.map(t => [t.key, t]));
+  const defKey = (s.default_theme_key && byKey.has(s.default_theme_key)) ? s.default_theme_key : 'daylight_cobalt';
+  const pickedKey = (userThemeKey && userThemeKey !== 'default' && byKey.has(userThemeKey)) ? userThemeKey : defKey;
+  return byKey.get(pickedKey) || catalog[0];
+}
+
+const FONT_FAMILIES = {
+  inter: "'Inter', sans-serif",
+  poppins: "'Poppins', sans-serif",
+  roboto: "'Roboto', sans-serif",
+  outfit: "'Outfit', sans-serif",
+  montserrat: "'Montserrat', sans-serif",
+  opensans: "'Open Sans', sans-serif",
+  jakarta: "'Plus Jakarta Sans', sans-serif",
+  system: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+  monospace: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace"
+};
+
+function getThemeCss(settings, userThemeKey = '') {
+  const s = settings || {};
+  const theme = resolveEffectiveTheme(s, userThemeKey);
+  const fontKey = s.font_family || 'system';
+  const fontFamily = FONT_FAMILIES[fontKey] || FONT_FAMILIES.system;
+  const isLightChrome = theme.structure_tone === 'light';
+  const itemText = isLightChrome ? '#334155' : theme.structure_text;
+  const subText = isLightChrome ? '#475569' : theme.structure_muted;
+  const ctrlBg = isLightChrome ? '#f8fafc' : 'rgba(255, 255, 255, 0.14)';
+  const ctrlBorder = isLightChrome ? '#cbd5e1' : 'rgba(255, 255, 255, 0.25)';
+
+  return `
+    :root {
+      --app-font: ${fontFamily};
+      --theme-struct-bg: ${theme.structure_bg};
+      --theme-struct-side-bg: ${theme.structure_side_bg};
+      --theme-struct-text: ${theme.structure_text};
+      --theme-struct-muted: ${theme.structure_muted};
+      --theme-struct-item-bg: ${theme.structure_item_bg};
+      --theme-struct-item-hover: ${theme.structure_item_hover};
+      --theme-struct-item-text: ${itemText};
+      --theme-struct-sub-text: ${subText};
+      --theme-struct-border: ${theme.structure_border};
+      --theme-struct-table-bg: ${theme.structure_table_bg};
+      --theme-struct-table-text: ${theme.structure_table_text};
+      --theme-struct-ctrl-bg: ${ctrlBg};
+      --theme-struct-ctrl-border: ${ctrlBorder};
+      --theme-btn-primary: ${theme.primary_btn};
+      --theme-btn-primary-hover: ${theme.primary_btn_hover};
+      --theme-btn-primary-text: ${theme.primary_btn_text};
+      --theme-btn-primary-tint: ${hexToRgba(theme.primary_btn, 0.12)};
+      --theme-btn-warn: ${theme.warning_btn};
+      --theme-btn-warn-hover: ${theme.warning_btn_hover};
+      --theme-btn-warn-text: ${theme.warning_btn_text};
+      --theme-btn-danger: ${theme.danger_btn};
+      --theme-btn-danger-hover: ${theme.danger_btn_hover};
+      --theme-focus-ring: ${hexToRgba(theme.primary_btn, 0.25)};
+      --brand-primary: ${theme.primary_btn};
+      --brand-hover: ${theme.primary_btn_hover};
+      --brand-accent: ${theme.primary_btn};
+      --brand-glow: ${hexToRgba(theme.primary_btn, 0.28)};
+      --sp-primary: ${theme.primary_btn};
+      --sp-primary-hover: ${theme.primary_btn_hover};
+      --sp-primary-contrast: ${theme.primary_btn_text};
+      --sp-warning: ${theme.warning_btn};
+      --sp-danger: ${theme.danger_btn};
+      --sp-danger-hover: ${theme.danger_btn_hover};
+      --sp-focus-ring: ${hexToRgba(theme.primary_btn, 0.25)};
+      --header-gradient: ${theme.structure_bg};
+      --header-text-color: ${theme.structure_text};
+    }
+    html[data-chrome-tone="light"][data-theme="dark"],
+    html[data-chrome-tone="light"] body.dark {
+      --theme-struct-bg: #0f172a;
+      --theme-struct-side-bg: #131c2e;
+      --theme-struct-text: #f8fafc;
+      --theme-struct-muted: #94a3b8;
+      --theme-struct-item-bg: #1e293b;
+      --theme-struct-item-hover: #24334a;
+      --theme-struct-item-text: #e2e8f0;
+      --theme-struct-sub-text: #cbd5e1;
+      --theme-struct-border: #26354a;
+      --theme-struct-table-bg: #1e293b;
+      --theme-struct-table-text: #e2e8f0;
+      --theme-struct-ctrl-bg: #1e293b;
+      --theme-struct-ctrl-border: #334155;
+    }
+    body, button, input, select, textarea, .card, .dt, .zy-sidenav, .page-title, h1, h2, h3, h4 {
+      font-family: var(--app-font) !important;
+    }
+  `;
+}
+
+function escHtml(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sendInjectedHtml(res, filePath, req = null) {
+  try {
+    let content = fs.readFileSync(filePath, 'utf-8');
+    const settings = readDb('settings') || {};
+    const themeCatalog = getThemeCatalog(settings);
+    const defaultThemeKey = (settings.default_theme_key && themeCatalog.some(t => t.key === settings.default_theme_key))
+      ? settings.default_theme_key
+      : 'daylight_cobalt';
+
+    let userThemeKey = '';
+    let userThemeMode = '';
+    let isOwnerSession = false;
+    if (req) {
+      try {
+        const sUser = getSessionUser(req);
+        if (sUser && sUser.username) {
+          const sRole = String(sUser.role || '').toLowerCase();
+          if (sRole === 'owner' || sRole === 'admin') isOwnerSession = true;
+          const found = findUserAnywhere(sUser.username);
+          if (found && found.user) {
+            if (found.user.theme_key && themeCatalog.some(t => t.key === found.user.theme_key)) {
+              userThemeKey = found.user.theme_key;
+            }
+            if (found.user.theme_mode === 'dark' || found.user.theme_mode === 'light' || found.user.theme_mode === 'system') {
+              userThemeMode = found.user.theme_mode;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    const effectiveTheme = resolveEffectiveTheme(settings, userThemeKey);
+    const css = getThemeCss(settings, userThemeKey);
+    const safeSettings = {
+      site_name: settings.site_name || 'HUMAX SMS',
+      logo_url: settings.logo_url || '/static/img/humex-sms-logo.png',
+      theme_mode: settings.theme_mode || 'light',
+      font_family: settings.font_family || 'system',
+      default_theme_key: defaultThemeKey,
+      theme_catalog: themeCatalog,
+      footer_text: settings.footer_text || `© ${new Date().getFullYear()} ${settings.site_name || 'HUMAX SMS'}. All rights reserved.`
+    };
+
+    const siteNameEsc = escHtml(safeSettings.site_name);
+    const logoUrlEsc = escHtml(safeSettings.logo_url);
+
+    // Determine clean page title dynamically on the server
+    const baseName = path.basename(filePath).toLowerCase();
+    let pageTitle = `${siteNameEsc} | Login`;
+    if (baseName.includes('index')) pageTitle = `Owner Panel — ${siteNameEsc}`;
+    else if (baseName.includes('agent')) pageTitle = `Agent Panel — ${siteNameEsc}`;
+    else if (baseName.includes('client')) pageTitle = `Client Panel — ${siteNameEsc}`;
+    else if (baseName.includes('dashboard')) pageTitle = `Dashboard — ${siteNameEsc}`;
+
+    // Cleanly replace title and favicon in HTML before sending
+    content = content.replace(/<title>[\s\S]*?<\/title>/i, `<title>${pageTitle}</title>`);
+    content = content.replace(/<link[^>]*rel=["']icon["'][^>]*>/i, `<link rel="icon" type="image/svg+xml" href="${logoUrlEsc}">`);
+    content = content.replace(/HUMEX SMS|Humex SMS|HUMAX SMS|Humax SMS/g, siteNameEsc);
+    content = content.replace(/<span class="zy-panel-badge">[\s\S]*?<\/span>/g, `<span class="zy-panel-badge"><img src="${logoUrlEsc}" class="zy-badge-logo" alt="${siteNameEsc}"> <span class="zy-badge-name">${siteNameEsc}</span></span>`);
+    content = content.replace(/id="login-logo-img"[^>]*src="[^"]*"/i, `id="login-logo-img" src="${logoUrlEsc}"`);
+    content = content.replace(/<div class="zy-avatar-lg"[^>]*>[\s\S]*?<\/div>/g, `<div class="zy-avatar-lg" style="background-color: #ffffff;"><img src="${logoUrlEsc}" alt="${siteNameEsc}" class="zy-ava-dp-img" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;background-color:#ffffff;"></div>`);
+    content = content.replace(/<span class="zy-ava"[^>]*>[\s\S]*?<\/span>/g, `<span class="zy-ava" title="Profile" style="background-color: #ffffff;"><img src="${logoUrlEsc}" alt="${siteNameEsc}" class="zy-ava-dp-img" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;background-color:#ffffff;"></span>`);
+
+    if (content.includes('<html')) {
+      content = content.replace(/<html([^>]*)>/i, `<html$1 data-chrome-tone="${effectiveTheme.structure_tone}" data-role-theme="${escHtml(effectiveTheme.key)}">`);
+    }
+
+    const userThemePayload = { theme_key: userThemeKey, theme_mode: userThemeMode };
+    const isProdEnv = process.env.NODE_ENV === 'production';
+    const guardEnabled = isProdEnv && process.env.CLIENT_GUARD_ENABLED !== 'false';
+    const protectOwner = process.env.GUARD_PROTECT_OWNER === 'true';
+    const guardActive = guardEnabled && (!isOwnerSession || protectOwner);
+    const prodGuardHtml = guardActive
+      ? `\n  <script>window.__PROD_GUARD__=${JSON.stringify({ enabled: true })};</script>\n  <script src="/static/js/shared-prod-guard.js"></script>`
+      : '';
+
+    // Synchronous head injection right at top of <head> to eliminate FOUC and lag
+    const injection = `${prodGuardHtml}
+  <script>
+    window.__BRAND_SETTINGS__ = ${JSON.stringify(safeSettings)};
+    window.__USER_THEME__ = ${JSON.stringify(userThemePayload)};
+    try { localStorage.setItem('app_brand_settings', JSON.stringify(window.__BRAND_SETTINGS__)); } catch(e){}
+  </script>
+  <style id="zero-fouc-shield">
+    .zy-header, .adminui .zy-header,
+    .zy-header-row, .adminui .zy-header-row {
+      background: var(--theme-struct-bg, #ffffff) !important;
+      color: var(--theme-struct-text, #0f172a) !important;
+      border-bottom: 1.5px solid var(--theme-struct-border, #e2e8f0) !important;
+    }
+    .zy-side, .adminui .zy-side,
+    .zy-sidenav, .adminui .zy-sidenav,
+    .zy-side-head, .adminui .zy-side-head,
+    .zy-side-foot, .adminui .zy-side-foot {
+      background: var(--theme-struct-side-bg, #ffffff) !important;
+      background-color: var(--theme-struct-side-bg, #ffffff) !important;
+      color: var(--theme-struct-text, #0f172a) !important;
+    }
+    .zy-main { background-color: var(--sp-bg-canvas, #f8fafc) !important; }
+    .zy-panel-badge {
+      display: inline-flex !important;
+      align-items: center !important;
+      gap: 8px !important;
+      font-size: 16px !important;
+      font-weight: 800 !important;
+      color: var(--theme-struct-text, #0f172a) !important;
+      letter-spacing: 0.5px !important;
+    }
+    .zy-badge-logo {
+      height: 32px !important;
+      width: auto !important;
+      max-width: 140px !important;
+      object-fit: contain !important;
+      display: inline-block !important;
+      vertical-align: middle !important;
+    }
+    @media (max-width: 768px) {
+      .zy-badge-logo { height: 26px !important; max-width: 110px !important; }
+    }
+    .zy-user .zy-ava, .adminui .zy-user .zy-ava, .zy-avatar-circle {
+      width: 38px !important; height: 38px !important; min-width: 38px !important;
+      border-radius: 50% !important; background: #ffffff !important;
+      border: 2px solid var(--theme-btn-primary, #2563eb) !important;
+      display: inline-flex !important; align-items: center !important; justify-content: center !important;
+      box-shadow: 0 2px 8px var(--theme-focus-ring, rgba(37, 99, 235, 0.25)) !important;
+      flex-shrink: 0 !important; overflow: hidden !important; padding: 1px !important;
+    }
+    .zy-user .zy-ava img, .adminui .zy-user .zy-ava img, .zy-user .zy-ava-dp-img {
+      width: 100% !important; height: 100% !important; border-radius: 50% !important;
+      object-fit: cover !important; display: block !important; filter: none !important;
+    }
+    .zy-avatar-lg {
+      width: 48px !important; height: 48px !important; min-width: 48px !important;
+      border-radius: 50% !important; background: #ffffff !important;
+      border: 2px solid var(--theme-btn-primary, #2563eb) !important;
+      overflow: hidden !important; display: flex !important; align-items: center !important;
+      justify-content: center !important; padding: 2px !important;
+      box-shadow: 0 3px 10px var(--theme-focus-ring, rgba(37, 99, 235, 0.2)) !important;
+    }
+    .zy-avatar-lg img {
+      width: 100% !important; height: 100% !important; border-radius: 50% !important;
+      object-fit: cover !important; display: block !important; filter: none !important;
+    }
+  </style>
+  <style id="dynamic-brand-styles">${css}</style>
+`;
+    if (content.includes('<head>')) {
+      content = content.replace('<head>', `<head>\n${injection}`);
+    } else if (content.includes('</head>')) {
+      content = content.replace('</head>', `${injection}\n</head>`);
+    } else {
+      content = injection + content;
+    }
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+    res.send(content);
+  } catch (err) {
+    console.error('sendInjectedHtml error:', err);
+    res.sendFile(filePath);
+  }
+}
+
+const PANELS = {
+  owner: path.join(STATIC_DIR, 'index.html'),
+  admin: path.join(STATIC_DIR, 'index.html'),
+  agent: path.join(STATIC_DIR, 'agent.html'),
+  client: path.join(STATIC_DIR, 'client.html')
+};
+
+// ── Auth APIs & Session Management ──────────────────────────────
+const activeSessions = new Map();
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+const SESSION_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4h
+
+function hashSessionToken(token) {
+  if (!token || typeof token !== 'string') return '';
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function findSessionDbUser(session) {
+  if (!session) return null;
+  const role = String(session.role || '').toLowerCase();
+  if (role === 'owner' || role === 'admin') {
+    const users = readDb('users') || [];
+    return users.find(u => Number(u.id) === Number(session.id) || String(u.username || '').toLowerCase() === String(session.username || '').toLowerCase()) || null;
+  }
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    return agents.find(a => Number(a.id) === Number(session.id) || String(a.username || '').toLowerCase() === String(session.username || '').toLowerCase()) || null;
+  }
+  if (role === 'client') {
+    const clients = readDb('clients') || [];
+    return clients.find(c => Number(c.id) === Number(session.id) || String(c.username || '').toLowerCase() === String(session.username || '').toLowerCase()) || null;
+  }
+  return null;
+}
+
+function loadPersistedSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      const now = Date.now();
+      let pruned = false;
+      for (const [hashedToken, sess] of Object.entries(data)) {
+        const withinWindow = sess && now - (sess.created || now) < SESSION_MAX_AGE_MS && now - (sess.lastActive || now) < SESSION_IDLE_TIMEOUT_MS;
+        const dbUser = withinWindow ? findSessionDbUser(sess) : null;
+        const isDisabled = dbUser && (dbUser.status === 'suspended' || dbUser.status === 'inactive' || dbUser.status === 'deactivated' || dbUser.status === 'disabled');
+        if (withinWindow && dbUser && !isDisabled) {
+          sess.id = dbUser.id;
+          activeSessions.set(hashedToken, sess);
+        } else {
+          pruned = true;
+        }
+      }
+      if (pruned) savePersistedSessions();
+    }
+  } catch (e) {
+    console.warn('Error loading sessions:', e.message);
+  }
+}
+
+function savePersistedSessions() {
+  try {
+    const obj = {};
+    const now = Date.now();
+    for (const [hashedToken, sess] of activeSessions.entries()) {
+      if (now - (sess.created || now) < SESSION_MAX_AGE_MS && now - (sess.lastActive || now) < SESSION_IDLE_TIMEOUT_MS) {
+        obj[hashedToken] = sess;
+      }
+    }
+    atomicWriteFileSync(SESSIONS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn('Error saving sessions:', e.message);
+  }
+}
+
+loadPersistedSessions();
+
+function parseCookies(req) {
+  const list = {};
+  const rc = req && req.headers && req.headers.cookie;
+  if (rc) {
+    rc.split(';').forEach(cookie => {
+      const parts = cookie.split('=');
+      const key = parts.shift().trim();
+      const val = decodeURIComponent(parts.join('='));
+      if (key) list[key] = val;
+    });
+  }
+  return list;
+}
+
+function getSessionToken(req) {
+  const auth = (req && req.headers && req.headers['authorization']) || '';
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+  const xSession = (req && req.headers && (req.headers['x-session-token'] || req.headers['x-auth-token'])) || '';
+  if (xSession) return String(xSession).trim();
+  const cookies = parseCookies(req);
+  return cookies['humex_session_token'] || cookies['alpha_session_token'] || cookies['session_token'] || null;
+}
+
+function getSessionUser(req) {
+  const rawToken = getSessionToken(req);
+  if (!rawToken) return null;
+  const hashedToken = hashSessionToken(rawToken);
+  if (hashedToken && activeSessions.has(hashedToken)) {
+    const session = activeSessions.get(hashedToken);
+    const now = Date.now();
+    if (now - (session.created || now) > SESSION_MAX_AGE_MS || now - (session.lastActive || now) > SESSION_IDLE_TIMEOUT_MS) {
+      activeSessions.delete(hashedToken);
+      savePersistedSessions();
+      return null;
+    }
+
+    // Verify account exists and is active in DB (immediately revoke deleted/orphaned accounts)
+    const dbUser = findSessionDbUser(session);
+    if (!dbUser || dbUser.status === 'suspended' || dbUser.status === 'inactive' || dbUser.status === 'deactivated' || dbUser.status === 'disabled') {
+      activeSessions.delete(hashedToken);
+      savePersistedSessions();
+      return null;
+    }
+
+    session.id = dbUser.id;
+    session.lastActive = now;
+    return session;
+  }
+  return null;
+}
+
+const ROLE_HOME_URL = {
+  owner: '/ints/owner/SMSDashboard',
+  admin: '/ints/owner/SMSDashboard',
+  agent: '/ints/agent/SMSDashboard',
+  client: '/ints/client/SMSDashboard'
+};
+
+// ── Strict Role Guard Middleware for Express Routes ────────────
+function requireRole(allowedRoles) {
+  const normalizedAllowed = allowedRoles.map(r => r.toLowerCase());
+  return (req, res, next) => {
+    const user = getSessionUser(req);
+    if (!user) {
+      return res.redirect('/ints/login');
+    }
+    const userRole = (user.role || '').toLowerCase();
+    const isOwner = userRole === 'owner' || userRole === 'admin';
+    if (!normalizedAllowed.includes(userRole) && !(isOwner && normalizedAllowed.includes('owner'))) {
+      return res.redirect(ROLE_HOME_URL[userRole] || '/ints/login');
+    }
+    next();
+  };
+}
+
+// ── Strict API Auth & Role Middleware ───────────────────────────
+function requireAuth(req, res, next) {
+  const user = getSessionUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+  }
+  req.sessionUser = user;
+  next();
+}
+
+function requireApiRole(allowedRoles) {
+  const allowed = allowedRoles.map(r => r.toLowerCase());
+  return (req, res, next) => {
+    const user = getSessionUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+    }
+    const userRole = (user.role || '').toLowerCase();
+    const isOwner = userRole === 'owner' || userRole === 'admin';
+    if (!allowed.includes(userRole) && !(isOwner && allowed.includes('owner'))) {
+      return res.status(403).json({ error: 'Forbidden. Your role does not have permission.' });
+    }
+    req.sessionUser = user;
+    next();
+  };
+}
+
+// ── Role Page Routes with Strict Server-Side Isolation (/ints/ namespace) ───────────
+app.get('/ints/login', (req, res) => {
+  // If navigating directly to login, always deliver the login screen freshly
+  const isHttps = isRequestHttps(req);
+  const sec = isHttps ? '; Secure; Partitioned' : '';
+  const sameSite = isHttps ? 'None' : 'Lax';
+  res.setHeader('Set-Cookie', [
+    `humex_session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`,
+    `humex_session_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=${sameSite}${sec}`,
+    `alpha_session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`,
+    `alpha_session_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=${sameSite}${sec}`,
+    `session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`
+  ]);
+  sendInjectedHtml(res, path.join(STATIC_DIR, 'login.html'), req);
+});
+
+// Health check endpoints (public, 200 OK for dev server, PM2, Nginx & monitoring probes)
+app.get(['/health', '/ping'], (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+    smpp_listening: Boolean(typeof smppServerState !== 'undefined' && smppServerState.listening && smppServerInstance),
+    smpp_port: (typeof smppServerState !== 'undefined' && smppServerState.port) || Number(process.env.SMPP_PORT) || 2775
+  });
+});
+
+// Any direct access to /login or / redirects immediately to /ints/login
+app.get('/login', (req, res) => {
+  res.redirect('/ints/login');
+});
+
+app.get('/', (req, res) => {
+  const user = getSessionUser(req);
+  if (user) {
+    const role = (user.role || '').toLowerCase();
+    return res.redirect(ROLE_HOME_URL[role] || '/ints/owner/SMSDashboard');
+  }
+  return res.redirect('/ints/login');
+});
+
+// Non-ints panel routes: Direct access without /ints redirects to /ints/login
+app.get(['/owner', '/dashboard', '/agent', '/client'], (req, res) => {
+  const user = getSessionUser(req);
+  if (user) {
+    const role = (user.role || '').toLowerCase();
+    return res.redirect(ROLE_HOME_URL[role] || '/ints/login');
+  }
+  return res.redirect('/ints/login');
+});
+
+app.get('/ints', (req, res) => res.redirect('/ints/login'));
+
+app.get('/ints/:role', (req, res) => {
+  const targetRole = (req.params.role || '').toLowerCase();
+  const user = getSessionUser(req);
+  if (!user) {
+    return res.redirect('/ints/login');
+  }
+  const userRole = (user.role || '').toLowerCase();
+  const isOwnerOrAdmin = r => r === 'admin' || r === 'owner';
+  if (userRole !== targetRole && !(isOwnerOrAdmin(userRole) && isOwnerOrAdmin(targetRole))) {
+    return res.redirect(ROLE_HOME_URL[userRole] || '/ints/login');
+  }
+  if (PANELS[targetRole]) {
+    return res.redirect(`/ints/${targetRole}/SMSDashboard`);
+  }
+  res.redirect('/ints/login');
+});
+
+app.get('/ints/:role/:page', (req, res) => {
+  const targetRole = (req.params.role || '').toLowerCase();
+  const user = getSessionUser(req);
+  if (!user) {
+    return res.redirect('/ints/login');
+  }
+  const userRole = (user.role || '').toLowerCase();
+  const isOwnerOrAdmin = r => r === 'admin' || r === 'owner';
+  if (userRole !== targetRole && !(isOwnerOrAdmin(userRole) && isOwnerOrAdmin(targetRole))) {
+    return res.redirect(ROLE_HOME_URL[userRole] || '/ints/login');
+  }
+  if (PANELS[targetRole]) {
+    return sendInjectedHtml(res, PANELS[targetRole], req);
+  }
+  res.redirect('/ints/login');
+});
+
+function isUsernameTaken(newUsername, excludeId = null, currentTable = null) {
+  if (!newUsername) return false;
+  const raw = String(newUsername).trim().toLowerCase();
+  const clean = raw.replace(/[\s-]+/g, '_');
+  const pure = clean.replace(/[^a-z0-9]/g, '');
+  if (!clean) return false;
+
+  // Protect Owner & Admin fixed handles across entire system
+  const isEditingOwner = (excludeId === 1 || String(excludeId) === '1') && currentTable === 'users';
+  if (!isEditingOwner) {
+    if (clean === 'kamran_bhatti' || pure === 'kamranbhatti' || clean === 'owner' || clean === 'admin') {
+      return true;
+    }
+  }
+
+  const tables = ['users', 'agents', 'clients', 'registration_requests'];
+  for (const tbl of tables) {
+    const rows = readDb(tbl) || [];
+    if (!Array.isArray(rows)) continue;
+    for (const r of rows) {
+      if (!r || !r.username) continue;
+      const exRaw = String(r.username).trim().toLowerCase();
+      const exClean = exRaw.replace(/[\s-]+/g, '_');
+      const exPure = exClean.replace(/[^a-z0-9]/g, '');
+      if (exClean === clean || (pure && exPure === pure) || exRaw === raw) {
+        if (excludeId !== null && currentTable === tbl && (r.id === excludeId || String(r.id) === String(excludeId))) {
+          continue;
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+app.get('/api/check-username', (req, res) => {
+  const u = String(req.query.username || '').trim();
+  const excludeId = req.query.exclude_id ? Number(req.query.exclude_id) : null;
+  const table = req.query.table ? String(req.query.table).trim() : null;
+  if (!u) {
+    return res.json({ available: false, exists: false, error: 'Username is required', message: 'Username is required' });
+  }
+  const taken = isUsernameTaken(u, excludeId, table);
+  if (taken) {
+    return res.json({
+      available: false,
+      exists: true,
+      error: 'This username already exists',
+      message: 'This username already exists. Please choose a different username.'
+    });
+  }
+  return res.json({
+    available: true,
+    exists: false,
+    message: 'Username is available'
+  });
+});
+
+function base32Decode(str) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0;
+  let value = 0;
+  let index = 0;
+  const clean = (str || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+  const output = new Uint8Array(((clean.length * 5) / 8) | 0);
+  for (let i = 0; i < clean.length; i++) {
+    const val = alphabet.indexOf(clean[i]);
+    if (val === -1) continue;
+    value = (value << 5) | val;
+    bits += 5;
+    if (bits >= 8) {
+      output[index++] = (value >>> (bits - 8)) & 255;
+      bits -= 8;
+    }
+  }
+  return Buffer.from(output);
+}
+
+function verifyTotp(token, secret, window = 1) {
+  if (!token || !secret) return false;
+  try {
+    const key = base32Decode(secret);
+    if (!key || key.length === 0) return false;
+    const epoch = Math.floor(Date.now() / 1000);
+    const timeStep = 30;
+    const currentCounter = Math.floor(epoch / timeStep);
+
+    for (let w = -window; w <= window; w++) {
+      const counter = currentCounter + w;
+      const buf = Buffer.alloc(8);
+      buf.writeBigInt64BE(BigInt(counter), 0);
+      const hmac = crypto.createHmac('sha1', key).update(buf).digest();
+      const offset = hmac[hmac.length - 1] & 0xf;
+      const code = ((hmac.readUInt32BE(offset) & 0x7fffffff) % 1000000).toString().padStart(6, '0');
+      if (code === String(token).trim()) return true;
+    }
+  } catch (e) {
+    console.error('verifyTotp error:', e);
+  }
+  return false;
+}
+
+function generateBase32Secret(len = 20) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bytes = crypto.randomBytes(len);
+  let res = '';
+  for (let i = 0; i < len; i++) {
+    res += alphabet[bytes[i] % 32];
+  }
+  return res;
+}
+
+function findUserAnywhere(identifier) {
+  if (!identifier) return null;
+  const q = String(identifier).trim().toLowerCase();
+  const tables = ['users', 'agents', 'clients'];
+  for (const tbl of tables) {
+    const rows = readDb(tbl) || [];
+    const found = rows.find(x => {
+      if (!x) return false;
+      const u = String(x.username || '').trim().toLowerCase();
+      const e = String(x.email || '').trim().toLowerCase();
+      return u === q || e === q || (u === 'kamran_bhatti' && (q === 'kamran' || q === 'owner'));
+    });
+    if (found) {
+      const defaultRole = tbl === 'agents' ? 'Agent' : tbl === 'clients' ? 'Client' : 'Owner';
+      return { user: found, table: tbl, role: found.role || defaultRole };
+    }
+  }
+  return null;
+}
+
+function updateUserRecord(table, userId, updates) {
+  const rows = readDb(table) || [];
+  const idx = rows.findIndex(x => x && (x.id === userId || String(x.id) === String(userId)));
+  if (idx !== -1) {
+    rows[idx] = { ...rows[idx], ...updates };
+    writeDb(table, rows);
+    return rows[idx];
+  }
+  return null;
+}
+
+function safeUser(u) {
+  if (!u || typeof u !== 'object') return u;
+  if (Array.isArray(u)) return u.map(safeUser);
+  const copy = { ...u };
+  for (const k of Object.keys(copy)) {
+    const lk = k.toLowerCase();
+    if (
+      lk === 'password' ||
+      lk === 'two_fa_secret' ||
+      lk === 'two_fa_backup_codes' ||
+      lk === 'pending_2fa_secret' ||
+      lk.includes('token') ||
+      lk.includes('secret') ||
+      lk.includes('otp')
+    ) {
+      delete copy[k];
+    }
+  }
+  return copy;
+}
+
+// ── Global API Guard: deny by default + role matrix ─────────────
+function normRole(r) { r = String(r || '').toLowerCase(); return r === 'admin' ? 'owner' : r; }
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// First matching rule wins. Roles are lower-case; 'owner' includes the legacy 'admin'.
+const API_RULES = [
+  { p: /^\/(backup|login-panels|cr-api-connections|whitenoise-connections|webhook|firewall|smpp)(\/|$)/, roles: ['owner'] },
+  { p: /^\/(reports|dashboard|cli-routes)(\/|$)/, roles: ['owner'] },
+  { p: /^\/numbers\/(upload|import-to-range|bulk-range-import|bulk-delete-many|download|test|blacklist)(\/.*)?$/, roles: ['owner'] },
+  { p: /^\/numbers\/(bulk-allocate|allocation-history)(\/.*)?$/, roles: ['owner', 'agent'] },
+  { m: WRITE_METHODS, p: /^\/(audit-logs|login-activity)(\/|$)/, roles: ['owner'] },
+  { p: /^\/rate-limits(\/|$)/, roles: ['owner'] },
+  { m: WRITE_METHODS, p: /^\/(settings|permissions|payout-rates|services|registration-requests|payterms|monthly-cycle)(\/|$)/, roles: ['owner'] },
+  { m: WRITE_METHODS, p: /^\/numbers\/(sms-ranges|rate-card)(\/.*)?$/, roles: ['owner'] },
+  { m: WRITE_METHODS, p: /^\/number-transfers(\/|$)/, roles: ['owner'] },
+  { m: new Set(['POST']), p: /^\/notifications$/, roles: ['owner'] },
+  { m: new Set(['PATCH', 'DELETE']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent'] },
+  { m: new Set(['POST']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent', 'client'] },
+  { m: WRITE_METHODS, p: /^\/announcements(\/|$)/, roles: ['owner', 'agent'] },
+  { m: WRITE_METHODS, p: /^\/payments(\/|$)/, roles: ['owner', 'agent'] },
+  { p: /^\/agent\/(client-rates|pkr-target)(\/|$)/, roles: ['agent'] },
+  { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] }
+];
+// Client is default-deny: only these routes exist for them.
+const CLIENT_ALLOW = [
+  { p: /^\/(auth|user|account|notifications|support-tickets)(\/|$)/ },
+  { m: new Set(['GET']), p: /^\/(settings|announcements|payterms|monthly-cycle)(\/|$)/ },
+  { m: new Set(['GET']), p: /^\/numbers$/ },
+  { m: new Set(['GET']), p: /^\/numbers\/sms-ranges$/ },
+  { m: new Set(['GET']), p: /^\/numbers\/rate-card$/ },
+  { m: new Set(['GET']), p: /^\/numbers\/allocation-policy$/ },
+  { m: new Set(['POST']), p: /^\/numbers\/\d+\/whitenoise-fetch$/ },
+  { m: new Set(['GET']), p: /^\/client\/rate-card$/ },
+  { m: new Set(['POST']), p: /^\/numbers\/(agent-allocate|request)$/ },
+  { m: new Set(['POST']), p: /^\/numbers\/(\d+\/)?return$/ },
+  { m: new Set(['GET']), p: /^\/agent-requests(\/\d+)?$/ },
+  { m: new Set(['GET', 'POST']), p: /^\/client-requests(\/\d+)?$/ },
+  { m: new Set(['GET']), p: /^\/sms\/(logs|export|client-logs|daily-stats|period-stats|client-stats|stats)$/ },
+  { m: new Set(['GET', 'POST']), p: /^\/cdr2(\/|$)/ },
+  { m: new Set(['GET', 'PATCH']), p: /^\/clients(\/\d+)?$/ },
+  { m: new Set(['GET']), p: /^\/client\/\d+\// },
+  { m: new Set(['GET']), p: /^\/(credit-notes|statements)(\/|$)/ },
+  { m: new Set(['GET', 'POST']), p: /^\/payout-requests(\/|$)/ },
+  { m: new Set(['GET']), p: /^\/payments(\/|$)/ }
+];
+function ruleHit(list, p, method) { return list.some(r => (!r.m || r.m.has(method)) && r.p.test(p)); }
+
+function getInboundToken() {
+  if (process.env.INBOUND_TOKEN) return String(process.env.INBOUND_TOKEN);
+  const cfg = readDb('webhook_config');
+  return (cfg && !Array.isArray(cfg) && cfg.inbound_token) ? String(cfg.inbound_token) : '';
+}
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+app.use('/api', (req, res, next) => {
+  const p = req.path;
+  const method = req.method.toUpperCase();
+
+  // 0. Public health check / ping
+  if ((p === '/health' || p === '/ping') && method === 'GET') {
+    return res.status(200).json({
+      status: 'ok',
+      uptime: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+      smpp_listening: Boolean(typeof smppServerState !== 'undefined' && smppServerState.listening && smppServerInstance),
+      smpp_port: (typeof smppServerState !== 'undefined' && smppServerState.port) || Number(process.env.SMPP_PORT) || 2775
+    });
+  }
+
+  // 1. Public auth endpoints
+  if (p === '/auth/login' || p === '/auth/logout' || p === '/auth/me' || p === '/auth/captcha') {
+    return next();
+  }
+  // 2. Branding for the login page (the route itself filters what an anonymous caller may see)
+  if ((p === '/settings' || p === '/settings/min-payout' || p === '/payterms') && (method === 'GET' || method === 'HEAD')) return next();
+
+  // 3. Inbound carrier webhook: a shared secret is REQUIRED
+  if (p === '/sms/inbound' || p === '/inbound' || p === '/sms/receive') {
+    const expected = getInboundToken();
+    if (!expected) {
+      console.error('[SECURITY] Inbound webhook refused: INBOUND_TOKEN is not configured.');
+      return res.status(503).json({ status: 'error', error: 'Inbound webhook is disabled until INBOUND_TOKEN is configured.' });
+    }
+    const sent = String(req.headers['x-inbound-token'] || '');
+    if (!sent || !safeEqual(sent, expected)) return res.status(403).json({ status: 'error', error: 'Forbidden. Invalid inbound token.' });
+    return next();
+  }
+  // 4. Token-authenticated API routes (the route itself verifies the token)
+  if ((p === '/sms' && method === 'GET') || p === '/sms/viewstats' || p.startsWith('/crapi/')) return next();
+
+  // 5. Everything else needs a session
+  const user = getSessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+
+  // 5b. CSRF origin check for cookie-authenticated state-changing browser requests
+  const hasExplicitAuthHeader = Boolean(
+    (req.headers['authorization'] && String(req.headers['authorization']).startsWith('Bearer ')) ||
+    req.headers['x-session-token'] ||
+    req.headers['x-auth-token']
+  );
+  if (WRITE_METHODS.has(method) && !hasExplicitAuthHeader) {
+    const reqOrigin = req.headers.origin;
+    const reqReferer = req.headers.referer;
+    const effectiveHosts = getEffectiveHosts(req);
+    const checkUrlHost = (rawUrl) => {
+      try {
+        const u = new URL(rawUrl);
+        return effectiveHosts.has(u.host.toLowerCase()) || ALLOWED_ORIGINS.has(`${u.protocol}//${u.host}`.toLowerCase());
+      } catch (_) {
+        return false;
+      }
+    };
+    if (reqOrigin && !checkUrlHost(reqOrigin)) {
+      return res.status(403).json({ error: 'Forbidden. Invalid CSRF origin.' });
+    }
+    if (!reqOrigin && reqReferer && !checkUrlHost(reqReferer)) {
+      return res.status(403).json({ error: 'Forbidden. Invalid CSRF referer.' });
+    }
+  }
+
+  req.sessionUser = user;
+  const role = normRole(user.role);
+
+  // 6. Client: allow-list only
+  if (role === 'client' && !ruleHit(CLIENT_ALLOW, p, method)) return res.status(403).json({ error: 'Forbidden for your role.' });
+
+  // 7. Owner / Agent: rule table
+  for (const r of API_RULES) {
+    if ((!r.m || r.m.has(method)) && r.p.test(p)) {
+      if (!r.roles.includes(role)) return res.status(403).json({ error: 'Forbidden. Your role cannot do this.' });
+      break;
+    }
+  }
+  next();
+});
+
+// ── In-Memory Math Captcha Challenge Store ───────────────────────
+const activeCaptchas = new Map();
+function cleanExpiredCaptchas() {
+  const now = Date.now();
+  for (const [id, c] of activeCaptchas.entries()) {
+    if (now > c.expires) activeCaptchas.delete(id);
+  }
+}
+setInterval(cleanExpiredCaptchas, 5 * 60 * 1000);
+
+app.get('/api/auth/captcha', (req, res) => {
+  cleanExpiredCaptchas();
+  const n1 = crypto.randomInt(1, 13);
+  const n2 = crypto.randomInt(1, 13);
+  const answer = n1 + n2;
+  const id = crypto.randomBytes(16).toString('hex');
+  activeCaptchas.set(id, { answer, expires: Date.now() + 10 * 60 * 1000 });
+  res.json({ id, question: `What is ${n1} + ${n2} =` });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { username, password, two_fa_code, captcha_id, captcha_answer } = req.body || {};
+  const u = (username || '').trim();
+  const p = (password || '').trim();
+
+  if (!u || !p) {
+    return res.status(400).json({ success: false, error: 'Username and password are required', detail: 'Username and password are required' });
+  }
+
+  // Strict math captcha verification (always required)
+  cleanExpiredCaptchas();
+  if (!captcha_id || captcha_answer === undefined || String(captcha_answer).trim() === '') {
+    return res.status(400).json({ success: false, error: 'Please enter the correct answer to the math captcha.', detail: 'Missing captcha' });
+  }
+  const capRecord = activeCaptchas.get(String(captcha_id));
+  if (!capRecord || Date.now() > capRecord.expires) {
+    if (capRecord) activeCaptchas.delete(String(captcha_id));
+    return res.status(400).json({ success: false, error: 'Captcha expired. Please refresh and try again.', detail: 'Captcha expired' });
+  }
+  const parsedAns = parseInt(String(captcha_answer).trim(), 10);
+  if (isNaN(parsedAns) || parsedAns !== capRecord.answer) {
+    activeCaptchas.delete(String(captcha_id));
+    return res.status(400).json({ success: false, error: 'Incorrect captcha answer. Please try again.', detail: 'Invalid captcha' });
+  }
+  // Captcha is single-use: consume immediately upon verification
+  activeCaptchas.delete(String(captcha_id));
+
+  const clientIp = req.ip || (req.socket && req.socket.remoteAddress) || '127.0.0.1';
+  if (isIpBlocked(clientIp)) {
+    logFirewallEvent(clientIp, 'Login Blocked IP', '/api/auth/login');
+    return res.status(403).json({ success: false, error: 'Access denied — IP blocked', detail: 'Access denied — IP blocked' });
+  }
+
+  // Rate limit: max 10 attempts per minute per IP
+  if (isRateLimited('login:' + clientIp, 10, 60 * 1000)) {
+    return res.status(429).json({ success: false, error: 'Too many login attempts. Please wait 1 minute before trying again.', detail: 'Rate limit exceeded' });
+  }
+
+  // Exact or normalized username lookup across role tables
+  const cleanU = u.toLowerCase().replace(/[\s-]+/g, '_');
+  const users = readDb('users') || [];
+  let user = users.find(x => {
+    if (!x || !x.username) return false;
+    const name = String(x.username).trim().toLowerCase();
+    return name === cleanU || name.replace(/_/g, '') === cleanU.replace(/_/g, '') ||
+           (name === 'kamran_bhatti' && (cleanU === 'kamran' || cleanU === 'kamran_bhatti' || cleanU === 'owner' || cleanU === 'admin'));
+  });
+  let source = 'users';
+
+  if (!user) {
+    const agents = readDb('agents') || [];
+    user = agents.find(x => x && x.username && String(x.username).trim().toLowerCase() === cleanU);
+    if (user) source = 'agents';
+  }
+
+  if (!user) {
+    const clients = readDb('clients') || [];
+    user = clients.find(x => x && x.username && String(x.username).trim().toLowerCase() === cleanU);
+    if (user) source = 'clients';
+  }
+
+  // Lockout keys: IP+user and global per-account lockout (not bypassable by IP spoofing)
+  const isOwnerOrAdmin = user && (
+    (source === 'users' && (String(user.role || '').toLowerCase() === 'owner' || String(user.role || '').toLowerCase() === 'admin' || user.id === 1)) ||
+    cleanU === 'kamran_bhatti' || cleanU === 'kamran' || cleanU === 'owner' || cleanU === 'admin'
+  );
+
+  const userLockKey = user
+    ? ('login_user:' + clientIp + ':' + user.id)
+    : ('login_user:' + clientIp + ':unknown:' + cleanU);
+  const acctLockKey = user
+    ? ('login_acct:' + source + ':' + user.id)
+    : ('login_acct:unknown:' + cleanU);
+
+  const maxLoginAttempts = isOwnerOrAdmin ? 10 : 5;
+  const userBucket = rateLimitBuckets.get(userLockKey);
+  const acctBucket = rateLimitBuckets.get(acctLockKey);
+  if (
+    (userBucket && (Date.now() - userBucket.start < 15 * 60 * 1000) && userBucket.count >= maxLoginAttempts) ||
+    (acctBucket && (Date.now() - acctBucket.start < 15 * 60 * 1000) && acctBucket.count >= maxLoginAttempts)
+  ) {
+    return res.status(429).json({ success: false, error: 'Too many failed login attempts. Please wait 15 minutes before trying again.', detail: 'Rate limit exceeded' });
+  }
+
+  // Password Verification: strict bcrypt verification
+  let passwordValid = false;
+  if (user && user.password) {
+    if (verifyPassword(p, user.password)) {
+      passwordValid = true;
+    }
+  }
+
+  if (passwordValid && user.password && !user.password.startsWith('$2a$') && !user.password.startsWith('$2b$')) {
+    // Automatically upgrade plaintext to bcrypt hash upon successful login
+    updateUserRecord(source, user.id, { password: hashPassword(p) });
+  }
+
+  if (passwordValid) {
+    if (user.status === 'suspended' || user.status === 'inactive' || user.status === 'deactivated') {
+      return res.status(403).json({ success: false, error: 'Account inactive or suspended', detail: 'Account inactive or suspended' });
+    }
+
+    // ── TWO-FACTOR AUTHENTICATION (2FA) CHECK ──
+    if (user.two_fa && user.two_fa_secret) {
+      if (!two_fa_code) {
+        if (isRateLimited('login_2fa_prompt:' + source + ':' + user.id, 10, 15 * 60 * 1000)) {
+          return res.status(429).json({ success: false, error: 'Too many 2FA challenges. Please wait 15 minutes.', detail: 'Rate limit exceeded' });
+        }
+        return res.json({
+          success: false,
+          require_2fa: true,
+          message: 'Enter your 2FA code.'
+        });
+      }
+      const is2faValid = verifyTotp(two_fa_code, user.two_fa_secret) ||
+        (Array.isArray(user.two_fa_backup_codes) && user.two_fa_backup_codes.includes(String(two_fa_code).trim()));
+      if (!is2faValid) {
+        isRateLimited(userLockKey, maxLoginAttempts, 15 * 60 * 1000);
+        isRateLimited(acctLockKey, maxLoginAttempts, 15 * 60 * 1000);
+        return res.status(401).json({
+          success: false,
+          require_2fa: true,
+          error: 'Invalid 2FA code. Please check your Authenticator app.'
+        });
+      }
+    }
+
+    // Unambiguous Role Resolution (Strict 3-Tier: Owner, Agent, Client)
+    let role = 'Owner';
+    if (source === 'agents') {
+      role = 'Agent';
+    } else if (source === 'clients') {
+      role = 'Client';
+    } else {
+      role = 'Owner';
+    }
+
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = hashSessionToken(sessionToken);
+    const userPayload = {
+      id: user.id || 1,
+      username: user.username,
+      role: role,
+      email: user.email || '',
+      two_fa: !!user.two_fa,
+      source: source,
+      agent_id: user.agent_id || null,
+      commission_rate: user.commission_rate || 5.0,
+      theme_key: user.theme_key || '',
+      theme_mode: (user.theme_mode === 'dark' || user.theme_mode === 'light' || user.theme_mode === 'system') ? user.theme_mode : ''
+    };
+
+    activeSessions.set(hashedToken, {
+      ...userPayload,
+      created: Date.now(),
+      lastActive: Date.now()
+    });
+    savePersistedSessions();
+
+    const isHttps = isRequestHttps(req);
+    const sec = isHttps ? '; Secure; Partitioned' : '';
+    const sameSite = isHttps ? 'None' : 'Lax';
+
+    // Set secure HTTP session cookies with HttpOnly protection (iframe friendly)
+    res.setHeader('Set-Cookie', [
+      `humex_session_token=${sessionToken}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=86400${sec}`,
+      `humex_session_role=${role}; Path=/; SameSite=${sameSite}; Max-Age=86400${sec}`,
+      `session_token=${sessionToken}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=86400${sec}`
+    ]);
+
+    rateLimitBuckets.delete(userLockKey);
+    rateLimitBuckets.delete(acctLockKey);
+    rateLimitBuckets.delete('login_2fa_prompt:' + source + ':' + user.id);
+    logAudit(user.username, 'Login Success', `Logged in as ${role}`, 'Auth');
+
+    return res.json({
+      success: true,
+      user: userPayload,
+      role: role,
+      username: user.username,
+      id: user.id || 1,
+      agent_id: user.agent_id || null,
+      commission_rate: user.commission_rate || 5.0
+    });
+  }
+
+  isRateLimited(userLockKey, maxLoginAttempts, 15 * 60 * 1000);
+  isRateLimited(acctLockKey, maxLoginAttempts, 15 * 60 * 1000);
+  logAudit(u, 'Login Failed', 'Invalid username or password', 'Auth');
+  return res.status(401).json({ success: false, error: 'Invalid username or password', detail: 'Invalid username or password' });
+});
+
+// ── USER PROFILE & SECURITY APIS ────────────────────────────────
+app.get('/api/user/profile', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const u = found.user;
+  const themeCatalog = getThemeCatalog(readDb('settings') || {});
+  const validUserThemeKey = (u.theme_key && themeCatalog.some(t => t.key === u.theme_key)) ? u.theme_key : '';
+  res.json({
+    success: true,
+    user: {
+      id: u.id,
+      username: u.username,
+      role: found.role,
+      full_name: u.full_name || u.name || '',
+      email: u.email || '',
+      phone: u.phone || u.contact || '',
+      teams: u.teams || '',
+      theme_mode: (u.theme_mode === 'dark' || u.theme_mode === 'light' || u.theme_mode === 'system') ? u.theme_mode : '',
+      theme_key: validUserThemeKey,
+      two_fa: !!u.two_fa,
+      two_fa_backup_count: Array.isArray(u.two_fa_backup_codes) ? u.two_fa_backup_codes.length : 0,
+      status: u.status || 'active'
+    }
+  });
+});
+
+app.post('/api/user/profile/update', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const { full_name, phone, teams, email, theme_mode, theme_key } = req.body || {};
+  const updates = {};
+  const changedFields = [];
+  if (full_name !== undefined) {
+    updates.full_name = String(full_name).trim();
+    changedFields.push('full_name');
+  }
+  if (phone !== undefined) {
+    updates.phone = String(phone).trim();
+    changedFields.push('phone');
+  }
+  if (teams !== undefined) {
+    updates.teams = String(teams).trim();
+    changedFields.push('teams');
+  }
+  if (email !== undefined) {
+    const cleanEmail = String(email).trim().toLowerCase();
+    if (cleanEmail && (!cleanEmail.includes('@') || !cleanEmail.includes('.'))) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid email address' });
+    }
+    updates.email = cleanEmail;
+    changedFields.push('email');
+  }
+  if (theme_mode !== undefined) {
+    const cleanTheme = String(theme_mode).trim().toLowerCase();
+    if (!['light', 'dark', 'system'].includes(cleanTheme)) {
+      return res.status(400).json({ success: false, error: 'Invalid theme preference' });
+    }
+    updates.theme_mode = cleanTheme;
+  }
+  if (theme_key !== undefined) {
+    const rawKey = String(theme_key || '').trim();
+    if (!rawKey || rawKey === 'default' || rawKey === 'system_default') {
+      updates.theme_key = '';
+    } else {
+      const catalog = getThemeCatalog(readDb('settings') || {});
+      if (!catalog.some(t => t.key === rawKey)) {
+        return res.status(400).json({ success: false, error: 'Selected theme is not published by Owner.' });
+      }
+      updates.theme_key = rawKey;
+    }
+  }
+
+  updateUserRecord(found.table, found.user.id, updates);
+  if (changedFields.length > 0) {
+    logAudit(sessionUser.username, 'Profile Updated', `Updated ${changedFields.join(', ')}`, 'Profile');
+  }
+  res.json({
+    success: true,
+    message: 'Profile updated successfully',
+    user: {
+      full_name: updates.full_name !== undefined ? updates.full_name : (found.user.full_name || found.user.name || ''),
+      email: updates.email !== undefined ? updates.email : (found.user.email || ''),
+      phone: updates.phone !== undefined ? updates.phone : (found.user.phone || found.user.contact || ''),
+      teams: updates.teams !== undefined ? updates.teams : (found.user.teams || ''),
+      theme_mode: updates.theme_mode !== undefined ? updates.theme_mode : (found.user.theme_mode || ''),
+      theme_key: updates.theme_key !== undefined ? updates.theme_key : (found.user.theme_key || '')
+    }
+  });
+});
+
+// ── 2FA SETUP & TOGGLE ──────────────────────────────────────────
+app.post('/api/user/2fa/setup', async (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const { password } = req.body || {};
+  if (!password || !verifyPassword(password, found.user.password)) {
+    return res.status(400).json({ success: false, error: 'Please enter your correct account password' });
+  }
+
+  const secret = generateBase32Secret(20);
+  const settings = readDb('settings') || {};
+  const appName = settings.site_name || 'HUMAX SMS';
+  const otpauthUrl = `otpauth://totp/${encodeURIComponent(appName)}:${encodeURIComponent(found.user.username)}?secret=${secret}&issuer=${encodeURIComponent(appName)}`;
+
+  try {
+    const qrDataUrl = await QRCode.toDataURL(otpauthUrl);
+    updateUserRecord(found.table, found.user.id, { pending_2fa_secret: secret });
+
+    res.json({
+      success: true,
+      secret: secret,
+      qr: qrDataUrl
+    });
+  } catch (err) {
+    console.error('QR generation error:', err);
+    res.status(500).json({ success: false, error: 'Failed to generate 2FA QR code' });
+  }
+});
+
+app.post('/api/user/2fa/enable', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const { code } = req.body || {};
+  const secret = found.user.pending_2fa_secret;
+  if (!secret) {
+    return res.status(400).json({ success: false, error: 'No 2FA setup in progress. Please click Set up 2FA first.' });
+  }
+
+  if (!verifyTotp(code, secret)) {
+    return res.status(400).json({ success: false, error: 'Invalid 6-digit code. Check your Google Authenticator app.' });
+  }
+
+  const backupCodes = [
+    `BK-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+    `BK-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+    `BK-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`
+  ];
+
+  updateUserRecord(found.table, found.user.id, {
+    two_fa: true,
+    two_fa_secret: secret,
+    two_fa_backup_codes: backupCodes,
+    pending_2fa_secret: null
+  });
+
+  logAudit(sessionUser.username, '2FA Enabled', 'Two-Factor Authentication successfully enabled', 'Security');
+
+  res.json({
+    success: true,
+    message: 'Two-Factor Authentication is now ENABLED!',
+    backup_codes: backupCodes
+  });
+});
+
+app.post('/api/user/2fa/disable', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const { password, code } = req.body || {};
+  if (!password || !verifyPassword(password, found.user.password)) {
+    return res.status(400).json({ success: false, error: 'Invalid password' });
+  }
+
+  const isValidCode = verifyTotp(code, found.user.two_fa_secret) ||
+    (Array.isArray(found.user.two_fa_backup_codes) && found.user.two_fa_backup_codes.includes(String(code).trim()));
+
+  if (!isValidCode) {
+    return res.status(400).json({ success: false, error: 'Invalid password or code.' });
+  }
+
+  updateUserRecord(found.table, found.user.id, {
+    two_fa: false,
+    two_fa_secret: null,
+    two_fa_backup_codes: []
+  });
+
+  logAudit(sessionUser.username, '2FA Disabled', 'Two-Factor Authentication disabled', 'Security');
+  res.json({ success: true, message: 'Two-Factor Authentication has been DISABLED' });
+});
+
+app.post('/api/user/password/change', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const found = findUserAnywhere(sessionUser.username);
+  if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !verifyPassword(current_password, found.user.password)) {
+    return res.status(400).json({ success: false, error: 'Current password is incorrect' });
+  }
+  if (!new_password || String(new_password).trim().length < 6) {
+    return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long' });
+  }
+
+  updateUserRecord(found.table, found.user.id, { password: hashPassword(String(new_password).trim()) });
+  logAudit(sessionUser.username, 'Password Changed', 'User updated account password', 'Security');
+  res.json({ success: true, message: 'Password updated successfully!' });
+});
+
+function handleSessionLogout(req, res) {
+  const token = getSessionToken(req);
+  if (token) {
+    const hashed = hashSessionToken(token);
+    activeSessions.delete(hashed);
+    savePersistedSessions();
+  }
+  const isHttps = isRequestHttps(req);
+  const sec = isHttps ? '; Secure; Partitioned' : '';
+  const sameSite = isHttps ? 'None' : 'Lax';
+  res.setHeader('Set-Cookie', [
+    `humex_session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`,
+    `humex_session_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=${sameSite}${sec}`,
+    `alpha_session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`,
+    `alpha_session_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=${sameSite}${sec}`,
+    `session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=${sameSite}${sec}`
+  ]);
+  res.json({ success: true, message: 'Logged out successfully' });
+}
+
+app.post('/api/auth/logout', handleSessionLogout);
+app.post('/api/logout', handleSessionLogout);
+
+app.get('/api/auth/me', (req, res) => {
+  const sessionUser = getSessionUser(req);
+  if (!sessionUser) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+  const wnAccess = hasWhitenoiseAccess(sessionUser);
+  const found = findUserAnywhere(sessionUser.username);
+  const dbUser = (found && found.user) || {};
+  const catalog = getThemeCatalog(readDb('settings') || {});
+  const validUserThemeKey = (dbUser.theme_key && catalog.some(t => t.key === dbUser.theme_key)) ? dbUser.theme_key : '';
+  res.json({
+    success: true,
+    id: sessionUser.id,
+    username: sessionUser.username,
+    role: sessionUser.role,
+    agent_id: sessionUser.agent_id || null,
+    alloc_mode: sessionUser.alloc_mode || null,
+    alloc_daily_limit: sessionUser.alloc_daily_limit ?? null,
+    alloc_total_limit: sessionUser.alloc_total_limit ?? null,
+    theme_key: validUserThemeKey,
+    theme_mode: (dbUser.theme_mode === 'dark' || dbUser.theme_mode === 'light' || dbUser.theme_mode === 'system') ? dbUser.theme_mode : '',
+    whitenoise_access: wnAccess,
+    permissions: sessionUser.role === 'Owner' ? ['all'] : [sessionUser.role.toLowerCase()]
+  });
+});
+
+app.post('/api/account/change-password', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const b = req.body || {};
+  const current_password = b.current_password || b.currentPassword || b.oldPassword || b.old_password;
+  const new_password = b.new_password || b.newPassword;
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: 'Current password and new password are required' });
+  }
+  if (String(new_password).trim().length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+  }
+  const table = sessionUser.source || (sessionUser.role === 'Agent' ? 'agents' : sessionUser.role === 'Client' ? 'clients' : 'users');
+  const data = readDb(table);
+  const user = data.find(x => Number(x.id) === Number(sessionUser.id));
+  if (!user || !verifyPassword(current_password, user.password)) {
+    return res.status(400).json({ error: 'Current password is incorrect' });
+  }
+  user.password = hashPassword(new_password);
+  writeDb(table, data);
+  logAudit(sessionUser.username, 'Password Changed', 'User changed own password', 'Auth');
+  res.json({ success: true });
+});
+
+// ── Scoped SMS Helper (Strict 3-Tier) ─────────────────────────────
+function getScopedSmsList(req, fromDate = null) {
+  const sessionUser = req.sessionUser || getSessionUser(req);
+  if (!sessionUser) return [];
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+  const isClient = sRole === 'client';
+
+  const queryFrom = fromDate || (req.query && (req.query.date_from || req.query.from || req.query.dt1));
+  let list = readSmsWithArchive(queryFrom);
+
+  if (isOwner) {
+    const qAgentId = req.query.agent_id;
+    const qClientId = req.query.client_id;
+    if (qAgentId && qAgentId !== 'undefined' && qAgentId !== 'null') {
+      list = list.filter(s => Number(s.agent_id) === Number(qAgentId));
+    }
+    if (qClientId && qClientId !== 'undefined' && qClientId !== 'null') {
+      list = list.filter(s => Number(s.client_id) === Number(qClientId));
+    }
+  } else if (isAgent) {
+    const myId = Number(sessionUser.id);
+    list = list.filter(s => Number(s.agent_id) === myId);
+    const qClientId = req.query.client_id;
+    if (qClientId && qClientId !== 'undefined' && qClientId !== 'null') {
+      list = list.filter(s => Number(s.client_id) === Number(qClientId));
+    }
+  } else if (isClient) {
+    const myId = Number(sessionUser.id);
+    const myUname = String(sessionUser.username || '').trim().toLowerCase();
+    list = list.filter(s => Number(s.client_id) === myId || (s.client_username && s.client_username.trim().toLowerCase() === myUname));
+  } else {
+    list = [];
+  }
+  return list;
+}
+
+// ── Dashboard Stats ───────────────────────────────────────────
+app.get('/api/dashboard/stats', (req, res) => {
+  const numbers = readDb('numbers') || [];
+  const sms = readDb('sms_log') || [];
+  const users = readDb('users') || [];
+  const sessions = readDb('smpp_sessions') || [];
+  const reg_req = readDb('registration_requests') || [];
+  const pay_req = readDb('payout_requests') || [];
+  const blocked = readDb('blocked_ips') || [];
+
+  const { todaySet, yesterdaySet, weekStartStr, monthStartStr, yearStartStr } = getDateRangeBuckets();
+
+  let todayCount = 0;
+  let yesterdayCount = 0;
+  let weekCount = 0;
+  let monthCount = 0;
+  let yearCount = 0;
+  let revenueToday = 0;
+
+  for (const s of sms) {
+    const dStr = extractDateStr(s);
+    if (!dStr) continue;
+    if (todaySet.has(dStr)) {
+      todayCount++;
+      revenueToday += (Number(s.profit || s.carrier_revenue) || 0);
+    } else if (yesterdaySet.has(dStr)) {
+      yesterdayCount++;
+    }
+    if (dStr >= weekStartStr) weekCount++;
+    if (dStr >= monthStartStr) monthCount++;
+    if (dStr >= yearStartStr) yearCount++;
+  }
+
+  const delivered = sms.filter(s => s.status === 'delivered');
+  const success_rate = sms.length ? Math.round((delivered.length / sms.length) * 1000) / 10 : 0;
+
+  const trafficData = [];
+  for (let i = 23; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 3600000);
+    const hourKey = d.toISOString().slice(0, 13);
+    trafficData.push(sms.filter(s => (s.timestamp || '').slice(0, 13) === hourKey).length);
+  }
+
+  const profitData = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    const dayKey = d.toISOString().slice(0, 10);
+    const daySum = sms
+      .filter(s => extractDateStr(s) === dayKey)
+      .reduce((acc, s) => acc + (Number(s.profit || s.carrier_revenue) || 0), 0);
+    profitData.push(Math.round(daySum * 100) / 100);
+  }
+
+  const appCounts = {};
+  sms.forEach(s => {
+    const app = s.app || 'WhatsApp';
+    appCounts[app] = (appCounts[app] || 0) + 1;
+  });
+
+  // Reconciled Number Counts (3-Tier: Owner -> Agent -> Client)
+  const unallocated = numbers.filter(n => !n.agent_id && !n.client_id);
+  const allocated = numbers.filter(n => n.agent_id || n.client_id);
+  const allocated_to_agents = numbers.filter(n => n.agent_id && !n.client_id);
+  const allocated_to_clients = numbers.filter(n => n.client_id);
+
+  res.json({
+    total_numbers: numbers.length,
+    active_numbers: numbers.filter(n => n.status === 'active').length,
+    unallocated_numbers: unallocated.length,
+    unallocated: unallocated.length,
+    allocated_numbers: allocated.length,
+    allocated: allocated.length,
+    allocated_to_agents: allocated_to_agents.length,
+    allocated_to_clients: allocated_to_clients.length,
+    total_sms: sms.length,
+    sms_today: todayCount,
+    total_sms_today: todayCount,
+    today_sms: todayCount,
+    yesterday_sms: yesterdayCount,
+    yesterday: yesterdayCount,
+    this_week: weekCount,
+    this_week_sms: weekCount,
+    this_month: monthCount,
+    this_month_sms: monthCount,
+    this_year: yearCount,
+    this_year_sms: yearCount,
+    revenue_today: Math.round(revenueToday * 100) / 100,
+    delivered_sms: delivered.length,
+    success_rate: success_rate,
+    total_users: users.length,
+    smpp_sessions: sessions.length,
+    traffic_24h: trafficData,
+    profit_30d: profitData,
+    app_distribution: appCounts,
+    pending_requests: reg_req.filter(x => x.status === 'pending').length + pay_req.filter(x => x.status === 'pending').length,
+    blocked_ips_count: blocked.length
+  });
+});
+
+// ── Daily Stats Endpoint (/api/sms/daily-stats) ───────────────
+app.get('/api/sms/daily-stats', (req, res) => {
+  const sms = getScopedSmsList(req);
+  const { todaySet, yesterdaySet, weekStartStr, monthStartStr, yearStartStr } = getDateRangeBuckets();
+
+  let todayCount = 0;
+  let yesterdayCount = 0;
+  let weekCount = 0;
+  let monthCount = 0;
+  let yearCount = 0;
+
+  for (const s of sms) {
+    const dStr = extractDateStr(s);
+    if (!dStr) continue;
+    if (todaySet.has(dStr)) todayCount++;
+    else if (yesterdaySet.has(dStr)) yesterdayCount++;
+
+    if (dStr >= weekStartStr) weekCount++;
+    if (dStr >= monthStartStr) monthCount++;
+    if (dStr >= yearStartStr) yearCount++;
+  }
+
+  const weeklyTraffic = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    const dateStr = d.toISOString().slice(0, 10);
+    const count = sms.filter(s => extractDateStr(s) === dateStr).length;
+    weeklyTraffic.push(count);
+  }
+
+  res.json({
+    today: todayCount,
+    yesterday: yesterdayCount,
+    this_week: weekCount,
+    this_month: monthCount,
+    this_year: yearCount,
+    year: yearCount,
+    all_time: sms.length,
+    weekly_traffic: weeklyTraffic
+  });
+});
+
+// ── Period Stats Endpoint (/api/sms/period-stats) ─────────────
+app.get('/api/sms/period-stats', (req, res) => {
+  const now = new Date();
+  const nowUtc = now.getTime();
+
+  const sessionUser = req.sessionUser || getSessionUser(req) || {};
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const userId = sessionUser.id != null ? String(sessionUser.id) : '0';
+  const qAgt = req.query.agent_id || '';
+  const qCli = req.query.client_id || '';
+  const cacheKey = `${userId}:${sRole}:${qAgt}:${qCli}`;
+
+  const nowMs = Date.now();
+  const cached = periodStatsCache.get(cacheKey);
+  if (cached && cached.expiresAt > nowMs && req.query.fresh !== '1') {
+    return res.json(cached.data);
+  }
+
+  // 1. Today & Yesterday: calendar day in UTC + local
+  const todayStartUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+  const todayStartMs = todayStartUtc.getTime();
+  const todayDateStr = todayStartUtc.toISOString().slice(0, 10);
+  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const todaySet = new Set([todayDateStr, localTodayStr]);
+
+  const yestUtcStr = new Date(todayStartMs - 86400000).toISOString().slice(0, 10);
+  const yestLocalObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yestLocalStr = `${yestLocalObj.getFullYear()}-${String(yestLocalObj.getMonth() + 1).padStart(2, '0')}-${String(yestLocalObj.getDate()).padStart(2, '0')}`;
+  const yesterdaySet = new Set([yestUtcStr, yestLocalStr]);
+  yesterdaySet.delete(todayDateStr);
+  yesterdaySet.delete(localTodayStr);
+
+  // 2. Weekly SMS: calendar week Monday 00:00 UTC to now
+  const dayOffset = (now.getUTCDay() + 6) % 7;
+  const mondayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - dayOffset, 0, 0, 0, 0));
+  const weekStartMs = mondayUtc.getTime();
+  const weekStartStr = mondayUtc.toISOString().slice(0, 10);
+
+  // Rolling 7d / 30d bounds
+  const last7StartMs = todayStartMs - 6 * 86400000;
+  const last7StartStr = new Date(last7StartMs).toISOString().slice(0, 10);
+  const last30StartMs = todayStartMs - 29 * 86400000;
+  const last30StartStr = new Date(last30StartMs).toISOString().slice(0, 10);
+
+  const weeklyBuckets = [];
+  const weeklyLabels = [];
+  const weeklyBucketIndex = {};
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  for (let i = 6; i >= 0; i--) {
+    const dt = new Date(todayStartMs - i * 86400000);
+    const key = dt.toISOString().slice(0, 10);
+    weeklyBucketIndex[key] = weeklyBuckets.length;
+    weeklyBuckets.push(0);
+    weeklyLabels.push(`${DAY_NAMES[dt.getUTCDay()]} ${dt.getUTCDate()}`);
+  }
+
+  // 3. Monthly SMS: calendar month
+  const monthStartUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const monthStartMs = monthStartUtc.getTime();
+  const monthStartStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+
+  // 4. Yearly SMS: calendar year (reads archives for the current year)
+  const yearStartUtc = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0, 0));
+  const yearStartMs = yearStartUtc.getTime();
+  const yearStartStr = `${now.getUTCFullYear()}-01-01`;
+
+  const smsList = getScopedSmsList(req, yearStartStr);
+
+  let todayCount = 0;
+  let yesterdayCount = 0;
+  let weekCount = 0;
+  let last7Count = 0;
+  let last30Count = 0;
+  let monthCount = 0;
+  let yearCount = 0;
+  let earningsSum = 0;
+  let profitTodaySum = 0;
+  let profitWeekSum = 0;
+  const topAccessMap = new Map();
+
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+  const isClient = sRole === 'client';
+
+  const getRoleAmount = (rec) => {
+    if (isOwner) {
+      return Number(rec.owner_amount != null ? rec.owner_amount : (rec.profit != null ? rec.profit : (rec.carrier_revenue != null ? rec.carrier_revenue : 0))) || 0;
+    }
+    if (isAgent) {
+      return Number(rec.agent_amount != null ? rec.agent_amount : (rec.payout != null ? rec.payout : 0)) || 0;
+    }
+    if (isClient) {
+      return Number(rec.client_amount != null ? rec.client_amount : (rec.client_payout != null ? rec.client_payout : (rec.payout != null ? rec.payout : 0))) || 0;
+    }
+    return Number(rec.payout || rec.profit || 0) || 0;
+  };
+
+  for (const s of smsList) {
+    if (!s) continue;
+    const dStr = extractDateStr(s);
+    let sMs = null;
+    const raw = s.timestamp || s.date || '';
+    if (raw) {
+      if (typeof raw === 'number') {
+        sMs = raw < 1e11 ? raw * 1000 : raw;
+      } else if (/^\d{10,13}$/.test(raw)) {
+        const n = Number(raw);
+        sMs = n < 1e11 ? n * 1000 : n;
+      } else {
+        const iso = raw.includes('T') ? raw : raw.replace(' ', 'T') + (raw.length <= 19 ? 'Z' : '');
+        const p = Date.parse(iso);
+        if (!isNaN(p)) sMs = p;
+        else {
+          const d = new Date(raw);
+          if (!isNaN(d.getTime())) sMs = d.getTime();
+        }
+      }
+    }
+
+    const isToday = (dStr && todaySet.has(dStr)) || (sMs !== null && sMs >= todayStartMs && sMs <= nowUtc + 86400000);
+    const isYesterday = !isToday && ((dStr && yesterdaySet.has(dStr)) || (sMs !== null && sMs >= todayStartMs - 86400000 && sMs < todayStartMs));
+    const isWeek = (sMs !== null) ? (sMs >= weekStartMs && sMs <= nowUtc + 86400000) : (dStr && dStr >= weekStartStr);
+    const isLast7 = (sMs !== null) ? (sMs >= last7StartMs && sMs <= nowUtc + 86400000) : (dStr && dStr >= last7StartStr);
+    const isLast30 = (sMs !== null) ? (sMs >= last30StartMs && sMs <= nowUtc + 86400000) : (dStr && dStr >= last30StartStr);
+    const isMonth = (sMs !== null) ? (sMs >= monthStartMs && sMs <= nowUtc + 86400000) : (dStr && dStr >= monthStartStr);
+    const isYear = (sMs !== null) ? (sMs >= yearStartMs && sMs <= nowUtc + 86400000) : (dStr && dStr >= yearStartStr);
+
+    const amt = getRoleAmount(s);
+
+    if (isToday) {
+      todayCount++;
+      profitTodaySum += amt;
+      let rawCli = String(s.cli || s.app || s.sender || '—').trim() || '—';
+      if (isClient && rawCli !== '—') {
+        rawCli = rawCli.slice(0, 1) + 'XXXXX';
+      }
+      const rangeLabel = String(s.range || s.range_name || s.country || '—').trim() || '—';
+      const accessKey = `${rawCli}|||${rangeLabel}`;
+      topAccessMap.set(accessKey, (topAccessMap.get(accessKey) || 0) + 1);
+    }
+    if (isYesterday) yesterdayCount++;
+    if (isWeek) {
+      weekCount++;
+      profitWeekSum += amt;
+    }
+    if (isLast7) last7Count++;
+    if (isLast30) last30Count++;
+    if (isMonth) monthCount++;
+    if (isYear) {
+      yearCount++;
+      earningsSum += amt;
+    }
+
+    if (dStr && weeklyBucketIndex[dStr] !== undefined) {
+      weeklyBuckets[weeklyBucketIndex[dStr]]++;
+    } else if (sMs !== null && sMs >= last7StartMs && sMs <= nowUtc + 86400000) {
+      const k = new Date(sMs).toISOString().slice(0, 10);
+      if (weeklyBucketIndex[k] !== undefined) weeklyBuckets[weeklyBucketIndex[k]]++;
+    }
+  }
+
+  const topAccessToday = Array.from(topAccessMap.entries())
+    .map(([k, total]) => {
+      const [cli, range] = k.split('|||');
+      return { cli, range, total };
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 6);
+
+  const fxRate = getUsdToPkrRate();
+  let earningsPkrSum = 0;
+  let profitTodayPkrSum = 0;
+  let profitWeekPkrSum = 0;
+  for (const s of smsList) {
+    if (!s) continue;
+    const dStr2 = extractDateStr(s);
+    const pkrAmt = isClient
+      ? (s.client_amount_pkr != null ? Number(s.client_amount_pkr) : (getRoleAmount(s) * (Number(s.fx_usd_to_pkr) || fxRate)))
+      : (getRoleAmount(s) * (Number(s.fx_usd_to_pkr) || fxRate));
+    if (dStr2 && todaySet.has(dStr2)) profitTodayPkrSum += pkrAmt;
+    if (dStr2 && dStr2 >= weekStartStr) profitWeekPkrSum += pkrAmt;
+    if (dStr2 && dStr2 >= yearStartStr) earningsPkrSum += pkrAmt;
+  }
+
+  const agentTargetInfo = isAgent ? getAgentClientWeeklyPkrStats(sessionUser.id) : null;
+
+  const result = {
+    today: todayCount,
+    yesterday: yesterdayCount,
+    week: weekCount,
+    last_7_days: last7Count,
+    last_30_days: last30Count,
+    month: monthCount,
+    year: yearCount,
+    earnings: Math.round(earningsSum * 10000) / 10000,
+    profit_today: Math.round(profitTodaySum * 10000) / 10000,
+    profit_week: Math.round(profitWeekSum * 10000) / 10000,
+    usd_to_pkr_rate: fxRate,
+    earnings_pkr: round2(earningsPkrSum),
+    profit_today_pkr: round2(profitTodayPkrSum),
+    profit_week_pkr: round2(profitWeekPkrSum),
+    ...(agentTargetInfo ? agentTargetInfo : {}),
+    today_sms: todayCount,
+    yesterday_sms: yesterdayCount,
+    weekly_sms: weekCount,
+    monthly_sms: monthCount,
+    yearly_sms: yearCount,
+    weekly_traffic: weeklyBuckets,
+    weekly_labels: weeklyLabels,
+    top_access_today: topAccessToday
+  };
+
+  periodStatsCache.set(cacheKey, { expiresAt: nowMs + 30000, data: result });
+  res.json(result);
+});
+
+// ── Providers List Endpoint (/api/providers) ──────────────────
+app.get('/api/providers', (req, res) => {
+  try {
+    const ranges = readDb('sms_ranges') || [];
+    const numbers = readDb('numbers') || [];
+    const crConns = readDb('cr_api_connections') || [];
+    const wnConns = readDb('whitenoise_connections') || [];
+    const smppAccs = readDb('smpp_accounts') || [];
+    const provSet = new Set();
+
+    // Dynamically add providers from connected CR API panels (panel_name is the provider)
+    crConns.forEach(c => {
+      const name = (c.panel_name || '').trim();
+      if (name && name !== 'CR API Panel' && name !== 'Manual' && name !== '—') {
+        provSet.add(name);
+      } else if (name) {
+        provSet.add(name);
+      }
+    });
+
+    // Dynamically add providers from Whitenoise connections
+    wnConns.forEach(w => {
+      const name = (w.provider_tag || w.name || 'Whitenoise').trim();
+      if (name) provSet.add(name);
+    });
+
+    // Dynamically add providers from SMPP accounts (company or system_id is the provider)
+    smppAccs.forEach(s => {
+      const name = (s.company || s.system_id || '').trim();
+      if (name && name !== 'Manual' && name !== '—') provSet.add(name);
+    });
+
+    // Dynamically add providers from active SMS ranges
+    ranges.forEach(r => {
+      const p = (r.provider || '').trim();
+      if (p && p !== 'Manual' && p !== '—') provSet.add(p);
+    });
+
+    // Dynamically add providers from existing numbers
+    numbers.forEach(n => {
+      const p = (n.provider || '').trim();
+      if (p && p !== 'Manual' && p !== '—') provSet.add(p);
+    });
+
+    const list = Array.from(provSet).sort().map((name, idx) => ({ id: idx + 1, name, provider_name: name }));
+    res.json({ data: list, total: list.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Payout Rates Endpoint (/api/payout-rates) ─────────────────
+app.get('/api/payout-rates', (req, res) => {
+  let data = readDb('payout_rates');
+  if (!data || Array.isArray(data) || !data.service_rates) {
+    data = {
+      owner_to_agent: { default_rate: 0.05, description: 'Owner pays agent per OTP delivered', currency: 'USD' },
+      agent_to_client: { default_rate: 0.03, description: 'Agent pays client per OTP delivered', currency: 'USD' },
+      service_rates: {
+        WhatsApp: { owner_to_agent: 0.05, agent_to_client: 0.03 },
+        Telegram: { owner_to_agent: 0.04, agent_to_client: 0.025 },
+        Google: { owner_to_agent: 0.06, agent_to_client: 0.035 },
+        Facebook: { owner_to_agent: 0.045, agent_to_client: 0.028 },
+        Amazon: { owner_to_agent: 0.055, agent_to_client: 0.032 },
+        Aadhaar: { owner_to_agent: 0.08, agent_to_client: 0.05 },
+        TikTok: { owner_to_agent: 0.04, agent_to_client: 0.025 }
+      }
+    };
+    writeDb('payout_rates', data);
+  }
+  res.json(data);
+});
+
+app.post('/api/payout-rates', (req, res) => {
+  const current = readDb('payout_rates') || {};
+  const payload = req.body || {};
+  for (const [key, val] of Object.entries(payload)) {
+    if (key === 'service_rates' && typeof val === 'object' && val !== null) {
+      current.service_rates = current.service_rates || {};
+      Object.assign(current.service_rates, val);
+    } else {
+      current[key] = val;
+    }
+  }
+  writeDb('payout_rates', current);
+  res.json({ success: true, data: current });
+});
+
+// ── DIRECT ARRAY ENDPOINTS ────────────────────────────────────
+
+// 1. SMS Ranges (Must return Array directly)
+app.get('/api/numbers/sms-ranges', (req, res) => {
+  const _viewer = req.sessionUser;
+  const role = _viewer && _viewer.role ? String(_viewer.role).toLowerCase() : '';
+
+  const allRanges = readDb('sms_ranges') || [];
+  const numbers = readDb('numbers') || [];
+  const isOwner = role === 'owner' || role === 'admin';
+  const isClient = role === 'client';
+  const wnAllowed = isOwner || hasWhitenoiseAccess(_viewer);
+  const wnTags = getWhitenoiseProviderTags();
+  const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
+  const publishedOnly = req.query.published_only === '1' || req.query.published_only === 'true' || req.query.scope === 'client_rate_card';
+
+  if (isClient && publishedOnly) {
+    const clients = readDb('clients') || [];
+    const clRec = clients.find(c => Number(c.id) === Number(_viewer.id)) || _viewer;
+    const myAgentId = clRec.agent_id || _viewer.agent_id || null;
+    const fx = getUsdToPkrRate();
+    const acrList = myAgentId ? getAgentClientRates(myAgentId) : [];
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const reqs = (readDb('number_requests') || []).filter(r =>
+      r && Number(r.client_id) === Number(_viewer.id) &&
+      String(r.status || '').toLowerCase() !== 'rejected' &&
+      String(r.created || r.timestamp || '').slice(0, 10) === todayIso
+    );
+
+    const out = [];
+    for (const r of ranges) {
+      const rangeName = r.range_name || r.name || r.country || 'Range';
+      const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
+                  acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
+      if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
+
+      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
+      const dailyLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
+      const reqTodayCount = reqs.filter(q =>
+        (q.range_id && Number(q.range_id) === Number(r.id)) ||
+        String(q.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase()
+      ).length;
+      const poolAvailable = numbers.filter(n =>
+        (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
+        Number(n.agent_id) === Number(myAgentId) && !n.client_id
+      ).length;
+
+      const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+      const visRangeName = scrubWhitenoiseName(rangeName, isOwner);
+      out.push({
+        id: r.id,
+        range_name: visRangeName,
+        name: visRangeName,
+        country: r.country || '',
+        prefix: r.prefix || '',
+        provider: maskProviderLabel(r.provider || '', isOwner, wnTags),
+        is_whitenoise: isWnRng,
+        payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
+        currency: 'PKR',
+        rate: round2(acr.client_rate_pkr),
+        payout: round2(acr.client_rate_pkr),
+        client_rate_pkr: round2(acr.client_rate_pkr),
+        usd_to_pkr_rate: fx,
+        allowed_quantities: allowedQty,
+        daily_request_limit: dailyLimit,
+        requests_today: reqTodayCount,
+        requested_today: reqTodayCount >= dailyLimit,
+        can_request_today: reqTodayCount < dailyLimit,
+        available: poolAvailable,
+        total_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id))).length
+      });
+    }
+    return res.json(out);
+  }
+
+  const enriched = ranges.map(r => {
+    const rangeName = r.range_name || r.name || r.country || 'Range';
+    const visRangeName = scrubWhitenoiseName(rangeName, isOwner);
+    const agentRate = Number(r.rate || r.payout || 0.01);
+    const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+
+    const base = {
+      ...r,
+      range_name: visRangeName,
+      name: visRangeName,
+      provider: maskProviderLabel(r.provider || '', isOwner, wnTags),
+      is_whitenoise: isWnRng,
+      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
+      unassigned_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id)) && !n.agent_id && !n.client_id).length,
+      total_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id))).length
+    };
+
+    if (isOwner) {
+      return base;
+    } else {
+      // Agent sees only Owner-set master agent rate (never leaks owner buy_rate or internal margins)
+      const { cost, buy_rate, carrier_rate, company_rate, company_cost, ...rest } = base;
+      return {
+        ...rest,
+        rate: agentRate,
+        agent_rate: agentRate,
+        currency: r.currency || 'USD'
+      };
+    }
+  });
+
+  res.json(enriched);
+});
+
+app.get('/api/rates/agent-card', requireAuth, (req, res) => {
+  const _viewer = req.sessionUser;
+  const _isOwner = normRole(_viewer?.role) === 'owner';
+  const wnAllowed = _isOwner || hasWhitenoiseAccess(_viewer);
+  const wnTags = getWhitenoiseProviderTags();
+  const allRanges = readDb('sms_ranges') || [];
+  const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
+
+  const card = ranges.map(r => {
+    const pts = r.payterms || {};
+    const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+    const weeklyRate = Number(pts['Weekly'] !== undefined ? pts['Weekly'] : (r.rate || r.payout || 0.01));
+    const biweeklyRate = Number(pts['Biweekly'] !== undefined ? pts['Biweekly'] : weeklyRate);
+    const monthlyRate = Number(pts['Monthly'] !== undefined ? pts['Monthly'] : (Math.round(weeklyRate * 1.05 * 10000) / 10000));
+
+    return {
+      id: r.id,
+      range_name: r.range_name || r.name || r.country || 'Range',
+      country: r.country,
+      prefix: r.prefix,
+      provider: maskProviderLabel(r.provider || '', _isOwner, wnTags),
+      is_whitenoise: isWnRng,
+      agent_rate: isWnRng ? monthlyRate : weeklyRate,
+      weekly_rate: weeklyRate,
+      biweekly_rate: biweeklyRate,
+      monthly_rate: monthlyRate,
+      weekly_term: 'Weekly (7/3)',
+      biweekly_term: 'Biweekly (15/3)',
+      monthly_term: 'Monthly (30/5) {W}',
+      payterms: isWnRng ? { 'Monthly': monthlyRate } : {
+        'Weekly': weeklyRate,
+        'Biweekly': biweeklyRate,
+        'Monthly': monthlyRate
+      },
+      currency: r.currency || 'USD',
+      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly')
+    };
+  });
+  res.json({ success: true, ranges: card });
+});
+
+// ── Isolated Per-Agent Client Rate Set & PKR Rate Card ──────────
+app.get('/api/agent/client-rates', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const wnAllowed = hasWhitenoiseAccess(sessionUser);
+  const wnTags = getWhitenoiseProviderTags();
+  const allRanges = readDb('sms_ranges') || [];
+  const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
+  const numbers = readDb('numbers') || [];
+  const acrList = getAgentClientRates(agentId);
+  const fx = getUsdToPkrRate();
+  const weeklyStats = getAgentClientWeeklyPkrStats(agentId);
+
+  const items = ranges.map(r => {
+    const rangeName = r.range_name || r.name || r.country || 'Range';
+    const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+    const effPayterm = isWnRng ? 'Monthly' : (r.payterm || 'Weekly');
+    const agentRateUsd = getRangeAgentRate(r, effPayterm);
+    const agentRatePkr = round2(agentRateUsd * fx);
+    const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
+                acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
+    const clientRatePkr = (acr && Number(acr.client_rate_pkr) > 0) ? round2(acr.client_rate_pkr) : null;
+    const isConfigured = Boolean(acr && acr.published !== false && clientRatePkr !== null && clientRatePkr > 0);
+    const marginPkr = (clientRatePkr !== null && agentRatePkr > 0) ? round2(agentRatePkr - clientRatePkr) : null;
+    const poolAvailable = numbers.filter(n =>
+      (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
+      Number(n.agent_id) === agentId && !n.client_id
+    ).length;
+
+    return {
+      range_id: r.id,
+      range_name: rangeName,
+      country: r.country || '',
+      prefix: r.prefix || '',
+      provider: r.provider || '',
+      is_whitenoise: isWnRng,
+      active: r.active !== false,
+      payterm: effPayterm,
+      payterms: r.payterms || {},
+      max_sms_day: r.max_sms_day ?? r.otp_limit ?? null,
+      memo: r.memo || '',
+      cli_list: r.cli_list || (Array.isArray(r.clis) && r.clis.length ? r.clis.join(', ') : (r.cli || 'All CLIs')),
+      agent_rate_usd: agentRateUsd,
+      agent_rate_pkr: agentRatePkr,
+      has_agent_rate: agentRateUsd > 0,
+      client_rate_pkr: clientRatePkr,
+      client_rate_usd_eq: clientRatePkr !== null ? round6(clientRatePkr / fx) : null,
+      margin_pkr: marginPkr,
+      published: acr ? acr.published !== false : false,
+      configured: isConfigured,
+      allowed_quantities: acr ? normalizeAllowedQuantities(acr.allowed_quantities) : [25, 50],
+      daily_request_limit: acr ? Math.max(1, parseInt(acr.daily_request_limit, 10) || 1) : 1,
+      pool_available: poolAvailable,
+      updated_at: acr ? (acr.updated_at || acr.created || '') : ''
+    };
+  });
+
+  // Pending / unconfigured ranges appear at the TOP for quick Agent setup
+  items.sort((a, b) => {
+    if (a.configured !== b.configured) return a.configured ? 1 : -1;
+    return Number(b.range_id) - Number(a.range_id);
+  });
+
+  const pendingCount = items.filter(i => !i.configured).length;
+  res.json({
+    success: true,
+    agent_id: agentId,
+    usd_to_pkr_rate: fx,
+    pending_count: pendingCount,
+    configured_count: items.length - pendingCount,
+    weekly_target: weeklyStats,
+    ranges: items
+  });
+});
+
+function handleSaveAgentClientRates(req, res) {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Only Agents can set their Client PKR rates.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const fx = getUsdToPkrRate();
+  const ranges = readDb('sms_ranges') || [];
+  let allRates = getAllAgentClientRates();
+
+  const rawItems = Array.isArray(req.body?.items)
+    ? req.body.items
+    : [{ ...req.body, range_id: req.params.rangeId ? Number(req.params.rangeId) : req.body?.range_id }];
+
+  if (!rawItems.length) {
+    return res.status(400).json({ error: 'At least one range rate item is required.' });
+  }
+
+  const nowIso = new Date().toISOString();
+  const savedItems = [];
+
+  for (const raw of rawItems) {
+    const reqRangeId = raw.range_id != null ? Number(raw.range_id) : null;
+    const reqRangeName = String(raw.range_name || '').trim().toLowerCase();
+    const rng = ranges.find(r => (reqRangeId && Number(r.id) === reqRangeId)) ||
+                ranges.find(r => reqRangeName && String(r.range_name || r.name || '').trim().toLowerCase() === reqRangeName);
+    if (!rng) {
+      return res.status(404).json({ error: `Range not found (range_id: ${raw.range_id || 'N/A'})` });
+    }
+
+    const clientRatePkr = round2(raw.client_rate_pkr);
+    if (!Number.isFinite(clientRatePkr) || clientRatePkr <= 0) {
+      return res.status(400).json({ error: `Valid positive PKR rate is required for "${rng.range_name || rng.name}".` });
+    }
+
+    const agentRateUsd = getRangeAgentRate(rng, rng.payterm || 'Weekly');
+    const agentRatePkr = round2(agentRateUsd * fx);
+    if (agentRateUsd > 0 && clientRatePkr >= agentRatePkr) {
+      return res.status(400).json({
+        error: `Client PKR rate (${clientRatePkr} PKR) for "${rng.range_name || rng.name}" must be strictly less than your Agent payout (${agentRatePkr} PKR = $${agentRateUsd} USD @ ${fx} PKR/$).`
+      });
+    }
+
+    const allowedQty = normalizeAllowedQuantities(raw.allowed_quantities);
+    const dailyLimit = Math.max(1, parseInt(raw.daily_request_limit, 10) || 1);
+    const published = raw.published !== false;
+    const rName = rng.range_name || rng.name || rng.country || 'Range';
+
+    const existingIdx = allRates.findIndex(x => x && Number(x.agent_id) === agentId && Number(x.range_id) === Number(rng.id));
+    const rec = {
+      id: existingIdx !== -1 ? allRates[existingIdx].id : nextId(allRates),
+      agent_id: agentId,
+      agent_username: sessionUser.username,
+      range_id: Number(rng.id),
+      range_name: rName,
+      client_rate_pkr: clientRatePkr,
+      client_rate_usd_eq: round6(clientRatePkr / fx),
+      allowed_quantities: allowedQty,
+      daily_request_limit: dailyLimit,
+      published,
+      fx_usd_to_pkr_at_save: fx,
+      updated_at: nowIso,
+      created: existingIdx !== -1 ? (allRates[existingIdx].created || nowIso) : nowIso
+    };
+    if (existingIdx !== -1) {
+      allRates[existingIdx] = rec;
+    } else {
+      allRates.unshift(rec);
+    }
+    savedItems.push(rec);
+  }
+
+  writeDb('agent_client_rates', allRates);
+  logAudit(sessionUser.username, 'Agent Client Rate Set', `Updated ${savedItems.length} PKR client rate(s)`, 'Rates');
+  res.json({
+    success: true,
+    usd_to_pkr_rate: fx,
+    saved_count: savedItems.length,
+    item: savedItems[0],
+    items: savedItems
+  });
+}
+
+app.put('/api/agent/client-rates', requireAuth, handleSaveAgentClientRates);
+app.post('/api/agent/client-rates', requireAuth, handleSaveAgentClientRates);
+app.put('/api/agent/client-rates/:rangeId', requireAuth, handleSaveAgentClientRates);
+
+app.delete('/api/agent/client-rates/:rangeId', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const rangeId = Number(req.params.rangeId);
+  let allRates = getAllAgentClientRates();
+  const before = allRates.length;
+  allRates = allRates.filter(x => !(x && Number(x.agent_id) === agentId && Number(x.range_id) === rangeId));
+  if (allRates.length !== before) {
+    writeDb('agent_client_rates', allRates);
+  }
+  res.json({ success: true, removed: before - allRates.length });
+});
+
+app.put('/api/agent/pkr-target', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const target = Number(req.body?.weekly_pkr_target);
+  if (!Number.isFinite(target) || target < 0) {
+    return res.status(400).json({ error: 'weekly_pkr_target must be 0 or a positive PKR amount.' });
+  }
+  const enforceMode = req.body?.weekly_pkr_enforce_mode === 'block' ? 'block' : 'warn';
+  const agents = readDb('agents') || [];
+  const idx = agents.findIndex(a => Number(a.id) === Number(sessionUser.id));
+  if (idx === -1) return res.status(404).json({ error: 'Agent account not found.' });
+  agents[idx].weekly_pkr_target = round2(target);
+  agents[idx].weekly_pkr_enforce_mode = enforceMode;
+  writeDb('agents', agents);
+  res.json({ success: true, ...getAgentClientWeeklyPkrStats(sessionUser.id) });
+});
+
+app.get('/api/client/rate-card', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const role = normRole(sessionUser.role);
+  if (role !== 'client' && role !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  let targetAgentId = Number(sessionUser.id);
+  if (role === 'client') {
+    const clients = readDb('clients') || [];
+    const cl = clients.find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+    targetAgentId = Number(cl.agent_id || sessionUser.agent_id || 0);
+  }
+
+  const wnAllowed = hasWhitenoiseAccess(sessionUser);
+  const wnTags = getWhitenoiseProviderTags();
+  const allRanges = readDb('sms_ranges') || [];
+  const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
+  const numbers = readDb('numbers') || [];
+  const acrList = targetAgentId ? getAgentClientRates(targetAgentId) : [];
+  const fx = getUsdToPkrRate();
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const clientTodayReqs = role === 'client'
+    ? (readDb('number_requests') || []).filter(r =>
+        r && Number(r.client_id) === Number(sessionUser.id) &&
+        String(r.status || '').toLowerCase() !== 'rejected' &&
+        String(r.created || r.timestamp || '').slice(0, 10) === todayIso
+      )
+    : [];
+
+  const card = [];
+  for (const r of ranges) {
+    const rangeName = r.range_name || r.name || r.country || 'Range';
+    const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+    const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
+                acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
+    if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
+
+    const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
+    const dailyLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
+    const reqTodayCount = clientTodayReqs.filter(q =>
+      (q.range_id && Number(q.range_id) === Number(r.id)) ||
+      String(q.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase()
+    ).length;
+    const poolAvailable = numbers.filter(n =>
+      (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
+      Number(n.agent_id) === Number(targetAgentId) && !n.client_id
+    ).length;
+    const heldCount = role === 'client'
+      ? numbers.filter(n =>
+          (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
+          Number(n.client_id) === Number(sessionUser.id)
+        ).length
+      : 0;
+
+    const baseClientPkr = round2(acr.client_rate_pkr);
+    const agBaseUsd = getRangeAgentRate(r, isWnRng ? 'Monthly' : (r.payterm || 'Weekly'));
+    const srcPts = r.payterms || {};
+    const scalePkr = (key, fallbackKey) => {
+      const rawUsd = srcPts[key] !== undefined ? Number(srcPts[key]) : (fallbackKey && srcPts[fallbackKey] !== undefined ? Number(srcPts[fallbackKey]) : null);
+      if (rawUsd !== null && Number.isFinite(rawUsd) && rawUsd > 0 && agBaseUsd > 0) {
+        return round2(baseClientPkr * (rawUsd / agBaseUsd));
+      }
+      return baseClientPkr;
+    };
+    const paytermsPkr = isWnRng
+      ? { 'Monthly': scalePkr('Monthly', 'Weekly') }
+      : {
+          'Weekly': scalePkr('Weekly'),
+          'Biweekly': scalePkr('Biweekly', 'Weekly'),
+          'Monthly': scalePkr('Monthly', 'Weekly')
+        };
+
+    card.push({
+      id: r.id,
+      range_id: r.id,
+      range_name: rangeName,
+      name: rangeName,
+      country: r.country || '',
+      prefix: r.prefix || '',
+      is_whitenoise: isWnRng,
+      active: r.active !== false,
+      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
+      payterms_pkr: paytermsPkr,
+      max_sms_day: r.max_sms_day ?? r.otp_limit ?? null,
+      memo: r.memo || '',
+      cli_list: r.cli_list || (Array.isArray(r.clis) && r.clis.length ? r.clis.join(', ') : (r.cli || 'All CLIs')),
+      currency: 'PKR',
+      rate: baseClientPkr,
+      payout: baseClientPkr,
+      client_rate_pkr: baseClientPkr,
+      allowed_quantities: allowedQty,
+      daily_request_limit: dailyLimit,
+      requests_today: reqTodayCount,
+      requested_today: reqTodayCount >= dailyLimit,
+      can_request_today: reqTodayCount < dailyLimit,
+      held_count: heldCount,
+      available: poolAvailable
+    });
+  }
+
+  res.json({
+    success: true,
+    currency: 'PKR',
+    usd_to_pkr_rate: fx,
+    payterm_schedules: PAYTERM_DEFINITIONS,
+    ranges: card
+  });
+});
+
+app.post('/api/numbers/sms-ranges', (req, res) => {
+  if (req.body.payterms !== undefined) {
+    if (typeof req.body.payterms !== 'object' || req.body.payterms === null || Array.isArray(req.body.payterms)) {
+      return res.status(400).json({ error: 'payterms must be an object' });
+    }
+    const masterList = getMasterPayterms();
+    const migrated = {};
+    for (const [k, v] of Object.entries(req.body.payterms)) {
+      const normK = normalizePaytermKey(k);
+      if (!masterList.includes(normK)) {
+        return res.status(400).json({ error: `Invalid payterm "${k}". Allowed payterms: ${masterList.join(', ')}` });
+      }
+      migrated[normK] = v;
+    }
+    req.body.payterms = migrated;
+  }
+  if (req.body.payterm !== undefined) {
+    const norm = normalizePaytermKey(req.body.payterm);
+    const masterList = getMasterPayterms();
+    if (!masterList.includes(norm)) {
+      return res.status(400).json({ error: `Invalid payterm "${req.body.payterm}". Allowed payterms: ${masterList.join(', ')}` });
+    }
+    req.body.payterm = norm;
+  }
+  const ranges = readDb('sms_ranges') || [];
+  const rangeName = (req.body.range_name || req.body.name || req.body.country || 'Range').trim();
+  const isWnRng = isWhitenoiseRecord({ ...req.body, range_name: rangeName });
+  const effPt = isWnRng ? 'Monthly' : (req.body.payterm || 'Weekly');
+  const ptMeta = getPaytermMeta(effPt);
+  const entry = {
+    id: nextId(ranges),
+    ...req.body,
+    range_name: rangeName,
+    name: rangeName,
+    payterm: ptMeta.key,
+    payout_schedule: ptMeta.schedule,
+    cycle_days: ptMeta.cycle_days,
+    hold_days: ptMeta.hold_days,
+    ...(isWnRng ? { is_whitenoise: true } : {}),
+    active: req.body.active !== false,
+    created: new Date().toISOString()
+  };
+  ranges.unshift(entry);
+  writeDb('sms_ranges', ranges);
+  logAudit('Admin', 'Create SMS Range', `Created range "${entry.range_name}" (#${entry.id})`, 'Numbers');
+  res.json(entry);
+});
+
+app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
+  if (req.body.payterms !== undefined) {
+    if (typeof req.body.payterms !== 'object' || req.body.payterms === null || Array.isArray(req.body.payterms)) {
+      return res.status(400).json({ error: 'payterms must be an object' });
+    }
+    const masterList = getMasterPayterms();
+    const migrated = {};
+    for (const [k, v] of Object.entries(req.body.payterms)) {
+      const normK = normalizePaytermKey(k);
+      if (!masterList.includes(normK)) {
+        return res.status(400).json({ error: `Invalid payterm "${k}". Allowed payterms: ${masterList.join(', ')}` });
+      }
+      migrated[normK] = v;
+    }
+    req.body.payterms = migrated;
+  }
+  if (req.body.payterm !== undefined) {
+    const norm = normalizePaytermKey(req.body.payterm);
+    const masterList = getMasterPayterms();
+    if (!masterList.includes(norm)) {
+      return res.status(400).json({ error: `Invalid payterm "${req.body.payterm}". Allowed payterms: ${masterList.join(', ')}` });
+    }
+    req.body.payterm = norm;
+  }
+  const ranges = readDb('sms_ranges') || [];
+  const id = Number(req.params.id);
+  const idx = ranges.findIndex(r => r.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Range not found' });
+  const rangeName = (req.body.range_name || req.body.name || ranges[idx].range_name || ranges[idx].name || '').trim();
+  const isWnRng = isWhitenoiseRecord({ ...ranges[idx], ...req.body, range_name: rangeName });
+  const effPt = isWnRng ? 'Monthly' : (req.body.payterm || ranges[idx].payterm || 'Weekly');
+  const ptMeta = getPaytermMeta(effPt);
+  ranges[idx] = {
+    ...ranges[idx],
+    ...req.body,
+    range_name: rangeName || ranges[idx].country || 'Range',
+    name: rangeName || ranges[idx].country || 'Range',
+    payterm: ptMeta.key,
+    payout_schedule: ptMeta.schedule,
+    cycle_days: ptMeta.cycle_days,
+    hold_days: ptMeta.hold_days,
+    ...(isWnRng ? { is_whitenoise: true } : {})
+  };
+  writeDb('sms_ranges', ranges);
+
+  // Synchronize range_name into numbers database if changed
+  if (rangeName) {
+    let numbers = readDb('numbers') || [];
+    let changed = false;
+    numbers.forEach(n => {
+      if (n.range_id && Number(n.range_id) === id) {
+        n.range_name = rangeName;
+        changed = true;
+      }
+    });
+    if (changed) writeDb('numbers', numbers);
+  }
+
+  res.json(ranges[idx]);
+});
+
+app.delete('/api/numbers/sms-ranges/:id', (req, res) => {
+  const ranges = readDb('sms_ranges') || [];
+  const id = Number(req.params.id);
+  const targetRange = ranges.find(r => r.id === id);
+  const filtered = ranges.filter(r => r.id !== id);
+  writeDb('sms_ranges', filtered);
+
+  let deletedNumbers = 0;
+  let numbers = readDb('numbers') || [];
+  const initLen = numbers.length;
+  const targetCountry = (targetRange?.country || '').trim().toLowerCase();
+  const targetProvider = (targetRange?.provider || 'Manual').trim().toLowerCase();
+  const targetName = (targetRange?.range_name || '').trim().toLowerCase();
+
+  // Cascade delete all numbers belonging to this deleted range
+  numbers = numbers.filter(n => {
+    // 1. Direct range_id match
+    if (n.range_id && Number(n.range_id) === id) return false;
+    // 2. Direct range_name match
+    if (targetName && n.range_name && n.range_name.trim().toLowerCase() === targetName) return false;
+    // 3. If range_id is not set, match country and provider if no other active range uses them
+    if (!n.range_id && targetCountry && targetProvider) {
+      const c = (n.country || '').trim().toLowerCase();
+      const p = (n.provider || '').trim().toLowerCase();
+      if (c === targetCountry && p === targetProvider) return false;
+    }
+    return true;
+  });
+  deletedNumbers = initLen - numbers.length;
+  writeDb('numbers', numbers);
+
+  logAudit('Owner', 'Delete SMS Range', `Deleted range #${id} and ${deletedNumbers} numbers`, 'Ranges');
+  res.json({ success: true, deleted_numbers: deletedNumbers });
+});
+
+// Import to existing or new range
+app.post('/api/numbers/import-to-range', (req, res) => {
+  try {
+    const payload = req.body || {};
+    const numbersText = payload.numbers || '';
+    const lines = numbersText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) {
+      return res.status(400).json({ error: 'No numbers provided' });
+    }
+
+    const ranges = readDb('sms_ranges') || [];
+    let rangeId = payload.range_id;
+    let newRange = payload.new_range;
+    let rng = null;
+
+    if (newRange) {
+      const isWnNew = isWhitenoiseRecord(newRange);
+      const effNewPt = isWnNew ? 'Monthly' : normalizePaytermKey(newRange.payterm || newRange.payout_schedule || 'Weekly');
+      const newMeta = getPaytermMeta(effNewPt);
+      const payout = parseFloat(newRange.payout || 0) || 0;
+      const otpLimit = parseInt(newRange.otp_limit || 0, 10) || 0;
+      const cost = parseFloat(newRange.cost || 0) || 0;
+      const entry = {
+        id: nextId(ranges),
+        country: newRange.country || '',
+        provider: newRange.provider || 'Manual',
+        prefix: newRange.prefix || '',
+        range_name: (newRange.name || newRange.range_name || newRange.country || 'Range').trim(),
+        name: (newRange.name || newRange.range_name || newRange.country || 'Range').trim(),
+        cost: cost,
+        payterm: newMeta.key,
+        payout_schedule: newMeta.schedule,
+        cycle_days: newMeta.cycle_days,
+        hold_days: newMeta.hold_days,
+        ...(isWnNew ? { is_whitenoise: true } : {}),
+        payout: payout,
+        otp_limit: otpLimit,
+        active: true,
+        created: new Date().toISOString()
+      };
+      ranges.unshift(entry);
+      writeDb('sms_ranges', ranges);
+      rangeId = entry.id;
+
+      const rateCard = readDb('rate_card') || [];
+      rateCard.unshift({
+        id: nextId(rateCard),
+        country: entry.country,
+        provider: entry.provider,
+        buy_rate: entry.cost,
+        sell_rate: payout,
+        margin: `${entry.cost ? Math.round((1 - payout / entry.cost) * 100) : 0}%`,
+        active: true,
+        created: new Date().toISOString()
+      });
+      writeDb('rate_card', rateCard);
+      rng = entry;
+    } else {
+      rng = ranges.find(r => r.id === Number(rangeId));
+      if (!rng) {
+        return res.status(404).json({ error: 'Range not found — select a range or create a new one' });
+      }
+    }
+
+    const countryOverride = (payload.country_override || '').trim();
+    const numbers = readDb('numbers') || [];
+    const added = [];
+    const baseId = nextId(numbers);
+
+    // Filter out common CSV/text headers like 'number', 'phone', 'msisdn'
+    const validLines = lines.filter(l => !/^(number|phone|msisdn|mobile|phone\s*number)$/i.test(l));
+    if (!validLines.length) {
+      return res.status(400).json({ error: 'No valid phone numbers found in input' });
+    }
+
+    // Build digit lookup map of existing numbers in system
+    const existingMap = new Map();
+    for (const item of numbers) {
+      const d = String(item.number || '').replace(/\D/g, '');
+      if (d) existingMap.set(d, item);
+    }
+
+    const seenInBatch = new Set();
+    const duplicates = [];
+    const targetRangeId = Number(rng.id);
+    const targetRangeName = rng.range_name || rng.name || rng.country || 'Range';
+    const isWnTargetRng = isWhitenoiseRecord(rng);
+
+    for (let i = 0; i < validLines.length; i++) {
+      const num = validLines[i];
+      const digits = String(num).replace(/\D/g, '');
+      if (!digits) continue;
+
+      // Check duplicate within the submitted list
+      if (seenInBatch.has(digits)) {
+        duplicates.push({ number: num, reason: 'Duplicate in submitted list' });
+        continue;
+      }
+      seenInBatch.add(digits);
+
+      // Check duplicate in database
+      const existing = existingMap.get(digits);
+      if (existing) {
+        if (Number(existing.range_id) === targetRangeId) {
+          duplicates.push({ number: num, reason: 'Already exists in this range' });
+        } else {
+          const otherRange = existing.range_name || existing.country || `Range #${existing.range_id}`;
+          duplicates.push({ number: num, reason: `Already in range "${otherRange}"` });
+        }
+        continue;
+      }
+
+      const importNowIso = new Date().toISOString();
+      added.push({
+        id: baseId + added.length,
+        number: num,
+        range_id: rng.id,
+        range_name: targetRangeName,
+        prefix: rng.prefix || '',
+        app: 'Unassigned',
+        status: 'active',
+        agent_id: null,
+        client_id: null,
+        user: 'unallocated',
+        country: countryOverride || rng.country || '',
+        provider: rng.provider || 'Manual',
+        ...(isWnTargetRng ? { is_whitenoise: true, payterm: 'Monthly', client_payterm: 'Monthly', payout_schedule: 'monthly30_5', cycle_days: 30, hold_days: 5 } : {}),
+        otp_limit: rng.otp_limit || 0,
+        created_at: importNowIso,
+        created: importNowIso,
+        allocated_at: importNowIso,
+        last_sms: null,
+        sms_count: 0,
+        notes: ''
+      });
+      existingMap.set(digits, { range_id: rng.id, range_name: targetRangeName });
+    }
+
+    if (added.length > 0) {
+      numbers.push(...added);
+      writeDb('numbers', numbers);
+      logAudit('Admin', 'Import Numbers', `Imported ${added.length} numbers to range "${targetRangeName}" (skipped ${duplicates.length} duplicate(s))`, 'Numbers');
+    }
+
+    res.json({
+      success: true,
+      imported: added.length,
+      skipped_duplicates: duplicates.length,
+      duplicates_detail: duplicates,
+      range_id: rangeId,
+      range_name: targetRangeName,
+      message: added.length > 0
+        ? `Imported ${added.length} number(s).${duplicates.length ? ` Skipped ${duplicates.length} duplicate(s).` : ''}`
+        : `No numbers imported. All ${duplicates.length} number(s) were duplicates.`
+    });
+  } catch (err) {
+    console.error('import-to-range error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk range import from CSV / TXT
+app.post('/api/numbers/bulk-range-import', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ detail: 'No file uploaded' });
+    }
+    const text = req.file.buffer.toString('utf-8');
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) {
+      return res.status(400).json({ detail: 'File is empty' });
+    }
+
+    const providerName = (req.body.provider_name || 'Provider').trim();
+    const mode = req.body.mode || 'iprn';
+    const overrideCost = parseFloat(req.body.override_cost || 0) || 0;
+    const payoutSchedule = req.body.payout_schedule || 'weekly';
+    const overridePayout = parseFloat(req.body.override_payout || 0) || 0;
+    const otpLimit = parseInt(req.body.otp_limit || 0, 10) || 0;
+
+    const rows = [];
+    for (const line of lines) {
+      if (line.includes(',')) {
+        const parts = line.split(',').map(p => p.trim());
+        if (parts.length >= 3) {
+          rows.push({ country: parts[0], provider: parts[1] || providerName, number: parts[2] });
+        } else if (parts.length === 2) {
+          rows.push({ country: parts[0], provider: providerName, number: parts[1] });
+        } else {
+          rows.push({ country: 'Unknown', provider: providerName, number: parts[0] });
+        }
+      } else {
+        rows.push({ country: 'Unknown', provider: providerName, number: line });
+      }
+    }
+
+    if (!rows.length) {
+      return res.status(400).json({ detail: 'No valid numbers found in file' });
+    }
+
+    const groups = {};
+    for (const r of rows) {
+      const key = `${r.country}||${r.provider}`;
+      if (!groups[key]) groups[key] = { country: r.country, provider: r.provider, numbers: [] };
+      groups[key].numbers.push(r.number);
+    }
+
+    const ranges = readDb('sms_ranges') || [];
+    const rateCard = readDb('rate_card') || [];
+    const numbersDb = readDb('numbers') || [];
+    const createdRanges = [];
+    let totalAdded = 0;
+
+    const monthDay = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+    for (const key of Object.keys(groups)) {
+      const grp = groups[key];
+      const provPart = (grp.provider && grp.provider !== 'Manual' && grp.provider !== grp.country) ? ` ${grp.provider}` : '';
+      const rangeName = `${grp.country}${provPart} SSP ${monthDay}`;
+      const isWnGrp = isWhitenoiseRecord({ provider: grp.provider, range_name: rangeName });
+      const grpPt = isWnGrp ? 'Monthly' : normalizePaytermKey(payoutSchedule || 'Weekly');
+      const grpMeta = getPaytermMeta(grpPt);
+      const rngEntry = {
+        id: nextId(ranges),
+        country: grp.country,
+        provider: grp.provider || 'Manual',
+        prefix: '',
+        range_name: rangeName,
+        name: rangeName,
+        cost: overrideCost,
+        payterm: grpMeta.key,
+        payout_schedule: grpMeta.schedule,
+        cycle_days: grpMeta.cycle_days,
+        hold_days: grpMeta.hold_days,
+        ...(isWnGrp ? { is_whitenoise: true } : {}),
+        payout: overridePayout,
+        otp_limit: otpLimit,
+        active: true,
+        created: new Date().toISOString()
+      };
+      ranges.unshift(rngEntry);
+      createdRanges.push(rngEntry);
+
+      rateCard.unshift({
+        id: nextId(rateCard),
+        country: grp.country,
+        provider: grp.provider,
+        buy_rate: overrideCost,
+        sell_rate: overridePayout,
+        margin: `${overrideCost ? Math.round((1 - overridePayout / overrideCost) * 100) : 0}%`,
+        active: true,
+        created: new Date().toISOString()
+      });
+
+      const existingDigits = new Set(numbersDb.map(n => String(n.number || '').replace(/\D/g, '')).filter(Boolean));
+      const seenBatch = new Set();
+
+      for (let i = 0; i < grp.numbers.length; i++) {
+        const num = grp.numbers[i];
+        const digits = String(num).replace(/\D/g, '');
+        if (!digits) continue;
+        if (existingDigits.has(digits) || seenBatch.has(digits)) {
+          continue;
+        }
+        seenBatch.add(digits);
+        existingDigits.add(digits);
+
+        const bulkImpNowIso = new Date().toISOString();
+        numbersDb.push({
+          id: nextId(numbersDb) + totalAdded,
+          number: num,
+          range_id: rngEntry.id,
+          range_name: rngEntry.range_name,
+          prefix: rngEntry.prefix || '',
+          app: 'Unassigned',
+          status: 'active',
+          agent_id: null,
+          client_id: null,
+          user: 'unallocated',
+          country: grp.country,
+          provider: grp.provider,
+          ...(isWnGrp ? { is_whitenoise: true, payterm: 'Monthly', client_payterm: 'Monthly', payout_schedule: 'monthly30_5', cycle_days: 30, hold_days: 5 } : {}),
+          otp_limit: otpLimit,
+          created_at: bulkImpNowIso,
+          created: bulkImpNowIso,
+          allocated_at: bulkImpNowIso,
+          last_sms: null,
+          sms_count: 0,
+          notes: ''
+        });
+        totalAdded++;
+      }
+    }
+
+    writeDb('sms_ranges', ranges);
+    writeDb('rate_card', rateCard);
+    writeDb('numbers', numbersDb);
+
+    logAudit('Admin', 'Bulk Range Import', `Created ${createdRanges.length} range(s), imported ${totalAdded} numbers`, 'Numbers');
+    res.json({
+      ranges_created: createdRanges.length,
+      numbers_imported: totalAdded,
+      ranges: createdRanges.map(r => ({
+        name: r.range_name,
+        country: r.country,
+        provider: r.provider,
+        cost: r.cost,
+        payout_schedule: r.payout_schedule,
+        payout: r.payout
+      }))
+    });
+  } catch (err) {
+    console.error('bulk-range-import error:', err);
+    res.status(500).json({ detail: err.message });
+  }
+});
+
+// Simple number list upload
+app.post('/api/numbers/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const text = req.file.buffer.toString('utf-8');
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const country = (req.body.country || 'US').trim();
+    const numbers = readDb('numbers') || [];
+    const added = [];
+    const baseId = nextId(numbers);
+    const existingDigits = new Set(numbers.map(n => String(n.number || '').replace(/\D/g, '')).filter(Boolean));
+    const seenBatch = new Set();
+    let skippedDuplicates = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const num = lines[i];
+      const digits = String(num).replace(/\D/g, '');
+      if (!digits) continue;
+      if (existingDigits.has(digits) || seenBatch.has(digits)) {
+        skippedDuplicates++;
+        continue;
+      }
+      seenBatch.add(digits);
+      existingDigits.add(digits);
+
+      const uploadNowIso = new Date().toISOString();
+      added.push({
+        id: baseId + added.length,
+        number: num,
+        app: 'Unassigned',
+        status: 'active',
+        user: 'unallocated',
+        country: country,
+        provider: 'Manual',
+        created_at: uploadNowIso,
+        created: uploadNowIso,
+        allocated_at: uploadNowIso,
+        last_sms: null,
+        sms_count: 0,
+        notes: ''
+      });
+    }
+
+    if (added.length > 0) {
+      numbers.push(...added);
+      writeDb('numbers', numbers);
+      logAudit('Admin', 'Upload Numbers', `Uploaded ${added.length} numbers (skipped ${skippedDuplicates} duplicates)`, 'Numbers');
+    }
+    res.json({
+      imported: added.length,
+      skipped_duplicates: skippedDuplicates,
+      total: numbers.length,
+      success: true
+    });
+  } catch (err) {
+    console.error('upload numbers error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Rate Card (Must return Array directly)
+app.get('/api/numbers/rate-card', (req, res) => {
+  const card = readDb('rate_card') || [];
+  const _viewer = req.sessionUser || getSessionUser(req);
+  const _role = normRole(_viewer && _viewer.role);
+  if (_role === 'owner') return res.json(card);
+  // Agent & Client: Isolated payout rate only (Never leaks owner buy_rate or internal profit margins)
+  res.json(card.map(c => ({
+    id: c.id,
+    range_name: c.range_name || c.name || c.country,
+    name: c.range_name || c.name || c.country,
+    country: c.country,
+    prefix: c.prefix || '',
+    provider: c.provider,
+    sell_rate: c.sell_rate != null ? c.sell_rate : (c.payout != null ? c.payout : 0.01),
+    rate: c.sell_rate != null ? c.sell_rate : (c.payout != null ? c.payout : 0.01),
+    payout: c.sell_rate != null ? c.sell_rate : (c.payout != null ? c.payout : 0.01),
+    payterm: c.payterm || 'Weekly',
+    active: c.active !== false
+  })));
+});
+
+app.post('/api/numbers/rate-card', (req, res) => {
+  const card = readDb('rate_card') || [];
+  const item = { id: nextId(card), ...req.body, active: true, created: new Date().toISOString() };
+  card.unshift(item);
+  writeDb('rate_card', card);
+  res.json(item);
+});
+
+app.patch('/api/numbers/rate-card/:id', (req, res) => {
+  const card = readDb('rate_card') || [];
+  const id = Number(req.params.id);
+  const idx = card.findIndex(c => c.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Item not found' });
+  card[idx] = { ...card[idx], ...req.body };
+  writeDb('rate_card', card);
+  res.json(card[idx]);
+});
+
+app.delete('/api/numbers/rate-card/:id', (req, res) => {
+  const card = readDb('rate_card') || [];
+  const id = Number(req.params.id);
+  writeDb('rate_card', card.filter(c => c.id !== id));
+  res.json({ success: true });
+});
+
+// ── C5: Owner Warning List & Reconciliation Endpoints ──────────
+app.get('/api/numbers/no-rate-ranges', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const isOwner = normRole(sessionUser.role) === 'owner';
+  if (!isOwner) return res.status(403).json({ error: 'Forbidden. Owner only.' });
+
+  const ranges = readDb('sms_ranges') || [];
+  const numbers = readDb('numbers') || [];
+  const noRateList = [];
+
+  for (const r of ranges) {
+    const cost = Number(r.company_cost ?? r.cost ?? r.buy_rate ?? 0);
+    const payout = (r.payterms && Object.values(r.payterms).some(v => v !== 'NA' && Number(v) > 0)) || (Number(r.payout) > 0);
+    if (!cost || !payout) {
+      noRateList.push({
+        id: r.id,
+        range_name: r.range_name || r.name,
+        country: r.country,
+        provider: r.provider,
+        cost: cost,
+        has_payout: Boolean(payout),
+        affected_numbers_count: numbers.filter(n => Number(n.range_id) === Number(r.id)).length
+      });
+    }
+  }
+  res.json({ success: true, count: noRateList.length, ranges: noRateList });
+});
+
+app.get('/api/finance/reconciliation', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const isOwner = normRole(sessionUser.role) === 'owner';
+  if (!isOwner) return res.status(403).json({ error: 'Forbidden. Owner only.' });
+
+  const allSms = readSmsWithArchive();
+  let totalCompany = 0;
+  let totalOwner = 0;
+  let totalAgent = 0;
+  let totalClient = 0;
+
+  for (const s of allSms) {
+    totalCompany += (Number(s.company_rate) || 0);
+    totalOwner += (Number(s.owner_amount) || 0);
+    totalAgent += (Number(s.agent_amount) || 0);
+    totalClient += (Number(s.client_amount) || 0);
+  }
+
+  totalCompany = Math.round(totalCompany * 1000000) / 1000000;
+  const totalDistributed = Math.round((totalOwner + totalAgent + totalClient) * 1000000) / 1000000;
+  const isReconciled = Math.abs(totalCompany - totalDistributed) < 0.0001;
+
+  res.json({
+    success: true,
+    total_sms: allSms.length,
+    company_revenue: totalCompany,
+    owner_amount: Math.round(totalOwner * 1000000) / 1000000,
+    agent_amount: Math.round(totalAgent * 1000000) / 1000000,
+    client_amount: Math.round(totalClient * 1000000) / 1000000,
+    total_distributed: totalDistributed,
+    reconciled: isReconciled
+  });
+});
+
+// ── C4: Payments & Stamped Balance Engine (Username & Role Base) ──
+app.get(['/api/payments', '/api/payments/balance', '/api/payments/summary'], requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const userId = Number(sessionUser.id);
+  const myUsername = String(sessionUser.username || '').trim().toLowerCase();
+  const allSms = readSmsWithArchive();
+  const allPayouts = readDb('payout_requests') || [];
+
+  const fxRate = getUsdToPkrRate();
+  let earned = 0;
+  let earnedPkr = 0;
+  let scopedSms = [];
+  if (sRole === 'client') {
+    scopedSms = allSms.filter(s => (s.client_username && s.client_username.toLowerCase() === myUsername) || Number(s.client_id) === userId);
+    earned = scopedSms.reduce((sum, s) => sum + (Number(s.client_amount) || 0), 0);
+    earnedPkr = scopedSms.reduce((sum, s) => sum + (s.client_amount_pkr != null ? Number(s.client_amount_pkr) : (Number(s.client_amount) || 0) * (Number(s.fx_usd_to_pkr) || fxRate)), 0);
+  } else if (sRole === 'agent') {
+    scopedSms = allSms.filter(s => (s.agent_username && s.agent_username.toLowerCase() === myUsername) || Number(s.agent_id) === userId);
+    earned = scopedSms.reduce((sum, s) => sum + (Number(s.agent_amount) || 0), 0);
+    earnedPkr = earned * fxRate;
+  } else if (sRole === 'owner' || sRole === 'admin') {
+    scopedSms = allSms;
+    earned = scopedSms.reduce((sum, s) => sum + (Number(s.owner_amount) || 0), 0);
+    earnedPkr = earned * fxRate;
+  }
+  const holdSummary = computeUserHoldSummary(scopedSms, sRole, fxRate);
+
+  const userPayouts = allPayouts.filter(p => {
+    const pRole = String(p.role || p.recipient_role || '').toLowerCase();
+    const pUser = String(p.recipient_username || p.username || p.user || '').trim().toLowerCase();
+    if (pUser) {
+      return pUser === myUsername;
+    }
+    if (sRole === 'client') return (pRole === 'client' || !pRole) && (Number(p.client_id || p.user_id) === userId);
+    if (sRole === 'agent') return (pRole === 'agent' || !pRole) && (Number(p.agent_id || p.user_id) === userId);
+    return false;
+  });
+
+  const isPaidStatus = p => p.status === 'completed' || p.status === 'paid' || p.status === 'approved';
+  const payoutUsd = p => {
+    if (String(p.currency || 'USD').toUpperCase() === 'PKR') {
+      if (p.amount_usd != null) return Number(p.amount_usd) || 0;
+      const fx = Number(p.fx_usd_to_pkr) || fxRate;
+      return (Number(p.amount) || 0) / fx;
+    }
+    return Number(p.amount) || 0;
+  };
+  const payoutPkr = p => {
+    if (String(p.currency || 'USD').toUpperCase() === 'PKR') {
+      return Number(p.amount) || 0;
+    }
+    return (Number(p.amount) || 0) * (Number(p.fx_usd_to_pkr) || fxRate);
+  };
+
+  const totalPaid = userPayouts.filter(isPaidStatus).reduce((sum, p) => sum + payoutUsd(p), 0);
+  const pendingHold = userPayouts.filter(p => p.status === 'pending').reduce((sum, p) => sum + payoutUsd(p), 0);
+  const totalPaidPkr = userPayouts.filter(isPaidStatus).reduce((sum, p) => sum + payoutPkr(p), 0);
+  const pendingHoldPkr = userPayouts.filter(p => p.status === 'pending').reduce((sum, p) => sum + payoutPkr(p), 0);
+
+  const balance = Math.round((earned - totalPaid) * 10000) / 10000;
+  const availableBalance = Math.max(0, Math.round((earned - totalPaid - pendingHold) * 10000) / 10000);
+  const balancePkr = round2(earnedPkr - totalPaidPkr);
+  const availableBalancePkr = Math.max(0, round2(earnedPkr - totalPaidPkr - pendingHoldPkr));
+  const userRec = findUserAnywhere(sessionUser.username)?.user;
+  const dbBalance = userRec && userRec.balance !== undefined ? Number(userRec.balance) : balance;
+  const dbBalancePkr = userRec && userRec.balance_pkr !== undefined ? Number(userRec.balance_pkr) : balancePkr;
+
+  res.json({
+    success: true,
+    role: sessionUser.role,
+    username: sessionUser.username,
+    user_id: userId,
+    preferred_currency: sRole === 'client' ? 'PKR' : 'USD',
+    usd_to_pkr_rate: fxRate,
+    total_earned: Math.round(earned * 10000) / 10000,
+    total_paid: Math.round(totalPaid * 10000) / 10000,
+    pending_hold: Math.round(pendingHold * 10000) / 10000,
+    available_balance: availableBalance,
+    balance: balance,
+    main_balance: Math.round(dbBalance * 10000) / 10000,
+    ledger_balance: balance,
+    total_earned_pkr: round2(earnedPkr),
+    total_paid_pkr: round2(totalPaidPkr),
+    pending_hold_pkr: round2(pendingHoldPkr),
+    available_balance_pkr: availableBalancePkr,
+    balance_pkr: balancePkr,
+    main_balance_pkr: round2(dbBalancePkr),
+    payterm_schedules: PAYTERM_DEFINITIONS,
+    hold_summary: holdSummary,
+    monthly_cycle: holdSummary.monthly_cycle,
+    monthly30_5: getMonthly30_5ScheduleInfo(holdSummary),
+    whitenoise_access: hasWhitenoiseAccess(sessionUser),
+    ...(sRole === 'agent' ? { weekly_target: getAgentClientWeeklyPkrStats(userId) } : {}),
+    payouts: userPayouts
+  });
+});
+
+app.post('/api/payments', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && !isAgent) {
+    return res.status(403).json({ error: 'Access denied. Clients cannot record payments.' });
+  }
+
+  const { recipient_id, recipient_username, recipient_role, amount, notes, method, currency } = req.body || {};
+  const numAmount = Number(amount);
+  if (!numAmount || numAmount <= 0) {
+    return res.status(400).json({ error: 'Valid payment amount is required' });
+  }
+
+  // Find recipient by username or id
+  let targetUser = null;
+  let targetRole = recipient_role;
+  if (recipient_username) {
+    const found = findUserAnywhere(recipient_username);
+    if (found) {
+      targetUser = found.user;
+      targetRole = found.role;
+    }
+  } else if (recipient_id) {
+    const rLower = String(recipient_role || '').toLowerCase();
+    let tables = ['users', 'agents', 'clients'];
+    if (rLower === 'client') {
+      tables = ['clients', 'agents', 'users'];
+    } else if (rLower === 'agent') {
+      tables = ['agents', 'clients', 'users'];
+    }
+    for (const tbl of tables) {
+      const rows = readDb(tbl) || [];
+      const f = rows.find(x => x && Number(x.id) === Number(recipient_id));
+      if (f) {
+        targetUser = f;
+        targetRole = f.role || (tbl === 'agents' ? 'Agent' : tbl === 'clients' ? 'Client' : 'Owner');
+        break;
+      }
+    }
+  }
+
+  if (!targetUser) {
+    return res.status(404).json({ error: 'Recipient user not found. Please provide a valid username or ID.' });
+  }
+
+  const finalUsername = targetUser.username;
+  const finalRole = targetRole || (recipient_role || 'Client');
+
+  if (isOwner && finalRole.toLowerCase() === 'client') {
+    return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
+  }
+
+  if (isAgent) {
+    if (finalRole.toLowerCase() !== 'client') {
+      return res.status(403).json({ error: 'Agents can only record payouts for Clients.' });
+    }
+    if (Number(targetUser.agent_id) !== Number(sessionUser.id)) {
+      return res.status(403).json({ error: 'Access denied. This client does not belong to your account.' });
+    }
+  }
+
+  const fx = getUsdToPkrRate();
+  const payCurrency = String(currency || 'USD').toUpperCase();
+  const curBal = Number(targetUser.balance || 0);
+  const curBalPkr = targetUser.balance_pkr != null ? Number(targetUser.balance_pkr) : round2(curBal * fx);
+  const usdDeduct = payCurrency === 'PKR' ? round6(numAmount / fx) : numAmount;
+  const pkrDeduct = payCurrency === 'PKR' ? round2(numAmount) : round2(numAmount * fx);
+
+  if (payCurrency === 'PKR') {
+    if (curBalPkr + 1e-6 < pkrDeduct) {
+      return res.status(400).json({ error: `Insufficient PKR balance. Recipient only has Rs. ${cleanMoneyStr(curBalPkr, 4)} PKR available.` });
+    }
+  } else if (curBal < numAmount) {
+    return res.status(400).json({ error: `Insufficient balance. Recipient only has $${cleanMoneyStr(curBal, 4)} available.` });
+  }
+
+  const payouts = readDb('payout_requests') || [];
+  const targetId = targetUser.id;
+  const rec = {
+    id: nextId(payouts),
+    user: finalUsername,
+    username: finalUsername,
+    role: finalRole,
+    user_id: targetId,
+    recipient_username: finalUsername,
+    recipient_role: finalRole,
+    client_id: finalRole.toLowerCase() === 'client' ? targetId : null,
+    agent_id: finalRole.toLowerCase() === 'agent' ? targetId : (targetUser.agent_id || null),
+    amount: numAmount,
+    amount_usd: usdDeduct,
+    currency: payCurrency,
+    fx_usd_to_pkr: fx,
+    method: method || (payCurrency === 'PKR' ? 'Bank / JazzCash / Easypaisa' : 'USDT'),
+    notes: notes || '',
+    paid_by_username: sessionUser.username,
+    paid_by_role: sessionUser.role,
+    status: 'completed',
+    created: new Date().toISOString(),
+    paid_at: new Date().toISOString()
+  };
+  payouts.unshift(rec);
+  writeDb('payout_requests', payouts);
+
+  // Synchronize balance reduction on recipient
+  const tbl = finalRole.toLowerCase() === 'agent' ? 'agents' : (finalRole.toLowerCase() === 'client' ? 'clients' : 'users');
+  const records = readDb(tbl) || [];
+  const idx = records.findIndex(r => r && (r.id === targetUser.id || r.username === targetUser.username));
+  if (idx !== -1) {
+    const curBalRec = Number(records[idx].balance || 0);
+    records[idx].balance = Math.max(0, Math.round((curBalRec - usdDeduct) * 1000000) / 1000000);
+    if (tbl === 'clients' || records[idx].balance_pkr != null) {
+      const recPkr = records[idx].balance_pkr != null ? Number(records[idx].balance_pkr) : round2(curBalRec * fx);
+      records[idx].balance_pkr = Math.max(0, round2(recPkr - pkrDeduct));
+    }
+    writeDb(tbl, records);
+  }
+
+  logAudit(sessionUser.username, 'Record Payout', `Paid ${numAmount} ${payCurrency} to ${finalRole} ${finalUsername}`, 'Payments');
+  res.json({ success: true, payment: rec });
+});
+
+// ── Financial Statements & Credit Notes ──────────────────────
+app.get('/api/statements', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+  const isClient = sRole === 'client';
+
+  const currency = (req.query.currency || 'USD').toUpperCase();
+  let reqAgentId = req.query.agent_id ? Number(req.query.agent_id) : (isAgent ? Number(sessionUser.id) : null);
+  let reqClientId = req.query.client_id ? Number(req.query.client_id) : (isClient ? Number(sessionUser.id) : null);
+
+  if (isClient) {
+    reqAgentId = null;
+    reqClientId = Number(sessionUser.id);
+  } else if (isAgent) {
+    reqAgentId = Number(sessionUser.id);
+    if (reqClientId) {
+      const cls = readDb('clients') || [];
+      const targetCl = cls.find(c => Number(c.id) === reqClientId);
+      if (!targetCl || Number(targetCl.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You can only view statements for your own clients.' });
+      }
+    }
+  }
+
+  const allSms = readSmsWithArchive();
+  const allPayouts = readDb('payout_requests') || [];
+
+  let relevantSms = [];
+  if (reqClientId) {
+    relevantSms = allSms.filter(s => Number(s.client_id) === reqClientId && ((s.currency || 'USD').toUpperCase() === currency));
+  } else if (reqAgentId) {
+    relevantSms = allSms.filter(s => Number(s.agent_id) === reqAgentId && ((s.currency || 'USD').toUpperCase() === currency));
+  } else if (isOwner) {
+    relevantSms = allSms.filter(s => ((s.currency || 'USD').toUpperCase() === currency));
+  }
+
+  const monthMap = {};
+  for (const s of relevantSms) {
+    const m = (s.date || (s.timestamp ? s.timestamp.slice(0, 7) : '')).slice(0, 7) || 'Current';
+    if (!monthMap[m]) monthMap[m] = { month: m, credit: 0, debit: 0, count: 0, currency };
+    const amt = reqClientId ? (Number(s.client_amount) || 0) : (reqAgentId ? (Number(s.agent_amount) || 0) : (Number(s.owner_amount) || 0));
+    monthMap[m].credit += amt;
+    monthMap[m].count++;
+  }
+
+  const payouts = allPayouts.filter(p => {
+    if (reqClientId) return Number(p.client_id || p.user_id) === reqClientId;
+    if (reqAgentId) return Number(p.agent_id || p.user_id) === reqAgentId;
+    return true;
+  });
+  for (const p of payouts) {
+    const m = (p.paid_at || p.created || '').slice(0, 7) || 'Current';
+    if (!monthMap[m]) monthMap[m] = { month: m, credit: 0, debit: 0, count: 0, currency };
+    monthMap[m].debit += (Number(p.amount) || 0);
+  }
+
+  const result = Object.values(monthMap).sort((a, b) => b.month.localeCompare(a.month)).map(item => ({
+    ...item,
+    credit: Math.round(item.credit * 10000) / 10000,
+    debit: Math.round(item.debit * 10000) / 10000,
+    balance: Math.round((item.credit - item.debit) * 10000) / 10000
+  }));
+
+  res.json({ success: true, currency, data: result });
+});
+
+function canAccessCreditNote(sessionUser, note) {
+  if (!sessionUser || !note) return false;
+  const sRole = normRole(sessionUser.role);
+  if (sRole === 'owner') return String(note.role || '').toLowerCase() !== 'client';
+  const uid = Number(sessionUser.id);
+  const uname = String(sessionUser.username || '').trim().toLowerCase();
+  const nUname = String(note.username || note.user || '').trim().toLowerCase();
+  if (sRole === 'agent') {
+    return Number(note.agent_id) === uid || Number(note.user_id) === uid || (uname && nUname === uname);
+  }
+  if (sRole === 'client') {
+    return Number(note.client_id) === uid || Number(note.user_id) === uid || (uname && nUname === uname);
+  }
+  return false;
+}
+
+app.get('/api/credit-notes', requireAuth, (req, res) => {
+  let notes = readDb('credit_notes') || [];
+  notes = notes.filter(n => canAccessCreditNote(req.sessionUser, n));
+  res.json({ success: true, data: notes });
+});
+
+app.get('/api/credit-notes/:id/pdf', requireAuth, (req, res) => {
+  const notes = readDb('credit_notes') || [];
+  const id = Number(req.params.id);
+  const note = notes.find(n => n.id === id || String(n.id) === String(req.params.id));
+  if (!note) {
+    return res.status(404).send('Credit note not found');
+  }
+  if (!canAccessCreditNote(req.sessionUser, note)) {
+    return res.status(403).send('Forbidden. You cannot access this credit note.');
+  }
+
+  const siteName = escHtml((readDb('settings') || {}).site_name || 'HUMAX SMS');
+  const voucherNo = escHtml(`CN-${String(note.id).padStart(5, '0')}`);
+  const dateStr = escHtml((note.date || note.created || new Date().toISOString()).slice(0, 10));
+  const amountStr = cleanMoneyStr(Number(note.amount || 0), 2);
+  const cur = escHtml(note.currency || 'USD');
+  const statusStr = escHtml(note.status || 'Settled');
+  const recipientStr = escHtml(note.username || (note.agent_id ? 'Agent #' + note.agent_id : 'Account Holder'));
+  const roleStr = escHtml(note.role || 'Partner');
+  const accountIdStr = escHtml(note.agent_id || note.user_id || '—');
+  const termStr = escHtml(note.term || 'Weekly');
+  const reasonStr = escHtml(note.reason || 'SMS Wholesale Revenue');
+  const descReasonStr = escHtml(note.reason || 'Settlement voucher');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Credit Note #${voucherNo}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 40px; color: #1e293b; background: #fff; max-width: 760px; margin: 0 auto; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #e2e8f0; padding-bottom: 24px; margin-bottom: 24px; }
+    .logo { font-size: 26px; font-weight: 800; letter-spacing: 1px; color: #0f172a; }
+    .logo span { color: #10b981; }
+    .meta { text-align: right; font-size: 13px; color: #64748b; line-height: 1.6; }
+    .badge { display: inline-block; padding: 4px 12px; background: #ecfdf5; color: #059669; border: 1px solid #a7f3d0; border-radius: 9999px; font-size: 12px; font-weight: 700; text-transform: uppercase; margin-top: 8px; }
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+    .info-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; font-size: 13px; }
+    .info-box strong { display: block; font-size: 11px; text-transform: uppercase; color: #64748b; margin-bottom: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 30px; font-size: 14px; }
+    th { background: #f1f5f9; text-align: left; padding: 12px 14px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; border-bottom: 1px solid #cbd5e1; }
+    td { padding: 14px; border-bottom: 1px solid #e2e8f0; }
+    .total-box { display: flex; justify-content: flex-end; margin-top: 10px; }
+    .total-card { width: 280px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; font-size: 14px; }
+    .total-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+    .total-final { font-size: 18px; font-weight: 800; color: #059669; border-top: 1px solid #cbd5e1; padding-top: 8px; margin-top: 8px; }
+    .footer { margin-top: 50px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 20px; }
+    @media print {
+      body { padding: 0; }
+      .no-print { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print" style="margin-bottom: 20px; display: flex; justify-content: flex-end;">
+    <button onclick="window.print()" style="padding: 8px 18px; background: #0f172a; color: #fff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer;">Print / Save as PDF</button>
+  </div>
+  <div class="header">
+    <div>
+      <div class="logo">HUMAX <span>SMS</span></div>
+      <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Wholesale SMS Platform &amp; Carrier Settlement</div>
+      <span class="badge">Official Settlement Credit Note</span>
+    </div>
+    <div class="meta">
+      <div><strong>Voucher:</strong> #${voucherNo}</div>
+      <div><strong>Date:</strong> ${dateStr}</div>
+      <div><strong>Currency:</strong> ${cur}</div>
+      <div><strong>Status:</strong> ${statusStr}</div>
+    </div>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-box">
+      <strong>Issued To</strong>
+      <div style="font-size: 15px; font-weight: 700; color: #0f172a;">${recipientStr}</div>
+      <div>Role: ${roleStr}</div>
+      <div>Account ID: #${accountIdStr}</div>
+    </div>
+    <div class="info-box">
+      <strong>Terms &amp; Settlement</strong>
+      <div>Payment Term: <b>${termStr}</b></div>
+      <div>Transaction Type: Credit Note Settlement</div>
+      <div>Settled Via: ${reasonStr}</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Description</th>
+        <th>Reference</th>
+        <th>Payterm</th>
+        <th style="text-align: right;">Amount (${cur})</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Wholesale SMS Commission &amp; Payout</strong><br><span style="font-size: 12px; color: #64748b;">${descReasonStr}</span></td>
+        <td>#${voucherNo}</td>
+        <td>${termStr}</td>
+        <td style="text-align: right; font-weight: 700;">$${amountStr}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="total-box">
+    <div class="total-card">
+      <div class="total-row"><span>Gross Payout:</span><span>$${amountStr}</span></div>
+      <div class="total-row"><span>Deductions:</span><span>$0.00</span></div>
+      <div class="total-row total-final"><span>Total Credit:</span><span>$${amountStr} ${cur}</span></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    This is an electronically generated financial statement voucher issued by ${siteName}. No signature is required.
+  </div>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+// 3. Blacklist (Must return Array directly)
+app.get('/api/numbers/blacklist', (req, res) => {
+  const list = readDb('blacklist') || [];
+  res.json(list);
+});
+
+app.post('/api/numbers/blacklist', (req, res) => {
+  const list = readDb('blacklist') || [];
+  const item = { id: nextId(list), ...req.body, active: true, created: new Date().toISOString() };
+  list.unshift(item);
+  writeDb('blacklist', list);
+  res.json(item);
+});
+
+app.delete('/api/numbers/blacklist/:id', (req, res) => {
+  const list = readDb('blacklist') || [];
+  const id = Number(req.params.id);
+  writeDb('blacklist', list.filter(b => b.id !== id));
+  res.json({ success: true });
+});
+
+// 4. Blocked IPs (Must return Array directly)
+app.get('/api/firewall/blocked-ips', (req, res) => {
+  const blocked = readDb('blocked_ips') || [];
+  res.json(blocked);
+});
+
+app.post('/api/firewall/block-ip', (req, res) => {
+  const blocked = readDb('blocked_ips') || [];
+  const ip = (req.body.ip || '').trim();
+  if (!ip) return res.status(400).json({ error: 'IP is required' });
+  const entry = { id: nextId(blocked), ip, reason: req.body.reason || 'Manual block', blocked_at: new Date().toISOString() };
+  blocked.unshift(entry);
+  writeDb('blocked_ips', blocked);
+  res.json(entry);
+});
+
+app.post('/api/firewall/blocked-ips', (req, res) => {
+  const blocked = readDb('blocked_ips') || [];
+  const entry = { id: nextId(blocked), ...req.body, blocked_at: new Date().toISOString() };
+  blocked.unshift(entry);
+  writeDb('blocked_ips', blocked);
+  res.json(entry);
+});
+
+app.delete('/api/firewall/blocked-ips/:id', (req, res) => {
+  const blocked = readDb('blocked_ips') || [];
+  const id = Number(req.params.id);
+  writeDb('blocked_ips', blocked.filter(b => b.id !== id));
+  res.json({ success: true });
+});
+
+// 5. Allocation History (Paginated or raw array)
+app.get('/api/numbers/allocation-history', (req, res) => {
+  let data = readDb('allocation_history') || [];
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser?.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && isAgent) {
+    data = data.filter(h => {
+      const fromMe = String(h.from_user || '').toLowerCase() === String(sessionUser.username || '').toLowerCase() ||
+                     (h.from_user_id && Number(h.from_user_id) === Number(sessionUser.id)) ||
+                     (h.agent_id && Number(h.agent_id) === Number(sessionUser.id)) ||
+                     (h.to_user && String(h.to_user).toLowerCase() === String(sessionUser.username || '').toLowerCase());
+      return fromMe;
+    });
+  }
+
+  if (req.query.format === 'array' || (!req.query.page && !req.query.limit && req.query.raw === '1')) {
+    return res.json(data);
+  }
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 15;
+  const start = (page - 1) * limit;
+  res.json({ data: data.slice(start, start + limit), total: data.length });
+});
+
+// 6. Tokens (Array) — Scoped to Owner and Agent
+app.get('/api/tokens', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && !isAgent) {
+    return res.status(403).json({ error: 'Forbidden. Tokens are restricted to Owner and Agents.' });
+  }
+
+  let tokens = readDb('api_tokens') || [];
+  if (isAgent) {
+    tokens = tokens.filter(t => Number(t.agent_id) === Number(sessionUser.id));
+  } else if (req.query.agent_id) {
+    tokens = tokens.filter(t => Number(t.agent_id) === Number(req.query.agent_id));
+  }
+  res.json(tokens.map(publicTokenView));
+});
+
+app.post('/api/tokens', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && !isAgent) {
+    return res.status(403).json({ error: 'Forbidden. Only Owner and Agents can create API tokens.' });
+  }
+
+  const tokens = readDb('api_tokens') || [];
+  const agents = readDb('agents') || [];
+  const targetAgentId = isAgent ? Number(sessionUser.id) : (req.body.agent_id ? Number(req.body.agent_id) : null);
+  const agent = targetAgentId ? agents.find(a => Number(a.id) === targetAgentId) : null;
+
+  const rawToken = newSecretToken();
+  const token = {
+    id: nextId(tokens),
+    token_hash: sha256Hex(rawToken),
+    token_hint: rawToken.slice(-4),
+    name: req.body.name || 'API Key',
+    agent_id: agent ? agent.id : (isAgent ? Number(sessionUser.id) : null),
+    agent_username: agent ? agent.username : (isAgent ? sessionUser.username : ''),
+    role: isAgent ? 'Agent' : (agent ? 'Agent' : 'Owner'),
+    status: req.body.status || 'active',
+    calls: 0,
+    last_used: null,
+    created: new Date().toISOString()
+  };
+  tokens.unshift(token);
+  writeDb('api_tokens', tokens);
+  logAudit(sessionUser.username || 'Owner', 'Create API Token', `Created token '${token.name}' for agent '${token.agent_username || 'Owner'}'`, 'API Tokens');
+  res.json({ ...publicTokenView(token), token: rawToken, shown_once: true });
+});
+
+app.delete('/api/tokens/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && !isAgent) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+
+  let tokens = readDb('api_tokens') || [];
+  const id = Number(req.params.id);
+  const targetToken = tokens.find(t => Number(t.id) === id);
+  if (!targetToken) {
+    return res.status(404).json({ error: 'Token not found' });
+  }
+
+  if (isAgent && Number(targetToken.agent_id) !== Number(sessionUser.id)) {
+    return res.status(403).json({ error: 'Forbidden. You can only delete your own tokens.' });
+  }
+
+  writeDb('api_tokens', tokens.filter(t => Number(t.id) !== id));
+  res.json({ success: true });
+});
+
+// 7. Services (Array - clean metadata tags without fixed auto rates)
+app.get('/api/services', (req, res) => {
+  let svc = readDb('services');
+  if (!Array.isArray(svc) || svc.length === 0) {
+    svc = [
+      { id: 1, name: "WhatsApp", icon: "fab fa-whatsapp", color: "#25d366", description: "WhatsApp OTP verification", active: true },
+      { id: 2, name: "Telegram", icon: "fab fa-telegram", color: "#2aabee", description: "Telegram OTP verification", active: true },
+      { id: 3, name: "Google", icon: "fab fa-google", color: "#4285f4", description: "Google account verification", active: true },
+      { id: 4, name: "Facebook", icon: "fab fa-facebook", color: "#1877f2", description: "Facebook OTP numbers", active: true },
+      { id: 5, name: "Amazon", icon: "fab fa-amazon", color: "#ff9900", description: "Amazon account verification", active: true },
+      { id: 6, name: "TikTok", icon: "fab fa-tiktok", color: "#010101", description: "TikTok account verification", active: true }
+    ];
+    writeDb('services', svc);
+  }
+  const cleanSvc = svc.map(s => {
+    if (!s || typeof s !== 'object') return s;
+    const { payout_rate, ...rest } = s;
+    return rest;
+  });
+  const q = String(req.query.search || '').trim().toLowerCase();
+  const statusQ = String(req.query.status || '').trim().toLowerCase();
+  let out = cleanSvc;
+  if (q) {
+    out = out.filter(s =>
+      String(s.name || '').toLowerCase().includes(q) ||
+      String(s.description || '').toLowerCase().includes(q)
+    );
+  }
+  if (statusQ === 'true' || statusQ === 'active') out = out.filter(s => s.active !== false);
+  else if (statusQ === 'false' || statusQ === 'inactive') out = out.filter(s => s.active === false);
+  res.json(out);
+});
+
+app.post('/api/services', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Service name is required' });
+  const svc = readDb('services') || [];
+  const item = {
+    id: nextId(svc),
+    name,
+    icon: String(req.body?.icon || 'fas fa-mobile-screen').trim(),
+    color: String(req.body?.color || '#334155').trim(),
+    description: String(req.body?.description || '').trim(),
+    active: req.body?.active !== false,
+    created: new Date().toISOString()
+  };
+  svc.push(item);
+  writeDb('services', svc);
+  res.json(item);
+});
+
+app.patch('/api/services/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const svc = readDb('services') || [];
+  const idStr = String(req.params.id);
+  const idx = svc.findIndex(s => String(s.id) === idStr);
+  if (idx === -1) return res.status(404).json({ error: 'Service not found' });
+  const { payout_rate, ...safeBody } = req.body || {};
+  const { payout_rate: _oldRate, ...base } = svc[idx];
+  svc[idx] = { ...base, ...safeBody, id: svc[idx].id };
+  writeDb('services', svc);
+  res.json(svc[idx]);
+});
+
+app.delete('/api/services/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const svc = readDb('services') || [];
+  const idStr = String(req.params.id);
+  const idx = svc.findIndex(s => String(s.id) === idStr);
+  if (idx === -1) return res.status(404).json({ error: 'Service not found' });
+  const deleted = svc.splice(idx, 1)[0];
+  writeDb('services', svc);
+  res.json({ success: true, id: deleted.id });
+});
+
+// 8. CLI Routes (Array) - Owner only
+app.get('/api/cli-routes', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  let routes = readDb('cli_routes') || [];
+  const { search, status, service } = req.query;
+  if (search) {
+    const q = String(search).toLowerCase();
+    routes = routes.filter(r =>
+      (r.cli && String(r.cli).toLowerCase().includes(q)) ||
+      (r.country && String(r.country).toLowerCase().includes(q)) ||
+      (r.description && String(r.description).toLowerCase().includes(q)) ||
+      (r.provider && String(r.provider).toLowerCase().includes(q)) ||
+      (r.service && String(r.service).toLowerCase().includes(q))
+    );
+  }
+  if (status) {
+    routes = routes.filter(r => String(r.status).toLowerCase() === String(status).toLowerCase());
+  }
+  if (service) {
+    routes = routes.filter(r => String(r.service).toLowerCase() === String(service).toLowerCase());
+  }
+  res.json(routes);
+});
+
+app.get('/api/cli-routes/export', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const routes = readDb('cli_routes') || [];
+  const headers = ['id', 'cli', 'country', 'description', 'status', 'created'];
+  const csvRows = [headers.join(',')];
+  for (const r of routes) {
+    const row = headers.map(h => `"${String(r[h] ?? '').replace(/"/g, '""')}"`);
+    csvRows.push(row.join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="cli-routes.csv"');
+  res.send(csvRows.join('\n'));
+});
+
+app.get('/api/cli-routes/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const routes = readDb('cli_routes') || [];
+  const idStr = String(req.params.id);
+  const route = routes.find(r => String(r.id) === idStr);
+  if (!route) return res.status(404).json({ error: 'CLI route not found' });
+  res.json(route);
+});
+
+app.post('/api/cli-routes', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const cli = String(req.body?.cli || '').trim();
+  if (!cli) return res.status(400).json({ error: 'CLI number is required' });
+  const routes = readDb('cli_routes') || [];
+  const item = {
+    id: nextId(routes),
+    cli,
+    country: String(req.body?.country || 'Global').trim(),
+    description: String(req.body?.description || '').trim(),
+    status: String(req.body?.status || 'active').trim(),
+    created: new Date().toISOString()
+  };
+  routes.push(item);
+  writeDb('cli_routes', routes);
+  res.json({ success: true, ...item });
+});
+
+app.patch('/api/cli-routes/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const routes = readDb('cli_routes') || [];
+  const idStr = String(req.params.id);
+  const idx = routes.findIndex(r => String(r.id) === idStr);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'CLI route not found' });
+  }
+  const { payout_rate, rate, ...safeUpdates } = req.body || {};
+  routes[idx] = { ...routes[idx], ...safeUpdates, id: routes[idx].id };
+  writeDb('cli_routes', routes);
+  res.json({ success: true, ...routes[idx] });
+});
+
+app.put('/api/cli-routes/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const routes = readDb('cli_routes') || [];
+  const idStr = String(req.params.id);
+  const idx = routes.findIndex(r => String(r.id) === idStr);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'CLI route not found' });
+  }
+  const { payout_rate, rate, ...safeUpdates } = req.body || {};
+  routes[idx] = { ...routes[idx], ...safeUpdates, id: routes[idx].id };
+  writeDb('cli_routes', routes);
+  res.json({ success: true, ...routes[idx] });
+});
+
+app.delete('/api/cli-routes/:id', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const routes = readDb('cli_routes') || [];
+  const idStr = String(req.params.id);
+  const idx = routes.findIndex(r => String(r.id) === idStr);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'CLI route not found' });
+  }
+  const deleted = routes.splice(idx, 1)[0];
+  writeDb('cli_routes', routes);
+  res.json({ success: true, message: 'CLI route deleted', id: deleted.id });
+});
+
+
+// 9. Support Tickets (Array) - Scoped to Own Tickets (Owner sees all)
+app.get('/api/support-tickets', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const tickets = readDb('support_tickets') || [];
+  if (isOwner) {
+    return res.json(tickets);
+  }
+  const myUser = String(sessionUser.username || '').toLowerCase();
+  const filtered = tickets.filter(t => {
+    const tUser = String(t.username || t.user || t.created_by || '').toLowerCase();
+    const tId = t.user_id || t.userId;
+    return tUser === myUser || (tId && Number(tId) === Number(sessionUser.id));
+  });
+  res.json(filtered);
+});
+
+app.post('/api/support-tickets', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const tickets = readDb('support_tickets') || [];
+  const item = {
+    id: nextId(tickets),
+    ...req.body,
+    username: sessionUser.username,
+    user: sessionUser.username,
+    role: sessionUser.role,
+    user_id: sessionUser.id,
+    status: 'open',
+    created: new Date().toISOString()
+  };
+  tickets.unshift(item);
+  writeDb('support_tickets', tickets);
+  if (String(sessionUser.role || '').toLowerCase() !== 'owner' && String(sessionUser.role || '').toLowerCase() !== 'admin') {
+    sendInstantNotification({
+      recipient_role: 'owner',
+      title: `New Support Ticket #${item.id}`,
+      message: `${sessionUser.role} ${sessionUser.username} opened a ticket: "${String(item.subject || 'Support Inquiry').slice(0, 90)}"`,
+      type: 'info',
+      category: 'system',
+      action_page: 'support-tickets',
+      actor_role: sessionUser.role,
+      actor_name: sessionUser.username,
+      metadata: { ticket_id: item.id }
+    });
+  }
+  res.json(item);
+});
+
+app.patch('/api/support-tickets/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const tickets = readDb('support_tickets') || [];
+  const id = Number(req.params.id);
+  const idx = tickets.findIndex(t => t.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Ticket not found' });
+  const t = tickets[idx];
+  const myUser = String(sessionUser.username || '').toLowerCase();
+  const tUser = String(t.username || t.user || t.created_by || '').toLowerCase();
+  if (!isOwner && tUser !== myUser) {
+    return res.status(403).json({ error: 'Forbidden. You can only update your own tickets.' });
+  }
+  if (!isOwner) {
+    const safePatch = {};
+    if (req.body && req.body.subject !== undefined) safePatch.subject = String(req.body.subject).slice(0, 200);
+    if (req.body && req.body.message !== undefined) safePatch.message = String(req.body.message).slice(0, 5000);
+    if (req.body && req.body.priority !== undefined) safePatch.priority = String(req.body.priority).slice(0, 32);
+    if (req.body && Array.isArray(req.body.replies)) safePatch.replies = req.body.replies;
+    tickets[idx] = { ...tickets[idx], ...safePatch, id: tickets[idx].id };
+  } else {
+    tickets[idx] = { ...tickets[idx], ...req.body, id: tickets[idx].id };
+  }
+  writeDb('support_tickets', tickets);
+  if (isOwner && tUser && tUser !== myUser) {
+    const targetR = String(t.role || 'agent').toLowerCase();
+    sendInstantNotification({
+      recipient_role: targetR === 'client' ? 'client' : 'agent',
+      recipient_id: t.user_id || null,
+      recipient_username: t.username || t.user || '',
+      title: `Support Ticket #${t.id} Updated`,
+      message: `Owner updated your support ticket "${String(tickets[idx].subject || '#' + t.id).slice(0, 80)}" (Status: ${tickets[idx].status || 'open'}).`,
+      type: 'info',
+      category: 'system',
+      action_page: targetR === 'client' ? 'news' : 'notifications',
+      status: tickets[idx].status || 'open',
+      actor_role: 'Owner',
+      actor_name: sessionUser.username || 'Owner',
+      metadata: { ticket_id: t.id }
+    });
+  }
+  res.json(tickets[idx]);
+});
+
+// 10. Hierarchy (Array) - Direct 3-Tier (Owner -> Agents -> Clients), Sanitized with safeUser
+app.get('/api/hierarchy', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  if (!isOwner && !isAgent) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  const users = readDb('users') || [];
+  const agents = readDb('agents') || [];
+  const clients = readDb('clients') || [];
+
+  if (isAgent) {
+    const myAgent = agents.find(a => (a.username && String(a.username).toLowerCase() === String(sessionUser.username).toLowerCase()) || Number(a.id) === Number(sessionUser.id));
+    if (!myAgent) return res.json([]);
+    const myClients = clients.filter(c => Number(c.agent_id) === Number(myAgent.id) || (c.agent_username && String(c.agent_username).toLowerCase() === String(myAgent.username).toLowerCase()));
+    return res.json([{
+      owner: null,
+      agents: [{
+        ...safeUser(myAgent),
+        clients: myClients.map(safeUser)
+      }]
+    }]);
+  }
+
+  const ownerRec = users.find(u => (u.role || '').toLowerCase() === 'owner' || u.username === 'Kamran_Bhatti') || { id: 1, username: 'Kamran_Bhatti', role: 'Owner', status: 'active' };
+  const agentNodes = agents.map(ag => ({
+    ...safeUser(ag),
+    clients: clients.filter(c => Number(c.agent_id) === Number(ag.id) || (c.agent_username && String(c.agent_username).toLowerCase() === String(ag.username).toLowerCase())).map(safeClientForOwner)
+  }));
+
+  res.json([{
+    owner: safeUser(ownerRec),
+    agents: agentNodes
+  }]);
+});
+
+// 11. SMPP CORE ENGINE, ENCRYPTION, REAL SERVER & CLIENT MANAGERS
+
+function getSmppKey() {
+  if (process.env.SMPP_SECRET) {
+    return crypto.createHash('sha256').update(process.env.SMPP_SECRET).digest();
+  }
+  const keyPath = path.join(DATA_DIR, '.smpp.key');
+  try {
+    if (fs.existsSync(keyPath)) {
+      const raw = fs.readFileSync(keyPath);
+      if (raw.length === 32) return raw;
+    }
+    const newKey = crypto.randomBytes(32);
+    fs.writeFileSync(keyPath, newKey, { mode: 0o600 });
+    return newKey;
+  } catch (err) {
+    console.error('getSmppKey error: cannot access key file:', err);
+    throw new Error('SMPP encryption key unavailable');
+  }
+}
+
+function encryptSmppSecret(text) {
+  if (!text) return '';
+  try {
+    const key = getSmppKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const enc = Buffer.concat([cipher.update(String(text), 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return Buffer.concat([iv, tag, enc]).toString('base64');
+  } catch (err) {
+    console.error('encryptSmppSecret error:', err);
+    return '';
+  }
+}
+
+function decryptSmppSecret(b64) {
+  if (!b64) return '';
+  try {
+    const key = getSmppKey();
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length < 28) return '';
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(12, 28);
+    const ciphertext = buf.subarray(28);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch (err) {
+    return '';
+  }
+}
+
+function safeSmppAccount(acc) {
+  if (!acc) return null;
+  const copy = { ...acc };
+  delete copy.password;
+  delete copy.password_hash;
+  delete copy.password_enc;
+  return copy;
+}
+
+// ── SMPP Logging (data/smpp_logs.json, cap 5000) ─────────────────
+function logSmppEvent(event, ip, reason, extra = {}) {
+  try {
+    const logs = readDb('smpp_logs') || [];
+    const entry = {
+      id: nextId(logs),
+      event: String(event || ''),
+      ip: String(ip || '127.0.0.1').replace(/^::ffff:/, ''),
+      reason: String(reason || ''),
+      timestamp: new Date().toISOString(),
+      ...extra
+    };
+    logs.unshift(entry);
+    if (logs.length > 5000) logs.length = 5000;
+    writeDb('smpp_logs', logs);
+  } catch (e) {
+    console.error('logSmppEvent error:', e);
+  }
+}
+
+// ── Failed Binds Tracking (5 failed binds in 10m -> block + firewall) ──
+const failedSmppBinds = new Map(); // ip -> number[]
+
+function recordFailedSmppBind(ip, systemId = '') {
+  const cleanIp = String(ip || '127.0.0.1').trim().replace(/^::ffff:/, '');
+  const now = Date.now();
+  let list = (failedSmppBinds.get(cleanIp) || []).filter(t => now - t < 600000); // 10 min window
+  list.push(now);
+  failedSmppBinds.set(cleanIp, list);
+  logSmppEvent('bind_fail', cleanIp, `Bind failed for system_id '${systemId}'`, { system_id: systemId });
+
+  if (list.length >= 5) {
+    try {
+      const blocked = readDb('blocked_ips') || [];
+      if (!blocked.some(b => (b.ip || '').replace(/^::ffff:/, '') === cleanIp)) {
+        blocked.push({
+          id: nextId(blocked),
+          ip: cleanIp,
+          reason: 'SMPP 5 failed binds in 10 minutes',
+          created: new Date().toISOString()
+        });
+        writeDb('blocked_ips', blocked);
+      }
+    } catch (_) {}
+    logFirewallEvent(cleanIp, 'SMPP Brute Force Blocked (5 failed binds in 10m)', 'smpp:bind');
+    logSmppEvent('block', cleanIp, 'Blocked IP: 5 failed binds in 10 minutes', { system_id: systemId });
+  }
+}
+
+function clearFailedSmppBinds(ip) {
+  const cleanIp = String(ip || '127.0.0.1').trim().replace(/^::ffff:/i, '');
+  failedSmppBinds.delete(cleanIp);
+}
+
+function ipMatchesAllowlist(clientIp, allowlistStr) {
+  const cleanIp = String(clientIp || '').trim().replace(/^::ffff:/i, '');
+  if (!allowlistStr || !String(allowlistStr).trim()) return true;
+  const entries = String(allowlistStr).split(',').map(s => s.trim().replace(/^::ffff:/i, '')).filter(Boolean);
+  if (!entries.length) return true;
+
+  const ipToLong = (v) => {
+    const parts = v.split('.');
+    if (parts.length !== 4) return null;
+    let out = 0;
+    for (const p of parts) {
+      if (!/^\d+$/.test(p)) return null;
+      const n = Number(p);
+      if (n < 0 || n > 255) return null;
+      out = ((out << 8) | n) >>> 0;
+    }
+    return out;
+  };
+
+  for (const rule of entries) {
+    if (rule === '*' || rule === '0.0.0.0/0' || rule === cleanIp) return true;
+    if (rule.includes('/')) {
+      const [base, bitsStr] = rule.split('/');
+      const bits = parseInt(bitsStr, 10);
+      const ipNum = ipToLong(cleanIp);
+      const baseNum = ipToLong(base);
+      if (ipNum !== null && baseNum !== null && Number.isFinite(bits) && bits >= 0 && bits <= 32) {
+        const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+        if ((ipNum & mask) === (baseNum & mask)) return true;
+      }
+    } else if (rule.includes('*')) {
+      const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+      if (new RegExp('^' + escaped + '$').test(cleanIp)) return true;
+    }
+  }
+  return false;
+}
+
+function unblockSmppAccountIps(whitelistStr) {
+  if (!whitelistStr || !String(whitelistStr).trim()) return;
+  const ips = String(whitelistStr).split(',').map(s => s.trim().replace(/^::ffff:/i, '')).filter(Boolean);
+  for (const ip of ips) {
+    failedSmppBinds.delete(ip);
+  }
+  try {
+    const blocked = readDb('blocked_ips') || [];
+    const filtered = blocked.filter(b => {
+      const bIp = String(b?.ip || '').trim().replace(/^::ffff:/i, '');
+      const isAutoSmpp = String(b?.reason || '').includes('SMPP 5 failed binds');
+      return !(isAutoSmpp && ipMatchesAllowlist(bIp, whitelistStr));
+    });
+    if (filtered.length !== blocked.length) {
+      writeDb('blocked_ips', filtered);
+    }
+  } catch (_) {}
+}
+
+// ── Live SMPP Sessions State ────────────────────────────────────
+let nextSmppSessionId = 1;
+const liveSmppSessions = new Map(); // id -> session record & object
+
+function syncLiveSessionsToDb() {
+  try {
+    const list = [];
+    for (const s of liveSmppSessions.values()) {
+      list.push({
+        id: s.id,
+        account_id: s.account_id,
+        system_id: s.system_id,
+        ip: s.ip,
+        bind_type: s.bind_type,
+        direction: s.direction,
+        connected_at: s.connected_at,
+        last_activity: s.last_activity,
+        msgs_in: s.msgs_in || 0,
+        msgs_out: s.msgs_out || 0,
+        messages_sent: (s.msgs_in || 0) + (s.msgs_out || 0),
+        status: s.status || 'active'
+      });
+    }
+    writeDb('smpp_sessions', list);
+  } catch (err) {
+    console.error('syncLiveSessionsToDb error:', err);
+  }
+}
+
+// ── Rolling Throughput Tracking (60s MPS & peak) ────────────────
+const smppMpsHistory = []; // array of timestamps (ms)
+let smppPeakMps = 0;
+
+function recordSmppTrafficMessage() {
+  const now = Date.now();
+  smppMpsHistory.push(now);
+  const cutoff = now - 60000;
+  while (smppMpsHistory.length > 0 && smppMpsHistory[0] < cutoff) {
+    smppMpsHistory.shift();
+  }
+  const oneSecCutoff = now - 1000;
+  let countLastSec = 0;
+  for (let i = smppMpsHistory.length - 1; i >= 0; i--) {
+    if (smppMpsHistory[i] >= oneSecCutoff) countLastSec++;
+    else break;
+  }
+  if (countLastSec > smppPeakMps) {
+    smppPeakMps = countLastSec;
+  }
+}
+
+function getSmppThroughputStats() {
+  const now = Date.now();
+  const cutoff = now - 60000;
+  while (smppMpsHistory.length > 0 && smppMpsHistory[0] < cutoff) {
+    smppMpsHistory.shift();
+  }
+  const current_mps = Math.round((smppMpsHistory.length / 60) * 100) / 100;
+  if (current_mps > smppPeakMps) {
+    smppPeakMps = current_mps;
+  }
+  const settings = readDb('settings') || {};
+  const limit = Number(settings.smpp_max_mps) || Number(settings.smpp_global_max_mps) || 500;
+  return {
+    current_mps,
+    peak_mps: smppPeakMps,
+    limit
+  };
+}
+
+// ── SMPP SERVER LISTENER (Carriers connect to us) ───────────────
+let smppServerInstance = null;
+const smppServerState = {
+  listening: false,
+  host: '0.0.0.0',
+  port: 2775,
+  started_at: null,
+  last_error: null
+};
+
+function handleIncomingSmppSession(session) {
+  const remoteIp = (session.socket && session.socket.remoteAddress)
+    ? session.socket.remoteAddress.replace(/^::ffff:/i, '')
+    : '127.0.0.1';
+  session._ip = remoteIp;
+  logSmppEvent('tcp_connect', remoteIp, `Incoming TCP connection on SMPP port ${smppServerState.port}`);
+
+  session.on('error', (err) => {
+    // Prevent unhandled errors from ever crashing the server
+    const remote = session.socket ? `${session.socket.remoteAddress}:${session.socket.remotePort}` : 'unknown';
+    session._errLogged = true;
+    logSmppEvent('disconnect', session._ip || remoteIp, `Session error (${err.message}) on ${remote}`, { system_id: session._systemId || '' });
+  });
+
+  session.on('close', () => {
+    if (session._liveId) {
+      liveSmppSessions.delete(session._liveId);
+      syncLiveSessionsToDb();
+      logSmppEvent('disconnect', session._ip || remoteIp, `Session closed for ${session._systemId || 'unknown'}`, { system_id: session._systemId });
+    } else if (!session._bindFailedLogged && !session._errLogged) {
+      logSmppEvent('disconnect', session._ip || remoteIp, `TCP connection closed before completing SMPP bind`, { system_id: session._systemId || '' });
+    }
+  });
+
+  const bindCommands = ['bind_transceiver', 'bind_transmitter', 'bind_receiver'];
+  bindCommands.forEach(cmd => {
+    session.on(cmd, async (pdu) => {
+      if (session._binding || session._liveId) {
+        try { session.send(pdu.response({ command_status: smpp.ESME_RALYBND })); } catch (_) {}
+        return;
+      }
+      session._binding = true;
+
+      try {
+        session.pause();
+      } catch (_) {}
+
+      const ip = (session.socket && session.socket.remoteAddress)
+        ? session.socket.remoteAddress.replace(/^::ffff:/i, '')
+        : '127.0.0.1';
+
+      if (isIpBlocked(ip)) {
+        logFirewallEvent(ip, 'SMPP Blocked IP Connection Attempt', 'smpp:bind');
+        logSmppEvent('bind_fail', ip, `Rejected bind for '${pdu.system_id || ''}' (IP blocked in Firewall)`, { system_id: String(pdu.system_id || '') });
+        try {
+          session.send(pdu.response({ command_status: smpp.ESME_RBINDFAIL }));
+          session.destroy();
+        } catch (_) {}
+        session._binding = false;
+        return;
+      }
+
+      const cleanSysId = String(pdu.system_id || '').trim();
+      const cleanPass = String(pdu.password || '');
+
+      const accounts = readDb('smpp_accounts') || [];
+      const matchingAccounts = accounts.filter(a => (a.interconnect_type || 'smpp') === 'smpp' &&
+        String(a.system_id || '').trim().toLowerCase() === cleanSysId.toLowerCase());
+
+      let acc = null;
+      let authOk = false;
+      let failReason = '';
+      if (!matchingAccounts.length) {
+        failReason = `Unknown system_id '${cleanSysId}'`;
+      } else {
+        const activeMatches = matchingAccounts.filter(a => (a.status || 'active') === 'active');
+        if (!activeMatches.length) {
+          failReason = `Account '${matchingAccounts[0].company}' (${cleanSysId}) is inactive`;
+        } else {
+          for (const candidate of activeMatches) {
+            let passOk = false;
+            if (candidate.password_hash) {
+              try {
+                passOk = await bcrypt.compare(cleanPass, candidate.password_hash);
+              } catch (_) {
+                passOk = false;
+              }
+            } else if (candidate.password) {
+              passOk = safeEqual(cleanPass, candidate.password);
+            }
+            if (session.socket && session.socket.destroyed) {
+              session._binding = false;
+              return;
+            }
+            if (!passOk) {
+              if (!failReason) failReason = `Invalid password for system_id '${cleanSysId}'`;
+              continue;
+            }
+            if (candidate.whitelist_ip && String(candidate.whitelist_ip).trim() && !ipMatchesAllowlist(ip, candidate.whitelist_ip)) {
+              failReason = `IP ${ip} not in whitelist (${candidate.whitelist_ip}) for '${cleanSysId}'`;
+              continue;
+            }
+            acc = candidate;
+            authOk = true;
+            failReason = '';
+            break;
+          }
+        }
+
+        // Connection limits
+        if (authOk && acc) {
+          const settings = readDb('settings') || {};
+          const globalMax = Number(settings.smpp_max_connections) || 100;
+          if (liveSmppSessions.size >= globalMax) {
+            logSmppEvent('bind_fail', ip, `Global max_connections (${globalMax}) reached for '${cleanSysId}'`, { system_id: cleanSysId });
+            try {
+              session.send(pdu.response({ command_status: smpp.ESME_RALYBND }));
+              session.close();
+            } catch (_) {}
+            session._binding = false;
+            return;
+          }
+
+          const accountMax = Number(acc.max_connections || acc.limit || 10);
+          let currentAccConnections = 0;
+          for (const s of liveSmppSessions.values()) {
+            if (s.account_id === acc.id) currentAccConnections++;
+          }
+          if (currentAccConnections >= accountMax) {
+            logSmppEvent('bind_fail', ip, `Account max_connections (${accountMax}) reached for '${cleanSysId}'`, { system_id: cleanSysId });
+            try {
+              session.send(pdu.response({ command_status: smpp.ESME_RALYBND }));
+              session.close();
+            } catch (_) {}
+            session._binding = false;
+            return;
+          }
+        }
+      }
+
+      if (!authOk || (session.socket && session.socket.destroyed)) {
+        recordFailedSmppBind(ip, cleanSysId);
+        if (failReason) {
+          logSmppEvent('bind_fail', ip, failReason, { system_id: cleanSysId });
+        }
+        try {
+          session.send(pdu.response({ command_status: smpp.ESME_RBINDFAIL }));
+          session.close();
+        } catch (_) {}
+        session._binding = false;
+        return;
+      }
+
+      // Successful auth
+      clearFailedSmppBinds(ip);
+      const liveId = nextSmppSessionId++;
+      const bindType = cmd.replace('bind_', '');
+
+      session._liveId = liveId;
+      session._accountId = acc.id;
+      session._systemId = acc.system_id;
+      session._company = acc.company;
+      session._ip = ip;
+      session._bindType = bindType;
+      session._direction = 'inbound';
+      session._connectedAt = new Date().toISOString();
+      session._lastActivity = new Date().toISOString();
+      session._maxMps = Number(acc.max_mps || 500);
+
+      // Idle timeout: 120s
+      try {
+        if (session.socket && typeof session.socket.setTimeout === 'function') {
+          session.socket.setTimeout(120000);
+          session.socket.on('timeout', () => {
+            try { session.close(); } catch (_) {}
+          });
+        }
+      } catch (_) {}
+
+      liveSmppSessions.set(liveId, {
+        id: liveId,
+        account_id: acc.id,
+        system_id: acc.system_id,
+        ip,
+        bind_type: bindType,
+        direction: 'inbound',
+        connected_at: session._connectedAt,
+        last_activity: session._lastActivity,
+        msgs_in: 0,
+        msgs_out: 0,
+        messages_sent: 0,
+        status: 'active',
+        sessionObj: session,
+        max_mps: session._maxMps,
+        mps_window: []
+      });
+
+      syncLiveSessionsToDb();
+      logSmppEvent('bind_ok', ip, `Bound as ${bindType} for account ${acc.company} (${acc.system_id})`, { system_id: acc.system_id });
+
+      try {
+        session.send(pdu.response({ system_id: acc.system_id || 'HUMAX-SMS' }));
+        session.resume();
+      } catch (_) {}
+      session._binding = false;
+    });
+  });
+
+  session.on('submit_sm', (pdu) => {
+    const live = liveSmppSessions.get(session._liveId);
+    const now = Date.now();
+    if (live) {
+      live.last_activity = new Date().toISOString();
+      live.msgs_in = (live.msgs_in || 0) + 1;
+      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
+
+      // Enforce max_mps: reply ESME_RTHROTTLED (0x58) when exceeded
+      const oneSecAgo = now - 1000;
+      live.mps_window = (live.mps_window || []).filter(t => t > oneSecAgo);
+      if (live.mps_window.length >= live.max_mps) {
+        logSmppEvent('throttle', session._ip || '127.0.0.1', `Rate throttled (${live.mps_window.length}/${live.max_mps} mps) for ${session._systemId}`, { system_id: session._systemId });
+        session.send(pdu.response({ command_status: smpp.ESME_RTHROTTLED }));
+        return;
+      }
+      live.mps_window.push(now);
+    }
+    recordSmppTrafficMessage();
+
+    let text = '';
+    if (pdu.short_message) {
+      if (typeof pdu.short_message === 'string') text = pdu.short_message;
+      else if (Buffer.isBuffer(pdu.short_message)) text = pdu.short_message.toString('utf8');
+      else if (pdu.short_message.message) text = String(pdu.short_message.message);
+    }
+    if (!text && pdu.message_payload) {
+      if (typeof pdu.message_payload === 'string') text = pdu.message_payload;
+      else if (Buffer.isBuffer(pdu.message_payload)) text = pdu.message_payload.toString('utf8');
+    }
+
+    const dest = String(pdu.destination_addr || '').trim();
+    const src = String(pdu.source_addr || '').trim();
+
+    const result = ingestSms({
+      sender: src,
+      to_number: dest,
+      message: text,
+      sms_id: String(pdu.sequence_number || Date.now()),
+      company: session._company || '',
+      source: 'smpp_server'
+    });
+
+    const msgId = String(result?.entry?.sms_id || result?.entry?.id || Date.now());
+    session.send(pdu.response({ message_id: msgId }));
+    syncLiveSessionsToDb();
+  });
+
+  session.on('data_sm', (pdu) => {
+    const live = liveSmppSessions.get(session._liveId);
+    if (live) {
+      live.last_activity = new Date().toISOString();
+      live.msgs_in = (live.msgs_in || 0) + 1;
+      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
+    }
+    session.send(pdu.response({ message_id: String(Date.now()) }));
+  });
+
+  session.on('deliver_sm', (pdu) => {
+    const live = liveSmppSessions.get(session._liveId);
+    if (live) {
+      live.last_activity = new Date().toISOString();
+      live.msgs_in = (live.msgs_in || 0) + 1;
+      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
+    }
+    session.send(pdu.response());
+  });
+
+  session.on('enquire_link', (pdu) => {
+    const live = liveSmppSessions.get(session._liveId);
+    if (live) live.last_activity = new Date().toISOString();
+    session.send(pdu.response());
+  });
+
+  session.on('unbind', (pdu) => {
+    logSmppEvent('unbind', session._ip || '127.0.0.1', `Unbind received for ${session._systemId || 'unknown'}`, { system_id: session._systemId });
+    session.send(pdu.response());
+    session.close();
+  });
+}
+
+function startSmppServerListener(host, port) {
+  stopSmppServerListener();
+
+  const bindHost = host || (host === '' ? '0.0.0.0' : (process.env.SMPP_HOST || '0.0.0.0'));
+  const bindPort = Number(port !== undefined && port !== null ? port : (process.env.SMPP_PORT || 2775));
+
+  smppServerState.host = bindHost;
+  smppServerState.port = bindPort;
+  smppServerState.last_error = null;
+
+  try {
+    const serverInstance = smpp.createServer(handleIncomingSmppSession);
+
+    serverInstance.on('error', (err) => {
+      // The listener must never crash the app
+      console.error('[SMPP Server Error]:', err.message);
+      smppServerState.listening = false;
+      smppServerState.last_error = err.code || err.message;
+      logSmppEvent('server_error', bindHost, `SMPP server error: ${err.message}`);
+    });
+
+    serverInstance.listen(bindPort, bindHost, () => {
+      smppServerState.listening = true;
+      smppServerState.started_at = new Date().toISOString();
+      smppServerState.last_error = null;
+      console.log(`[HUMEX SMS] SMPP server listening on ${bindHost}:${bindPort}`);
+      logSmppEvent('server_start', bindHost, `SMPP Server listening on ${bindHost}:${bindPort}`);
+    });
+
+    smppServerInstance = serverInstance;
+  } catch (err) {
+    console.error('Failed to start SMPP server:', err.message);
+    smppServerState.listening = false;
+    smppServerState.last_error = err.message;
+  }
+}
+
+function stopSmppServerListener() {
+  if (smppServerInstance) {
+    try {
+      smppServerInstance.close();
+    } catch (_) {}
+    smppServerInstance = null;
+  }
+  smppServerState.listening = false;
+
+  // Drop inbound server sessions
+  for (const [id, s] of liveSmppSessions.entries()) {
+    if (s.direction === 'inbound') {
+      try {
+        if (s.sessionObj) {
+          s.sessionObj.unbind();
+          s.sessionObj.close();
+        }
+      } catch (_) {}
+      liveSmppSessions.delete(id);
+    }
+  }
+  syncLiveSessionsToDb();
+}
+
+// ── SMPP CLIENT MODE (We connect to a carrier) ──────────────────
+const clientAccountManagers = new Map(); // accountId -> { session, reconnectTimer, backoff }
+
+function handleDlrDeliveryReceipt(text, pdu) {
+  try {
+    const idMatch = text.match(/\bid:([^\s]+)/i);
+    const statMatch = text.match(/\bstat:([^\s]+)/i);
+    const receiptMsgId = idMatch ? idMatch[1] : (pdu.receipted_message_id || '');
+    const receiptStat = statMatch ? statMatch[1].toUpperCase() : '';
+
+    if (!receiptMsgId) return;
+
+    let targetStatus = 'delivered';
+    if (['UNDELIV', 'REJECTD', 'EXPIRED', 'DELETED', 'UNKNOWN'].includes(receiptStat)) {
+      targetStatus = 'failed';
+    } else if (['ACCEPTD', 'ENROUTE'].includes(receiptStat)) {
+      targetStatus = 'pending';
+    }
+
+    const smsLog = readDb('sms_log') || [];
+    let updated = false;
+    for (const item of smsLog) {
+      if (String(item.sms_id) === receiptMsgId || String(item.id) === receiptMsgId) {
+        item.status = targetStatus;
+        item.dlr_status = receiptStat || targetStatus;
+        item.dlr_timestamp = new Date().toISOString();
+        updated = true;
+        break;
+      }
+    }
+    if (updated) {
+      writeDb('sms_log', smsLog);
+    }
+  } catch (err) {
+    console.error('handleDlrDeliveryReceipt error:', err);
+  }
+}
+
+function normalizeSmppHostPort(rawHost, rawPort) {
+  let raw = String(rawHost || '').trim();
+  let useTls = false;
+  if (/^ssmpp:\/\//i.test(raw)) {
+    useTls = true;
+    raw = raw.replace(/^ssmpp:\/\//i, '');
+  } else {
+    raw = raw.replace(/^(?:smpp|tcp|https?):\/\//i, '');
+  }
+  raw = raw.split('/')[0].trim();
+  let host = raw;
+  let portNum = Number(rawPort);
+  // Extract embedded :port when host isn't an IPv6 bracketed/multi-colon literal
+  const colonCount = (raw.match(/:/g) || []).length;
+  if (colonCount === 1) {
+    const parts = raw.split(':');
+    host = parts[0].trim();
+    const embeddedPort = parseInt(parts[1], 10);
+    if (!Number.isFinite(portNum) || portNum <= 0 || portNum === 2775) {
+      if (embeddedPort >= 1 && embeddedPort <= 65535) portNum = embeddedPort;
+    }
+  } else if (raw.startsWith('[')) {
+    const m = raw.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    if (m) {
+      host = m[1];
+      const embeddedPort = m[2] ? parseInt(m[2], 10) : NaN;
+      if ((!Number.isFinite(portNum) || portNum <= 0) && embeddedPort >= 1 && embeddedPort <= 65535) {
+        portNum = embeddedPort;
+      }
+    }
+  }
+  if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
+    portNum = useTls ? 3550 : 2775;
+  }
+  return { host, port: portNum, useTls };
+}
+
+function startClientAccountConnection(acc) {
+  stopClientAccountConnection(acc.id);
+  if ((acc.status || 'active') !== 'active') return;
+
+  const plainPass = decryptSmppSecret(acc.password_enc) || acc.password || '';
+  const { host: cleanHost, port: cleanPort, useTls } = normalizeSmppHostPort(acc.host, acc.port);
+  if (!cleanHost || !acc.system_id) return;
+
+  const mgr = { backoff: 5000, reconnectTimer: null, session: null };
+  clientAccountManagers.set(acc.id, mgr);
+
+  function connectToCarrier() {
+    try {
+      const proto = (useTls || acc.tls === true) ? 'ssmpp' : 'smpp';
+      const url = `${proto}://${cleanHost}:${cleanPort}`;
+      const session = smpp.connect({
+        url,
+        auto_enquire_link_period: 30000 // enquire_link every 30s
+      });
+      mgr.session = session;
+
+      session.on('error', (err) => {
+        logSmppEvent('disconnect', acc.host, `Client connection error (${err.message}) for ${acc.company}`);
+      });
+
+      session.on('close', () => {
+        if (session._liveId) {
+          liveSmppSessions.delete(session._liveId);
+          syncLiveSessionsToDb();
+        }
+        // Auto-reconnect with exponential backoff up to 60s
+        mgr.backoff = Math.min(60000, mgr.backoff * 1.5);
+        if (clientAccountManagers.has(acc.id) && (acc.status || 'active') === 'active') {
+          mgr.reconnectTimer = setTimeout(connectToCarrier, mgr.backoff);
+        }
+      });
+
+      const bindMethod = session['bind_' + (acc.bind_type || 'transceiver')] || session.bind_transceiver;
+      bindMethod.call(session, {
+        system_id: acc.system_id,
+        password: plainPass
+      }, (pdu) => {
+        if (pdu.command_status === 0) {
+          mgr.backoff = 5000; // reset backoff
+          const liveId = nextSmppSessionId++;
+          session._liveId = liveId;
+          session._accountId = acc.id;
+          session._systemId = acc.system_id;
+          session._company = acc.company;
+          session._ip = acc.host;
+          session._bindType = acc.bind_type || 'transceiver';
+
+          liveSmppSessions.set(liveId, {
+            id: liveId,
+            account_id: acc.id,
+            system_id: acc.system_id,
+            ip: acc.host,
+            bind_type: acc.bind_type || 'transceiver',
+            direction: 'outbound',
+            connected_at: new Date().toISOString(),
+            last_activity: new Date().toISOString(),
+            msgs_in: 0,
+            msgs_out: 0,
+            messages_sent: 0,
+            status: 'active',
+            sessionObj: session
+          });
+          syncLiveSessionsToDb();
+          logSmppEvent('bind_ok', acc.host, `Client bound to carrier ${acc.company} (${acc.system_id})`, { system_id: acc.system_id });
+        } else {
+          logSmppEvent('bind_fail', acc.host, `Client bind failed (status 0x${pdu.command_status.toString(16)}) with ${acc.company}`);
+          session.close();
+        }
+      });
+
+      session.on('deliver_sm', (pdu) => {
+        const live = liveSmppSessions.get(session._liveId);
+        if (live) {
+          live.last_activity = new Date().toISOString();
+          live.msgs_in = (live.msgs_in || 0) + 1;
+          live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
+        }
+        recordSmppTrafficMessage();
+
+        const isDlr = (pdu.esm_class & 0x04) !== 0;
+        let text = '';
+        if (pdu.short_message) {
+          if (typeof pdu.short_message === 'string') text = pdu.short_message;
+          else if (Buffer.isBuffer(pdu.short_message)) text = pdu.short_message.toString('utf8');
+          else if (pdu.short_message.message) text = String(pdu.short_message.message);
+        }
+
+        if (isDlr) {
+          handleDlrDeliveryReceipt(text, pdu);
+        } else {
+          ingestSms({
+            sender: pdu.source_addr,
+            to_number: pdu.destination_addr,
+            message: text,
+            sms_id: String(pdu.sequence_number || ''),
+            company: acc.company,
+            source: 'smpp_client'
+          });
+        }
+        session.send(pdu.response());
+        syncLiveSessionsToDb();
+      });
+    } catch (err) {
+      logSmppEvent('disconnect', acc.host, `Client connection exception: ${err.message}`);
+    }
+  }
+
+  connectToCarrier();
+}
+
+function stopClientAccountConnection(accountId) {
+  const mgr = clientAccountManagers.get(accountId);
+  if (mgr) {
+    if (mgr.reconnectTimer) clearTimeout(mgr.reconnectTimer);
+    if (mgr.session) {
+      try {
+        mgr.session.unbind();
+        mgr.session.close();
+      } catch (_) {}
+    }
+    clientAccountManagers.delete(accountId);
+  }
+}
+
+// ── SMPP Startup & Migration ────────────────────────────────────
+function initSmppEngine() {
+  try {
+    // 1. Clear stale sessions file at boot
+    writeDb('smpp_sessions', []);
+
+    // 2. Ensure smpp_logs.json exists
+    const logs = readDb('smpp_logs');
+    if (!Array.isArray(logs)) writeDb('smpp_logs', []);
+
+    // 3. Migrate plaintext passwords in smpp_accounts.json
+    const accounts = readDb('smpp_accounts') || [];
+    let modified = false;
+    for (const acc of accounts) {
+      if (acc.interconnect_type === 'smpp') {
+        if (acc.password) {
+          acc.password_hash = bcrypt.hashSync(String(acc.password), 10);
+          delete acc.password;
+          modified = true;
+        }
+      } else if (acc.interconnect_type === 'smpp-client') {
+        if (acc.password) {
+          acc.password_enc = encryptSmppSecret(String(acc.password));
+          delete acc.password;
+          modified = true;
+        }
+      }
+      if (!acc.bind_type) {
+        acc.bind_type = 'transceiver';
+        modified = true;
+      }
+      if (acc.max_connections === undefined) {
+        acc.max_connections = Number(acc.limit || 10);
+        modified = true;
+      }
+      if (acc.max_mps === undefined) {
+        acc.max_mps = 500;
+        modified = true;
+      }
+    }
+    if (modified) {
+      writeDb('smpp_accounts', accounts);
+    }
+
+    // 4. Start listener if settings.smpp_enabled is true
+    const settings = readDb('settings') || {};
+    if (settings.smpp_enabled === true || process.env.SMPP_ENABLED === 'true') {
+      const host = process.env.SMPP_HOST || settings.smpp_host || '0.0.0.0';
+      const port = Number(process.env.SMPP_PORT || settings.smpp_port || 2775);
+      startSmppServerListener(host, port);
+    }
+
+    // 5. Connect active client accounts
+    for (const acc of accounts) {
+      if (acc.interconnect_type === 'smpp-client' && (acc.status || 'active') === 'active') {
+        startClientAccountConnection(acc);
+      }
+    }
+  } catch (err) {
+    console.error('initSmppEngine error:', err);
+  }
+}
+
+function syncSmppServerFromSettings(updatedSettings) {
+  try {
+    const isEnabled = updatedSettings.smpp_enabled === true;
+    const host = (updatedSettings.smpp_host !== undefined && updatedSettings.smpp_host !== null) ? updatedSettings.smpp_host : (process.env.SMPP_HOST || '0.0.0.0');
+    const port = Number(updatedSettings.smpp_port !== undefined && updatedSettings.smpp_port !== null ? updatedSettings.smpp_port : (process.env.SMPP_PORT || 2775));
+
+    if (!isEnabled) {
+      if (smppServerState.listening || smppServerInstance) {
+        console.log('[HUMEX SMS] Stopping SMPP server listener per settings toggle');
+        stopSmppServerListener();
+      }
+    } else {
+      if (!smppServerState.listening || smppServerState.host !== host || smppServerState.port !== port) {
+        console.log('[HUMEX SMS] (Re)starting SMPP server listener per settings update');
+        startSmppServerListener(host, port);
+      }
+    }
+  } catch (err) {
+    console.error('syncSmppServerFromSettings error:', err);
+  }
+}
+
+// ── SMPP HTTP API ENDPOINTS ─────────────────────────────────────
+app.get('/api/smpp/accounts', (req, res) => {
+  const accounts = readDb('smpp_accounts') || [];
+  const smsLog = readDb('sms_log') || [];
+  const today = new Date().toISOString().slice(0, 10);
+  const enriched = accounts.map(rawAcc => {
+    const acc = safeSmppAccount(rawAcc);
+    const company = (acc.company || '').toLowerCase();
+    const systemId = (acc.system_id || '').toLowerCase();
+    const matched = smsLog.filter(s => {
+      const sComp = (s.company || '').toLowerCase();
+      const sSys = (s.system_id || '').toLowerCase();
+      return (company && (sComp === company || sSys === company)) ||
+             (systemId && (sComp === systemId || sSys === systemId));
+    });
+    return {
+      ...acc,
+      total_otp: matched.length,
+      otp_today: matched.filter(s => (s.timestamp || '').slice(0, 10) === today).length
+    };
+  });
+  res.json(enriched);
+});
+
+app.get('/api/smpp/accounts/:id', (req, res) => {
+  const accounts = readDb('smpp_accounts') || [];
+  const idStr = String(req.params.id);
+  const acc = accounts.find(a => String(a.id) === idStr);
+  if (!acc) {
+    return res.status(404).json({ error: 'SMPP account not found' });
+  }
+  res.json(safeSmppAccount(acc));
+});
+
+app.post('/api/smpp/accounts', (req, res) => {
+  try {
+    const data = readDb('smpp_accounts') || [];
+    const payload = req.body || {};
+
+    if (!payload.company || !String(payload.company).trim()) {
+      return res.status(400).json({ error: 'Company name is required' });
+    }
+
+    const company = String(payload.company).trim();
+    const icType = payload.interconnect_type || 'smpp';
+
+    if (icType === 'smpp') {
+      if (!payload.system_id || !String(payload.system_id).trim()) {
+        return res.status(400).json({ error: 'System ID is required' });
+      }
+      const sysLower = String(payload.system_id).trim().toLowerCase();
+      if (data.some(a => (a.interconnect_type || 'smpp') === 'smpp' && String(a.system_id || '').trim().toLowerCase() === sysLower)) {
+        return res.status(400).json({ error: `System ID '${String(payload.system_id).trim()}' already exists. Edit the existing account or use a different System ID.` });
+      }
+    } else if (icType === 'smpp-client') {
+      if (!payload.host || !String(payload.host).trim()) {
+        return res.status(400).json({ error: 'Host/IP is required' });
+      }
+      if (!payload.system_id || !String(payload.system_id).trim()) {
+        return res.status(400).json({ error: 'System ID is required' });
+      }
+    }
+
+    let passwordHash = undefined;
+    let passwordEnc = undefined;
+    if (payload.password) {
+      if (icType === 'smpp') {
+        passwordHash = bcrypt.hashSync(String(payload.password), 10);
+      } else {
+        passwordEnc = encryptSmppSecret(String(payload.password));
+      }
+    }
+
+    const cleanPayload = { ...payload };
+    delete cleanPayload.password;
+
+    if (icType === 'smpp-client') {
+      const norm = normalizeSmppHostPort(payload.host, payload.port);
+      cleanPayload.host = norm.host;
+      cleanPayload.port = norm.port;
+      if (norm.useTls) cleanPayload.tls = true;
+    }
+
+    const newAccount = {
+      ...cleanPayload,
+      id: nextId(data),
+      company,
+      interconnect_type: icType,
+      bind_type: payload.bind_type || 'transceiver',
+      max_connections: Number(payload.max_connections || payload.limit || 10),
+      max_mps: Number(payload.max_mps || 500),
+      password_hash: passwordHash,
+      password_enc: passwordEnc,
+      status: payload.status || 'active',
+      limit: Number(payload.limit) || 500,
+      total_otp: 0,
+      otp_today: 0,
+      messages_today: 0,
+      created: new Date().toISOString()
+    };
+
+    data.push(newAccount);
+    writeDb('smpp_accounts', data);
+    if (newAccount.whitelist_ip) unblockSmppAccountIps(newAccount.whitelist_ip);
+
+    if (newAccount.interconnect_type === 'smpp-client' && newAccount.status === 'active') {
+      startClientAccountConnection(newAccount);
+    }
+
+    try {
+      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
+      logAudit(actor, 'SMPP Account Added', `Added SMPP account for ${company} (${icType})`, 'SMPP');
+    } catch (e) {}
+
+    return res.status(201).json(safeSmppAccount(newAccount));
+  } catch (err) {
+    console.error('Add SMPP account error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+const handleUpdateSmppAccount = (req, res) => {
+  try {
+    const data = readDb('smpp_accounts') || [];
+    const idStr = String(req.params.id);
+    const idx = data.findIndex(a => String(a.id) === idStr);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'SMPP account not found' });
+    }
+
+    const current = data[idx];
+    const updates = { ...(req.body || {}) };
+
+    if (updates.password) {
+      if ((current.interconnect_type || updates.interconnect_type) === 'smpp') {
+        current.password_hash = bcrypt.hashSync(String(updates.password), 10);
+      } else {
+        current.password_enc = encryptSmppSecret(String(updates.password));
+      }
+      delete updates.password;
+    }
+    delete current.password;
+
+    Object.assign(current, updates);
+    if ((current.interconnect_type || 'smpp') === 'smpp-client' && current.host) {
+      const norm = normalizeSmppHostPort(current.host, current.port);
+      current.host = norm.host;
+      current.port = norm.port;
+      if (norm.useTls) current.tls = true;
+    }
+    current.id = Number(idStr) || current.id;
+    current.updated_at = new Date().toISOString();
+
+    data[idx] = current;
+    writeDb('smpp_accounts', data);
+    if (current.whitelist_ip) unblockSmppAccountIps(current.whitelist_ip);
+
+    if (current.interconnect_type === 'smpp-client') {
+      if (current.status === 'active') {
+        startClientAccountConnection(current);
+      } else {
+        stopClientAccountConnection(current.id);
+      }
+    }
+
+    try {
+      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
+      logAudit(actor, 'SMPP Account Updated', `Updated SMPP account #${idStr} (${current.company || ''})`, 'SMPP');
+    } catch (e) {}
+
+    return res.json(safeSmppAccount(current));
+  } catch (err) {
+    console.error('Update SMPP account error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+};
+
+app.patch('/api/smpp/accounts/:id', handleUpdateSmppAccount);
+app.put('/api/smpp/accounts/:id', handleUpdateSmppAccount);
+
+app.delete('/api/smpp/accounts/:id', (req, res) => {
+  try {
+    const data = readDb('smpp_accounts') || [];
+    const idStr = String(req.params.id);
+    const idx = data.findIndex(a => String(a.id) === idStr);
+    if (idx === -1) {
+      return res.status(404).json({ error: 'SMPP account not found' });
+    }
+
+    const removed = data.splice(idx, 1)[0];
+    writeDb('smpp_accounts', data);
+
+    if (removed.interconnect_type === 'smpp-client') {
+      stopClientAccountConnection(removed.id);
+    } else {
+      // Unbind and drop live sessions for this account
+      for (const [sessId, live] of liveSmppSessions.entries()) {
+        if (Number(live.account_id) === Number(removed.id) || (live.system_id && live.system_id === removed.system_id)) {
+          if (live.sessionObj) {
+            try { live.sessionObj.unbind(); live.sessionObj.close(); } catch (_) {}
+          }
+          liveSmppSessions.delete(sessId);
+        }
+      }
+      syncLiveSessionsToDb();
+    }
+
+    try {
+      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
+      logAudit(actor, 'SMPP Account Deleted', `Deleted SMPP account #${idStr} (${removed.company || ''})`, 'SMPP');
+    } catch (e) {}
+
+    return res.json({ success: true, message: 'SMPP account deleted' });
+  } catch (err) {
+    console.error('Delete SMPP account error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+app.post('/api/smpp/accounts/:id/test', async (req, res) => {
+  try {
+    const data = readDb('smpp_accounts') || [];
+    const idStr = String(req.params.id);
+    const acc = data.find(a => String(a.id) === idStr);
+    if (!acc) {
+      return res.status(404).json({ success: false, error: 'SMPP account not found' });
+    }
+
+    const start = Date.now();
+    const icType = acc.interconnect_type || 'smpp';
+
+    if (icType === 'smpp-client') {
+      const { host: cleanHost, port: cleanPort, useTls } = normalizeSmppHostPort(acc.host || '127.0.0.1', acc.port || 2775);
+      const plainPass = decryptSmppSecret(acc.password_enc) || acc.password || '';
+      const bindType = acc.bind_type || 'transceiver';
+
+      // If this client account already has an active live session, verify it via enquire_link
+      // instead of opening a 2nd simultaneous connection (many carriers limit max_connections=1).
+      let existingLive = null;
+      for (const s of liveSmppSessions.values()) {
+        if (s.direction === 'outbound' && Number(s.account_id) === Number(acc.id) && s.sessionObj?.socket?.writable) {
+          existingLive = s;
+          break;
+        }
+      }
+
+      if (existingLive) {
+        const liveCheck = await new Promise((resolve) => {
+          let done = false;
+          const t = setTimeout(() => {
+            if (done) return;
+            done = true;
+            resolve(null);
+          }, 4000);
+          try {
+            existingLive.sessionObj.enquire_link((pdu) => {
+              if (done) return;
+              done = true;
+              clearTimeout(t);
+              if (pdu && pdu.command_status === 0) {
+                resolve({
+                  success: true,
+                  response_time: Date.now() - start,
+                  message: `SMPP live session active & verified (enquire_link 0x0) to ${cleanHost}:${cleanPort}`,
+                  system_id: acc.system_id,
+                  interconnect_type: icType
+                });
+              } else {
+                resolve(null);
+              }
+            });
+          } catch (_) {
+            clearTimeout(t);
+            resolve(null);
+          }
+        });
+        if (liveCheck) {
+          return res.json(liveCheck);
+        }
+      }
+
+      const testResult = await new Promise((resolve) => {
+        let finished = false;
+        let tcpConnected = false;
+        let testSession = null;
+        const finish = (payload) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          resolve(payload);
+        };
+
+        const timer = setTimeout(() => {
+          try { if (testSession) testSession.destroy(); } catch (_) {}
+          const errMsg = tcpConnected
+            ? `TCP connected to ${cleanHost}:${cleanPort}, but carrier did not reply to ${bindType} bind within 8s (check System ID/Password or TLS)`
+            : `TCP connect timed out after 8s to ${cleanHost}:${cleanPort} (carrier IP/port unreachable or firewall/IP whitelist blocking)`;
+          logSmppEvent('test_timeout', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort, tcp_connected: tcpConnected });
+          finish({ success: false, response_time: Date.now() - start, error: errMsg });
+        }, 8000);
+
+        const proto = (useTls || acc.tls === true) ? 'ssmpp' : 'smpp';
+        try {
+          testSession = smpp.connect({ url: `${proto}://${cleanHost}:${cleanPort}` });
+        } catch (e) {
+          logSmppEvent('test_error', cleanHost, e.message, { system_id: acc.system_id, port: cleanPort });
+          return finish({ success: false, response_time: Date.now() - start, error: e.message });
+        }
+
+        testSession.on('connect', () => {
+          tcpConnected = true;
+        });
+        testSession.on('secureConnect', () => {
+          tcpConnected = true;
+        });
+
+        testSession.on('error', (err) => {
+          try { testSession.destroy(); } catch (_) {}
+          const errMsg = `${err.message || 'Connection failed'} (${cleanHost}:${cleanPort})`;
+          logSmppEvent('test_error', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
+          finish({ success: false, response_time: Date.now() - start, error: errMsg });
+        });
+
+        testSession.on('close', () => {
+          const errMsg = tcpConnected
+            ? `Carrier ${cleanHost}:${cleanPort} closed socket during ${bindType} bind (check IP whitelist, System ID/Password, or max_connections limit)`
+            : `TCP connection to ${cleanHost}:${cleanPort} closed before handshake`;
+          logSmppEvent('test_close', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
+          finish({ success: false, response_time: Date.now() - start, error: errMsg });
+        });
+
+        const bindFn = testSession['bind_' + bindType] || testSession.bind_transceiver;
+        bindFn.call(testSession, {
+          system_id: acc.system_id || '',
+          password: plainPass
+        }, (pdu) => {
+          const latency = Date.now() - start;
+          if (pdu.command_status === 0) {
+            try {
+              testSession.unbind(() => {
+                try { testSession.close(); } catch (_) {}
+              });
+            } catch (_) {
+              try { testSession.close(); } catch (_) {}
+            }
+            finish({
+              success: true,
+              response_time: latency,
+              message: `SMPP bind succeeded (status 0x0) to ${acc.company} (${cleanHost}:${cleanPort})`,
+              system_id: acc.system_id,
+              interconnect_type: icType
+            });
+          } else {
+            try { testSession.close(); } catch (_) {}
+            const errMsg = `SMPP bind rejected by ${cleanHost}:${cleanPort} (command_status 0x${pdu.command_status.toString(16)})`;
+            logSmppEvent('bind_fail', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
+            finish({
+              success: false,
+              response_time: latency,
+              error: errMsg,
+              system_id: acc.system_id,
+              interconnect_type: icType
+            });
+          }
+        });
+      });
+
+      return res.json(testResult);
+    } else {
+      // Server account: carrier connects to us.
+      // If host or whitelist_ip is specified, really test TCP connectivity with 8s timeout
+      const targetHost = acc.host || (acc.whitelist_ip ? acc.whitelist_ip.split(',')[0].trim() : '');
+      const targetPort = Number(acc.port) || 2775;
+
+      if (targetHost) {
+        const tcpResult = await new Promise((resolve) => {
+          const socket = new net.Socket();
+          let finished = false;
+          socket.setTimeout(8000);
+
+          socket.on('connect', () => {
+            if (finished) return;
+            finished = true;
+            socket.destroy();
+            resolve({
+              success: true,
+              response_time: Date.now() - start,
+              message: `TCP connect succeeded to ${targetHost}:${targetPort}`,
+              system_id: acc.system_id,
+              interconnect_type: icType
+            });
+          });
+
+          socket.on('timeout', () => {
+            if (finished) return;
+            finished = true;
+            socket.destroy();
+            resolve({
+              success: false,
+              response_time: Date.now() - start,
+              error: `TCP connect timed out after 8s to ${targetHost}:${targetPort}`,
+              system_id: acc.system_id,
+              interconnect_type: icType
+            });
+          });
+
+          socket.on('error', (err) => {
+            if (finished) return;
+            finished = true;
+            socket.destroy();
+            resolve({
+              success: false,
+              response_time: Date.now() - start,
+              error: err.message || 'TCP connect failed',
+              system_id: acc.system_id,
+              interconnect_type: icType
+            });
+          });
+
+          socket.connect(targetPort, targetHost);
+        });
+
+        return res.json(tcpResult);
+      } else {
+        const latency = Date.now() - start;
+        return res.json({
+          success: true,
+          response_time: latency,
+          message: `Server account ${acc.system_id} configured. SMPP listener is ${smppServerState.listening ? 'online' : 'offline'}.`,
+          system_id: acc.system_id,
+          interconnect_type: icType
+        });
+      }
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/smpp/accounts/:id/reconnect', (req, res) => {
+  try {
+    const data = readDb('smpp_accounts') || [];
+    const idStr = String(req.params.id);
+    const acc = data.find(a => String(a.id) === idStr);
+    if (!acc) {
+      return res.status(404).json({ error: 'SMPP account not found' });
+    }
+
+    acc.status = 'active';
+    acc.last_reconnect = new Date().toISOString();
+    writeDb('smpp_accounts', data);
+
+    if (acc.interconnect_type === 'smpp-client') {
+      stopClientAccountConnection(acc.id);
+      startClientAccountConnection(acc);
+      return res.json({ success: true, message: `Client account ${acc.company} reconnecting` });
+    } else {
+      let dropped = 0;
+      for (const [sessId, live] of liveSmppSessions.entries()) {
+        if (Number(live.account_id) === Number(acc.id) || (live.system_id && live.system_id === acc.system_id)) {
+          if (live.sessionObj) {
+            try {
+              live.sessionObj.unbind();
+              live.sessionObj.close();
+            } catch (_) {}
+          }
+          liveSmppSessions.delete(sessId);
+          dropped++;
+        }
+      }
+      syncLiveSessionsToDb();
+      return res.json({ success: true, message: `Dropped ${dropped} active session(s) for ${acc.company}` });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/smpp/sessions', (req, res) => {
+  const list = [];
+  for (const s of liveSmppSessions.values()) {
+    list.push({
+      id: s.id,
+      account_id: s.account_id,
+      system_id: s.system_id,
+      ip: s.ip,
+      bind_type: s.bind_type,
+      direction: s.direction,
+      connected_at: s.connected_at,
+      last_activity: s.last_activity,
+      msgs_in: s.msgs_in || 0,
+      msgs_out: s.msgs_out || 0,
+      messages_sent: (s.msgs_in || 0) + (s.msgs_out || 0),
+      status: s.status || 'active'
+    });
+  }
+  res.json(list);
+});
+
+app.delete('/api/smpp/sessions/:id', (req, res) => {
+  try {
+    const idStr = String(req.params.id);
+    let target = null;
+    for (const [sid, s] of liveSmppSessions.entries()) {
+      if (String(s.id) === idStr) {
+        target = s;
+        liveSmppSessions.delete(sid);
+        break;
+      }
+    }
+
+    if (target && target.sessionObj) {
+      try {
+        target.sessionObj.unbind();
+        target.sessionObj.close();
+      } catch (_) {}
+    }
+    syncLiveSessionsToDb();
+
+    if (target) {
+      logSmppEvent('unbind', target.ip || '127.0.0.1', `Admin disconnected session #${idStr} (${target.system_id})`, { system_id: target.system_id });
+    }
+
+    try {
+      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
+      logAudit(actor, 'SMPP Session Disconnected', `Disconnected session #${idStr}`, 'SMPP');
+    } catch (e) {}
+
+    res.json({ success: true, message: 'Session disconnected' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/smpp/connection-logs', (req, res) => {
+  const logs = readDb('smpp_logs') || [];
+  res.json(logs);
+});
+
+function hasAccountHistory(tableName, targetId, username) {
+  const tid = Number(targetId);
+  const uName = String(username || '').toLowerCase();
+
+  const smsLog = readDb('sms_log') || [];
+  const hasSms = smsLog.some(s => {
+    if (!s) return false;
+    if (tableName === 'agents' && Number(s.agent_id) === tid) return true;
+    if (tableName === 'clients' && (Number(s.client_id) === tid || (s.user && String(s.user).toLowerCase() === uName))) return true;
+    return false;
+  });
+  if (hasSms) return true;
+
+  const numbers = readDb('numbers') || [];
+  const hasNum = numbers.some(n => {
+    if (!n) return false;
+    if (tableName === 'agents' && Number(n.agent_id) === tid) return true;
+    if (tableName === 'clients' && (Number(n.client_id) === tid || (n.user && String(n.user).toLowerCase() === uName))) return true;
+    return false;
+  });
+  if (hasNum) return true;
+
+  const transfers = readDb('number_transfers') || [];
+  const hasTransfer = transfers.some(t => {
+    if (!t) return false;
+    return Number(t.to_user_id) === tid || Number(t.from_user_id) === tid;
+  });
+  if (hasTransfer) return true;
+
+  const payouts = readDb('payout_requests') || [];
+  const hasPayout = payouts.some(p => {
+    if (!p) return false;
+    return Number(p.user_id) === tid || (p.username && String(p.username).toLowerCase() === uName);
+  });
+  if (hasPayout) return true;
+
+  return false;
+}
+
+// ── PAGINATED OBJECT ENDPOINTS { data: [...], total: ... } ───
+function registerPaginatedCrud(routePath, tableName) {
+  const isAccountTable = ['users', 'agents', 'clients'].includes(tableName);
+
+  app.get(`/api/${routePath}`, requireAuth, (req, res) => {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    // Strict Table-Level Access Guards
+    if (['users', 'rate_limits', 'firewall_events'].includes(tableName) && !isOwner) {
+      return res.status(403).json({ error: 'Access denied. Owner permissions required.' });
+    }
+
+    let data = readDb(tableName);
+    if (!Array.isArray(data)) data = [];
+
+    if (tableName === 'audit_logs') {
+      if (!isOwner) {
+        const u = String(sessionUser.username || '').toLowerCase();
+        data = data.filter(item => {
+          const act = String(item.actor || item.username || item.user || '').toLowerCase();
+          return act === u;
+        });
+      }
+    } else if (tableName === 'login_activity') {
+      if (!isOwner) {
+        const u = String(sessionUser.username || '').toLowerCase();
+        data = data.filter(item => {
+          const lu = String(item.username || item.user || '').toLowerCase();
+          return (item.user_id != null && Number(item.user_id) === Number(sessionUser.id)) || (u && lu === u);
+        });
+      }
+    }
+
+    // RBAC filtering based on authenticated sessionUser
+    if (tableName === 'agents') {
+      if (isAgent) {
+        data = data.filter(a => Number(a.id) === Number(sessionUser.id));
+      } else if (isClient) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+    } else if (tableName === 'clients') {
+      if (isAgent) {
+        data = data.filter(c => Number(c.agent_id) === Number(sessionUser.id));
+      } else if (isClient) {
+        data = data.filter(c => Number(c.id) === Number(sessionUser.id));
+      }
+    } else if (tableName === 'numbers') {
+      if (isAgent) {
+        data = data.filter(n => Number(n.agent_id) === Number(sessionUser.id));
+      } else if (isClient) {
+        data = data.filter(n => Number(n.client_id) === Number(sessionUser.id) || (n.user && String(n.user).toLowerCase() === String(sessionUser.username).toLowerCase()));
+      }
+      if (!isOwner && !hasWhitenoiseAccess(sessionUser)) {
+        const wnRangesMap = buildRangesLookupMap();
+        const wnTags = getWhitenoiseProviderTags();
+        data = data.filter(n => !isWhitenoiseRecord(n, wnRangesMap, wnTags));
+      }
+    } else if (tableName === 'number_transfers') {
+      if (isAgent) {
+        data = data.filter(t => Number(t.to_user_id) === Number(sessionUser.id) || Number(t.from_user_id) === Number(sessionUser.id));
+      } else if (isClient) {
+        data = data.filter(t => Number(t.to_user_id) === Number(sessionUser.id));
+      }
+    } else if (tableName === 'payout_requests') {
+      if (isOwner) {
+        data = data.filter(p => String(p.role || p.recipient_role || '').toLowerCase() !== 'client');
+      } else if (isAgent) {
+        const myU = String(sessionUser.username || '').toLowerCase();
+        const myClientIds = new Set((readDb('clients') || []).filter(c => Number(c.agent_id) === Number(sessionUser.id)).map(c => Number(c.id)));
+        data = data.filter(p => {
+          const u = String(p.username || p.user || '').toLowerCase();
+          const pRole = String(p.role || p.recipient_role || '').toLowerCase();
+          return u === myU ||
+            Number(p.user_id) === Number(sessionUser.id) ||
+            Number(p.agent_id) === Number(sessionUser.id) ||
+            (pRole === 'client' && myClientIds.has(Number(p.client_id || p.user_id)));
+        });
+      } else if (isClient) {
+        const myU = String(sessionUser.username || '').toLowerCase();
+        data = data.filter(p => {
+          const u = String(p.username || p.user || '').toLowerCase();
+          return u === myU || Number(p.client_id) === Number(sessionUser.id) || Number(p.user_id) === Number(sessionUser.id);
+        });
+      }
+    } else if (tableName === 'bank_accounts') {
+      if (isAgent) {
+        data = data.filter(b => Number(b.agent_id) === Number(sessionUser.id));
+      } else if (isClient) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+    }
+
+    // Filter by query parameters if applicable
+    const { role, agent_id, search, status } = req.query;
+    if (role) {
+      data = data.filter(d => (d.role || '').toLowerCase() === role.toLowerCase());
+    }
+    if (tableName === 'numbers') {
+      const allClients = (agent_id || req.query.client_id || search) ? (readDb('clients') || []) : [];
+      const allAgents = search ? (readDb('agents') || []) : [];
+      const allRanges = (req.query.range || search) ? (readDb('sms_ranges') || []) : [];
+
+      if (agent_id && (isOwner || (isAgent && String(sessionUser.id) === String(agent_id)))) {
+        const agClientIds = new Set(
+          allClients.filter(c => String(c.agent_id) === String(agent_id)).map(c => String(c.id))
+        );
+        const agClientUsers = new Set(
+          allClients.filter(c => String(c.agent_id) === String(agent_id) && c.username).map(c => String(c.username).toLowerCase())
+        );
+        data = data.filter(d => {
+          if (String(d.agent_id) === String(agent_id)) return true;
+          if (d.client_id && agClientIds.has(String(d.client_id))) return true;
+          const u = String(d.client_username || d.user || '').toLowerCase();
+          if (u && agClientUsers.has(u)) return true;
+          return false;
+        });
+      }
+
+      if (req.query.client_id) {
+        const targetClId = String(req.query.client_id);
+        const targetCl = allClients.find(c => String(c.id) === targetClId);
+        const targetClUser = targetCl && targetCl.username ? String(targetCl.username).toLowerCase() : '';
+        data = data.filter(d => {
+          if (String(d.client_id) === targetClId) return true;
+          if (targetClUser) {
+            const u = String(d.client_username || d.client_name || d.user || '').toLowerCase();
+            if (u === targetClUser) return true;
+          }
+          return false;
+        });
+      }
+
+      if (status) {
+        const stLower = String(status).trim().toLowerCase();
+        if (stLower === 'unassigned' || stLower === 'free' || stLower === 'pool') {
+          data = data.filter(d => !d.client_id && !d.agent_id);
+        } else if (stLower === 'assigned' || stLower === 'allocated') {
+          data = data.filter(d => Boolean(d.client_id || d.agent_id));
+        } else {
+          data = data.filter(d => (d.status || 'active').toLowerCase() === stLower);
+        }
+      }
+
+      if (req.query.range) {
+        const rawRange = String(req.query.range).trim();
+        const rId = Number(rawRange);
+        const rLower = rawRange.toLowerCase();
+        const targetRange = Number.isFinite(rId) && rawRange !== ''
+          ? allRanges.find(r => Number(r.id) === rId)
+          : allRanges.find(r => String(r.range_name || r.name || '').trim().toLowerCase() === rLower);
+        if (targetRange) {
+          const tId = Number(targetRange.id);
+          const tCountry = (targetRange.country || '').trim().toLowerCase();
+          const tProvider = (targetRange.provider || 'Manual').trim().toLowerCase();
+          const tName = (targetRange.range_name || targetRange.name || '').trim().toLowerCase();
+          data = data.filter(d => {
+            if (d.range_id != null && Number(d.range_id) === tId) return true;
+            if (tName) {
+              const dn = (d.range_name || d.range_label || '').trim().toLowerCase();
+              if (dn && dn === tName) return true;
+            }
+            if (!d.range_id && tCountry && tProvider) {
+              const c = (d.country || '').trim().toLowerCase();
+              const p = (d.provider || '').trim().toLowerCase();
+              return c === tCountry && p === tProvider;
+            }
+            return false;
+          });
+        } else if (Number.isFinite(rId) && rawRange !== '') {
+          data = data.filter(d => d.range_id != null && Number(d.range_id) === rId);
+        } else {
+          data = data.filter(d =>
+            String(d.range_name || d.range_label || d.country || '').toLowerCase().includes(rLower)
+          );
+        }
+      }
+
+      if (search) {
+        const q = String(search).trim().toLowerCase();
+        if (q) {
+          const agMap = new Map(allAgents.map(a => [String(a.id), String(a.username || '').toLowerCase()]));
+          const clMap = new Map(allClients.map(c => [String(c.id), String(c.username || '').toLowerCase()]));
+          const rngMap = new Map(allRanges.map(r => [String(r.id), `${r.range_name || r.name || ''} ${r.prefix || ''} ${r.country || ''}`.toLowerCase()]));
+          data = data.filter(d => {
+            if (String(d.number || '').toLowerCase().includes(q)) return true;
+            if (String(d.prefix || '').toLowerCase().includes(q)) return true;
+            if (String(d.range_name || d.range_label || '').toLowerCase().includes(q)) return true;
+            if (String(d.country || '').toLowerCase().includes(q)) return true;
+            if (String(d.provider || '').toLowerCase().includes(q)) return true;
+            if (String(d.client_username || d.client_name || d.user || '').toLowerCase().includes(q)) return true;
+            if (String(d.agent_username || d.agent_name || '').toLowerCase().includes(q)) return true;
+            if (d.agent_id && (agMap.get(String(d.agent_id)) || '').includes(q)) return true;
+            if (d.client_id && (clMap.get(String(d.client_id)) || '').includes(q)) return true;
+            if (d.range_id && (rngMap.get(String(d.range_id)) || '').includes(q)) return true;
+            return false;
+          });
+        }
+      }
+    } else {
+      if (agent_id && (isOwner || (isAgent && String(sessionUser.id) === String(agent_id)))) {
+        data = data.filter(d => String(d.agent_id) === String(agent_id));
+      }
+      if (status) {
+        data = data.filter(d => (d.status || '').toLowerCase() === status.toLowerCase());
+      }
+      if (search) {
+        const q = search.toLowerCase();
+        data = data.filter(d => JSON.stringify(d).toLowerCase().includes(q));
+      }
+    }
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const rawLimit = String(req.query.limit || '').trim().toLowerCase();
+    const isAll = rawLimit === 'all' || rawLimit === '0' || rawLimit === '-1';
+    const maxLimit = tableName === 'numbers' ? 500000 : 10000;
+    const parsedLimit = parseInt(req.query.limit, 10) || 1000;
+    const limit = isAll ? data.length : Math.max(1, Math.min(maxLimit, parsedLimit));
+    const totalPages = isAll ? 1 : Math.max(1, Math.ceil(data.length / Math.max(1, limit)));
+    const safePage = isAll ? 1 : Math.min(page, totalPages);
+    const start = isAll ? 0 : (safePage - 1) * limit;
+
+    let slice = data.slice(start, start + limit);
+    if (tableName === 'clients') {
+      const allAgents = readDb('agents') || [];
+      const agMap = new Map(allAgents.map(a => [Number(a.id), a.username]));
+      slice = slice.map(item => {
+        if (!item) return item;
+        const copy = { ...item };
+        if (!copy.agent_username && copy.agent_id) copy.agent_username = agMap.get(Number(copy.agent_id)) || `agent_${copy.agent_id}`;
+        return isOwner ? safeClientForOwner(copy) : safeUser(copy);
+      });
+    } else if (tableName === 'payout_requests') {
+      slice = slice.map(item => {
+        if (!item) return item;
+        const ts = item.timestamp || item.created || item.created_at || item.date || new Date().toISOString();
+        return { ...item, timestamp: ts, created: ts };
+      });
+    } else if (tableName === 'numbers' && !isOwner) {
+      const wnTags = getWhitenoiseProviderTags();
+      slice = slice.map(item => sanitizeNumberForRole(item, false, wnTags));
+    } else if (isAccountTable) {
+      slice = slice.map(item => safeUser(item));
+    }
+
+    res.json({
+      data: slice,
+      total: data.length,
+      page: safePage,
+      limit: isAll ? data.length : limit,
+      total_pages: totalPages
+    });
+  });
+
+  app.post(`/api/${routePath}`, requireAuth, (req, res) => {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    if (tableName === 'users') {
+      if (!isOwner) {
+        return res.status(403).json({ error: 'Access denied. Only Owner can create users.' });
+      }
+      const reqRole = (req.body && req.body.role ? String(req.body.role).trim().toLowerCase() : '');
+      if (reqRole === 'client') {
+        return res.status(403).json({ error: 'Access denied. Clients can ONLY be created by Agents.' });
+      }
+      if (reqRole !== 'agent') {
+        return res.status(400).json({ error: 'Owner creates Agents only. Secondary Owner accounts are disabled.' });
+      }
+    }
+    if (tableName === 'agents' && !isOwner) {
+      return res.status(403).json({ error: 'Access denied. Only Owner can create agents.' });
+    }
+    if (tableName === 'clients') {
+      if (!isAgent) {
+        return res.status(403).json({ error: 'Access denied. Clients can ONLY be created by Agents.' });
+      }
+    }
+    if (tableName === 'bank_accounts') {
+      if (isClient) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+      if (!req.body || !req.body.currency || !req.body.bank_name) {
+        return res.status(400).json({ error: 'Currency and bank name required' });
+      }
+      if (isAgent) {
+        req.body.agent_id = sessionUser.id;
+      }
+    }
+
+    let data = readDb(tableName);
+    if (!Array.isArray(data)) data = [];
+
+    // Numbers validation: reject with 409 if same number (digits only) exists, 400 if missing
+    if (tableName === 'numbers') {
+      const rawNumber = req.body ? req.body.number : undefined;
+      if (rawNumber === undefined || rawNumber === null || String(rawNumber).trim() === '' || !String(rawNumber).replace(/\D/g, '')) {
+        return res.status(400).json({ error: 'Number is required' });
+      }
+      const digits = String(rawNumber).replace(/\D/g, '');
+      const existing = data.find(n => n && String(n.number || '').replace(/\D/g, '') === digits);
+      if (existing) {
+        const rName = existing.range_name || existing.country || `Range #${existing.range_id || ''}`;
+        return res.status(409).json({
+          error: 'Number already exists',
+          detail: `Number already exists in system${existing.range_name ? ` (assigned to range "${existing.range_name}")` : ''}`,
+          existing_range: rName
+        });
+      }
+    }
+
+    // Duplicate username check across all account types
+    if (req.body && req.body.username) {
+      if (isUsernameTaken(req.body.username, null, tableName)) {
+        return res.status(400).json({ error: 'This username already exists', detail: 'This username already exists. Please choose a different username.' });
+      }
+    }
+
+    // Owner protection: No new Owner can be created
+    if (tableName === 'users') {
+      const reqRole = (req.body && req.body.role ? String(req.body.role).trim().toLowerCase() : '');
+      if (reqRole === 'owner' || reqRole === 'admin') {
+        return res.status(400).json({ error: 'New Owner cannot be created. Kamran_Bhatti is the fixed Owner of the project.' });
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const item = { id: nextId(data), ...req.body, created: nowIso, timestamp: nowIso, created_at: nowIso };
+
+    // Strictly enforce role and zero initial balance on creation
+    if (tableName === 'agents') {
+      item.role = 'Agent';
+      item.balance = 0;
+      item.whitenoise_access = Boolean(req.body && req.body.whitenoise_access);
+      delete item.manager_id;
+      delete item.manager_username;
+    } else if (tableName === 'clients') {
+      const agentHasWn = hasWhitenoiseAccess(sessionUser);
+      if (req.body && req.body.whitenoise_access === true && !agentHasWn) {
+        return res.status(403).json({ error: 'Forbidden. CDR 2 / Monthly Route access is not enabled for your account.' });
+      }
+      item.role = 'Client';
+      item.balance = 0;
+      item.agent_id = sessionUser.id;
+      item.agent_username = sessionUser.username;
+      item.whitenoise_access = agentHasWn ? Boolean(req.body && req.body.whitenoise_access) : false;
+      delete item.manager_id;
+      delete item.manager_username;
+    } else if (tableName === 'payout_requests') {
+      item.amount = Math.round(Math.max(0, Number(item.amount) || 0) * 100) / 100;
+      if (!Number.isFinite(item.amount) || item.amount <= 0) {
+        return res.status(400).json({ error: 'Valid payout amount is required' });
+      }
+
+      const fx = getUsdToPkrRate();
+      const settings = readDb('settings') || {};
+      const reqCurrency = (isClient && (!item.currency || String(item.currency).trim().toUpperCase() === 'PKR'))
+        ? 'PKR'
+        : String(item.currency || 'USD').trim().toUpperCase();
+
+      if (reqCurrency === 'PKR') {
+        const minPayoutPkr = getMinPayoutPkr();
+        if (!isOwner && minPayoutPkr > 0 && item.amount < minPayoutPkr) {
+          return res.status(400).json({ error: `Payment low. Minimum payout is Rs. ${cleanMoneyStr(minPayoutPkr, 4)} PKR.` });
+        }
+      } else {
+        const minPayout = Number(settings.min_payout || 0);
+        if (!isOwner && minPayout > 0 && item.amount < minPayout) {
+          return res.status(400).json({ error: `Payment low. Minimum payout is $${cleanMoneyStr(minPayout, 2)}.` });
+        }
+      }
+
+      if (!isOwner) {
+        delete item.paid_at;
+        delete item.paid_by_username;
+        delete item.paid_by_role;
+        item.username = sessionUser.username;
+        item.user = sessionUser.username;
+        item.role = sessionUser.role;
+        item.recipient_role = sessionUser.role;
+        item.user_id = sessionUser.id;
+        item.status = 'pending';
+        delete item.manager_id;
+        delete item.agent_id;
+        delete item.client_id;
+      } else {
+        item.username = item.username || item.user || sessionUser.username;
+        item.user = item.user || item.username;
+        item.role = item.role || item.recipient_role || sessionUser.role;
+        item.user_id = item.user_id || sessionUser.id;
+        item.status = item.status || 'pending';
+      }
+      item.currency = reqCurrency;
+      item.fx_usd_to_pkr = fx;
+      item.amount_usd = reqCurrency === 'PKR' ? round6(item.amount / fx) : item.amount;
+
+      // Check available balance of the user
+      let userBalance = 0;
+      let userBalancePkr = 0;
+      if (isAgent) {
+        const ags = readDb('agents') || [];
+        const a = ags.find(x => Number(x.id) === Number(sessionUser.id) || String(x.username).toLowerCase() === String(sessionUser.username).toLowerCase());
+        userBalance = Number(a?.balance || 0);
+        userBalancePkr = round2(userBalance * fx);
+        item.agent_id = sessionUser.id;
+        item.agent_username = sessionUser.username;
+      } else if (isClient) {
+        const cls = readDb('clients') || [];
+        const c = cls.find(x => Number(x.id) === Number(sessionUser.id) || String(x.username).toLowerCase() === String(sessionUser.username).toLowerCase());
+        userBalance = Number(c?.balance || 0);
+        userBalancePkr = c && c.balance_pkr != null ? Number(c.balance_pkr) : round2(userBalance * fx);
+        item.client_id = sessionUser.id;
+        item.client_username = sessionUser.username;
+        if (c?.agent_id) item.agent_id = c.agent_id;
+      }
+
+      const myPendingPayouts = data.filter(p => p && (p.status === 'pending' || p.status === 'approved') &&
+        ((p.user_id != null && Number(p.user_id) === Number(sessionUser.id)) ||
+         String(p.username || p.user || '').toLowerCase() === String(sessionUser.username || '').toLowerCase()));
+
+      if (reqCurrency === 'PKR') {
+        const pendingPkr = myPendingPayouts.reduce((acc, p) => {
+          if (String(p.currency || 'USD').toUpperCase() === 'PKR') return acc + (Number(p.amount) || 0);
+          return acc + (Number(p.amount) || 0) * (Number(p.fx_usd_to_pkr) || fx);
+        }, 0);
+        const availPkr = Math.max(0, round2(userBalancePkr - pendingPkr));
+        if (!isOwner && availPkr < item.amount) {
+          return res.status(400).json({ error: `Insufficient PKR balance. Available balance: Rs. ${cleanMoneyStr(availPkr, 4)} PKR` });
+        }
+      } else {
+        const pendingSum = myPendingPayouts.reduce((acc, p) => {
+          if (String(p.currency || 'USD').toUpperCase() === 'PKR') {
+            return acc + (p.amount_usd != null ? Number(p.amount_usd) : (Number(p.amount) || 0) / (Number(p.fx_usd_to_pkr) || fx));
+          }
+          return acc + (Number(p.amount) || 0);
+        }, 0);
+        const availableBalance = Math.max(0, Math.round((userBalance - pendingSum) * 100) / 100);
+        if (!isOwner && availableBalance < item.amount) {
+          return res.status(400).json({ error: `Insufficient balance. Available balance: $${cleanMoneyStr(availableBalance, 2)}` });
+        }
+      }
+
+      if (isClient && item.agent_id) {
+        const agTarget = getAgentClientWeeklyPkrStats(item.agent_id);
+        if (agTarget && agTarget.weekly_pkr_enforce_mode === 'block' && agTarget.weekly_pkr_target > 0) {
+          const requestedPkr = reqCurrency === 'PKR' ? item.amount : round2(item.amount * fx);
+          const weekClientPayoutsPkr = data.reduce((acc, p) => {
+            if (!p || String(p.role || p.recipient_role || '').toLowerCase() !== 'client') return acc;
+            if (Number(p.agent_id) !== Number(item.agent_id)) return acc;
+            if (String(p.status || '').toLowerCase() === 'rejected') return acc;
+            const tsStr = String(p.timestamp || p.created || '').slice(0, 10);
+            if (tsStr && tsStr < agTarget.week_start) return acc;
+            const pAmt = String(p.currency || 'PKR').toUpperCase() === 'PKR'
+              ? Number(p.amount || 0)
+              : Number(p.amount || 0) * (Number(p.fx_usd_to_pkr) || fx);
+            return acc + pAmt;
+          }, 0);
+          if (agTarget.weekly_pkr_used >= agTarget.weekly_pkr_target || (weekClientPayoutsPkr + requestedPkr) > agTarget.weekly_pkr_target) {
+            return res.status(400).json({
+              error: `Weekly PKR budget cap reached (Rs. ${cleanMoneyStr(agTarget.weekly_pkr_target, 4)} PKR). Client payout requests are blocked until Monday UTC.`
+            });
+          }
+        }
+      }
+
+      item.timestamp = item.timestamp || item.created || new Date().toISOString();
+    }
+
+    // Hash password if supplied
+    if (item.password) {
+      item.password = hashPassword(item.password);
+    }
+
+    data.unshift(item);
+    writeDb(tableName, data);
+    logAudit(sessionUser.username || 'Owner', `Create ${tableName}`, `Created item #${item.id}`, tableName);
+
+    // Live real-time notifications for new payout / payment requests
+    if (tableName === 'payout_requests') {
+      const reqCur = String(item.currency || 'USD').toUpperCase();
+      const dispAmt = reqCur === 'PKR' ? `Rs. ${cleanMoneyStr(Number(item.amount || 0), 2)} PKR` : `$${cleanMoneyStr(Number(item.amount || 0), 2)}`;
+      const methodLabel = item.method || item.payment_method || item.bank_name || 'Direct Transfer';
+      if (isClient && item.agent_id) {
+        sendInstantNotification({
+          recipient_role: 'agent',
+          recipient_id: Number(item.agent_id),
+          title: `New Client Payment Request (${dispAmt})`,
+          message: `Client ${sessionUser.username} submitted payment request #${item.id} for ${dispAmt} via ${methodLabel}.`,
+          type: 'payout',
+          category: 'payments',
+          action_page: 'client-payment-requests',
+          status: 'pending',
+          actor_role: 'Client',
+          actor_name: sessionUser.username,
+          metadata: { payout_id: item.id, client_id: sessionUser.id, amount: item.amount, currency: reqCur }
+        });
+      } else if (isAgent) {
+        sendInstantNotification({
+          recipient_role: 'owner',
+          title: `New Agent Payout Request (${dispAmt})`,
+          message: `Agent ${sessionUser.username} submitted payout request #${item.id} for ${dispAmt} via ${methodLabel}.`,
+          type: 'payout',
+          category: 'payments',
+          action_page: 'payout-requests',
+          status: 'pending',
+          actor_role: 'Agent',
+          actor_name: sessionUser.username,
+          metadata: { payout_id: item.id, agent_id: sessionUser.id, amount: item.amount, currency: reqCur }
+        });
+      }
+    }
+
+    const safeItem = isAccountTable ? safeUser(item) : { ...item };
+    res.json(safeItem);
+  });
+
+  app.get(`/api/${routePath}/:id`, requireAuth, (req, res, next) => {
+    const rawId = req.params.id;
+    if (['sms-ranges', 'rate-card', 'blacklist', 'bulk', 'download', 'stats', 'earnings', 'adjust-balance', 'allocation-policy', 'no-rate-ranges', 'allocation-history'].includes(rawId)) {
+      return next();
+    }
+    let data = readDb(tableName);
+    if (!Array.isArray(data)) return res.status(404).json({ error: 'Item not found' });
+    const id = Number(rawId);
+    const item = data.find(x => x.id === id || String(x.id) === String(rawId));
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    // Verify item ownership
+    if (!isOwner) {
+      if (tableName === 'users') {
+        const targetUserId = Number(item.id);
+        const myUserId = Number(sessionUser.id);
+        const myUsername = String(sessionUser.username || '').toLowerCase();
+        const targetUsername = String(item.username || '').toLowerCase();
+        if (targetUserId !== myUserId && targetUsername !== myUsername) {
+          return res.status(403).json({ error: 'Access denied.' });
+        }
+      }
+      if (tableName === 'bank_accounts') {
+        if (isAgent && Number(item.agent_id) !== Number(sessionUser.id)) {
+          return res.status(403).json({ error: 'Forbidden. You cannot view this bank account.' });
+        }
+        if (isClient) return res.status(403).json({ error: 'Access denied.' });
+      }
+      if (tableName === 'agents') {
+        if (isAgent && Number(item.id) !== Number(sessionUser.id) && String(item.username || '').toLowerCase() !== String(sessionUser.username).toLowerCase()) {
+          return res.status(403).json({ error: 'Forbidden. You can only view your own agent profile.' });
+        }
+        if (isClient) return res.status(403).json({ error: 'Access denied.' });
+      }
+      if (tableName === 'clients') {
+        if (isAgent && Number(item.agent_id) !== Number(sessionUser.id) && String(item.agent_username || '').toLowerCase() !== String(sessionUser.username).toLowerCase()) {
+          return res.status(403).json({ error: 'Forbidden. You cannot view this client.' });
+        }
+        if (isClient && Number(item.id) !== Number(sessionUser.id) && String(item.username || '').toLowerCase() !== String(sessionUser.username).toLowerCase()) {
+          return res.status(403).json({ error: 'Forbidden. You can only view your own profile.' });
+        }
+      }
+      if (tableName === 'numbers') {
+        if (isAgent && Number(item.agent_id) !== Number(sessionUser.id)) {
+          return res.status(403).json({ error: 'Forbidden. You cannot access this number.' });
+        }
+        if (isClient && Number(item.client_id) !== Number(sessionUser.id) && (item.user && item.user.toLowerCase() !== sessionUser.username.toLowerCase())) {
+          return res.status(403).json({ error: 'Forbidden. You cannot access this number.' });
+        }
+        if (!hasWhitenoiseAccess(sessionUser) && isWhitenoiseRecord(item, buildRangesLookupMap())) {
+          return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+        }
+      }
+    } else if (tableName === 'payout_requests') {
+      if (String(item.role || item.recipient_role || '').toLowerCase() === 'client') {
+        return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
+      }
+    }
+
+    let safeItem = (tableName === 'clients' && isOwner)
+      ? safeClientForOwner(item)
+      : (isAccountTable ? safeUser(item) : { ...item });
+    if (tableName === 'numbers' && !isOwner) {
+      safeItem = sanitizeNumberForRole(safeItem, false);
+    }
+    res.json(safeItem);
+  });
+
+  app.patch(`/api/${routePath}/:id`, requireAuth, (req, res) => {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+
+    // Strict non-Owner protection: check forbidden fields
+    const FORBIDDEN_NON_OWNER_PATCH_FIELDS = [
+      'payout', 'client_payout', 'agent_rate', 'client_rate',
+      'company_rate', 'company_cost', 'cost', 'carrier_rate', 'buy_rate',
+      'sell_rate', 'commission_rate', 'commission_percent', 'payterm',
+      'client_payterm', 'balance', 'role', 'agent_id',
+      'client_id', 'permissions', 'is_owner', 'two_fa', 'two_fa_secret',
+      'two_fa_backup_codes', 'pending_2fa_secret', 'password_hash'
+    ];
+    if (!isOwner && req.body && typeof req.body === 'object') {
+      const hasForbiddenField = FORBIDDEN_NON_OWNER_PATCH_FIELDS.some(k => (k in req.body) || req.body[k] !== undefined);
+      if (hasForbiddenField) {
+        return res.status(403).json({ error: 'Forbidden. Non-owner cannot modify financial, rate, security, role, or hierarchy fields.' });
+      }
+      if (sRole === 'client' && tableName === 'clients' && req.body.status !== undefined) {
+        return res.status(403).json({ error: 'Forbidden. Clients cannot change their own account status.' });
+      }
+      const touchesAllocPolicy = ['alloc_mode', 'alloc_daily_limit', 'alloc_total_limit'].some(k => req.body[k] !== undefined);
+      if (touchesAllocPolicy) {
+        const cfg = readDb('settings') || {};
+        const allowAgt = cfg.allow_agent_alloc_config !== false;
+        const canConfigDownline = (sRole === 'agent' && tableName === 'clients' && allowAgt);
+        if (!canConfigDownline) {
+          return res.status(403).json({ error: 'Forbidden. Your account does not have authority to change number allocation mode or limits.' });
+        }
+      }
+    }
+
+    if (req.body && typeof req.body === 'object' && ['users', 'agents', 'clients'].includes(tableName)) {
+      if (req.body.alloc_mode !== undefined && req.body.alloc_mode !== '' && req.body.alloc_mode !== null) {
+        const cleanMode = String(req.body.alloc_mode).trim().toLowerCase();
+        if (cleanMode !== 'request' && cleanMode !== 'self_allocate') {
+          return res.status(400).json({ error: 'alloc_mode must be either "request" or "self_allocate".' });
+        }
+        req.body.alloc_mode = cleanMode;
+      }
+      if (req.body.alloc_daily_limit !== undefined && req.body.alloc_daily_limit !== '' && req.body.alloc_daily_limit !== null) {
+        const dl = Number(req.body.alloc_daily_limit);
+        if (isNaN(dl) || dl < 0) return res.status(400).json({ error: 'alloc_daily_limit must be 0 or a positive integer.' });
+        req.body.alloc_daily_limit = Math.floor(dl);
+      }
+      if (req.body.alloc_total_limit !== undefined && req.body.alloc_total_limit !== '' && req.body.alloc_total_limit !== null) {
+        const tl = Number(req.body.alloc_total_limit);
+        if (isNaN(tl) || tl < 0) return res.status(400).json({ error: 'alloc_total_limit must be 0 or a positive integer.' });
+        req.body.alloc_total_limit = Math.floor(tl);
+      }
+    }
+
+    let data = readDb(tableName);
+    if (!Array.isArray(data)) return res.json({});
+    const id = Number(req.params.id);
+    const idx = data.findIndex(x => x.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Item not found' });
+
+    const isAgent = sRole === 'agent';
+    const existing = data[idx];
+
+    // Ownership check on modification
+    if (!isOwner) {
+      if (tableName === 'users') {
+        return res.status(403).json({ error: 'Access denied. Only Owner can modify users.' });
+      }
+      if (tableName === 'agents') {
+        return res.status(403).json({ error: 'Forbidden. Only Owner can modify agent accounts.' });
+      }
+      if (tableName === 'clients') {
+        const isClient = sRole === 'client';
+        const canEdit = (isAgent && Number(existing.agent_id) === Number(sessionUser.id)) ||
+                        (isClient && Number(existing.id) === Number(sessionUser.id));
+        if (!canEdit) {
+          return res.status(403).json({ error: 'Forbidden. You can only modify your own clients.' });
+        }
+        if (req.body && ('whitenoise_access' in req.body)) {
+          if (!isAgent || !hasWhitenoiseAccess(sessionUser)) {
+            return res.status(403).json({ error: 'Forbidden. You do not have permission to change Whitenoise access.' });
+          }
+          req.body.whitenoise_access = Boolean(req.body.whitenoise_access);
+        }
+      } else if (req.body && ('whitenoise_access' in req.body)) {
+        return res.status(403).json({ error: 'Forbidden. Only Owner/authorized Agent may manage whitenoise_access.' });
+      }
+      if (tableName === 'numbers') {
+        const canEdit = (isAgent && Number(existing.agent_id) === Number(sessionUser.id));
+        if (!canEdit) {
+          return res.status(403).json({ error: 'Forbidden. You cannot modify this number.' });
+        }
+      }
+      if (tableName === 'payout_requests') {
+        const reqTargetRole = String(existing.role || existing.recipient_role || '').trim().toLowerCase();
+        const isSelfRequest = (reqTargetRole === sRole && Number(existing.user_id) === Number(sessionUser.id)) ||
+          String(existing.username || existing.user || '').trim().toLowerCase() === String(sessionUser.username || '').trim().toLowerCase() ||
+          reqTargetRole === 'agent';
+        const clientRec = reqTargetRole === 'client'
+          ? (readDb('clients') || []).find(c => Number(c.id) === Number(existing.client_id || existing.user_id))
+          : null;
+        const ownsClient = (existing.agent_id != null && Number(existing.agent_id) === Number(sessionUser.id))
+          || (clientRec && Number(clientRec.agent_id) === Number(sessionUser.id));
+        if (!isAgent || !ownsClient || isSelfRequest) {
+          return res.status(403).json({ error: 'Forbidden. Agents cannot approve/manage their own payout requests and can only manage downline client payouts.' });
+        }
+      }
+    } else if (tableName === 'payout_requests') {
+      const reqTargetRole = String(existing.role || existing.recipient_role || '').trim().toLowerCase();
+      if (reqTargetRole === 'client') {
+        return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
+      }
+    }
+
+    // Duplicate username check when updating username
+    if (req.body && req.body.username) {
+      if (isUsernameTaken(req.body.username, id, tableName)) {
+        return res.status(400).json({ error: 'This username already exists', detail: 'This username already exists. Please choose a different username.' });
+      }
+    }
+
+    // Owner protection: Fixed Kamran_Bhatti, cannot promote others to Owner
+    if (tableName === 'users') {
+      if (existing && (existing.username === 'Kamran_Bhatti' || existing.id === 1 || existing.role === 'Owner')) {
+        if (req.body.username && req.body.username !== 'Kamran_Bhatti') {
+          return res.status(400).json({ error: 'Owner username is fixed (Kamran_Bhatti) and cannot be changed.' });
+        }
+        if (req.body.role && req.body.role !== 'Owner') {
+          return res.status(400).json({ error: 'Owner role cannot be changed.' });
+        }
+        if (req.body.status && req.body.status !== 'active') {
+          return res.status(400).json({ error: 'Owner account cannot be suspended.' });
+        }
+      } else {
+        const reqRole = (req.body && req.body.role ? String(req.body.role).trim().toLowerCase() : '');
+        if (reqRole === 'owner' || reqRole === 'admin') {
+          return res.status(400).json({ error: 'Cannot promote user to Owner. Kamran_Bhatti is the fixed Owner.' });
+        }
+      }
+    }
+
+    if (tableName === 'numbers') {
+      // Protection: Non-owner cannot modify payout, rates, or chain on numbers
+      const rateOrChainKeys = ['payout', 'client_payout', 'agent_rate', 'client_rate', 'company_rate', 'cost', 'company_cost', 'carrier_rate', 'agent_id', 'client_id', 'status'];
+      if (!isOwner && rateOrChainKeys.some(k => req.body[k] !== undefined)) {
+        return res.status(403).json({ error: 'Forbidden. Rates and allocation chain cannot be modified via PATCH.' });
+      }
+    }
+
+    const updates = { ...req.body };
+    if (['agents', 'clients'].includes(tableName) && ('whitenoise_access' in updates)) {
+      updates.whitenoise_access = Boolean(updates.whitenoise_access);
+    }
+    if (updates.password) {
+      if (['users', 'agents', 'clients'].includes(tableName)) {
+        const cleanPass = String(updates.password).trim();
+        if (cleanPass.length < 6) {
+          return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+        }
+        updates.password = hashPassword(cleanPass);
+      } else {
+        updates.password = hashPassword(updates.password);
+      }
+    }
+
+    if (tableName === 'payout_requests') {
+      const prevStatus = String(existing?.status || '').trim().toLowerCase();
+      const nextStatus = updates.status !== undefined ? String(updates.status).trim().toLowerCase() : '';
+      if (nextStatus === 'rejected') {
+        return res.status(400).json({ error: 'Payout requests cannot be rejected. Keep as Pending or mark as Paid.' });
+      }
+      if ((prevStatus === 'paid' || prevStatus === 'completed') && (nextStatus === 'paid' || nextStatus === 'completed' || updates.amount !== undefined || updates.status !== undefined)) {
+        return res.status(409).json({ error: `Payout request #${existing.id} is already ${prevStatus} and cannot be paid or modified again.` });
+      }
+      if (nextStatus === 'pending') {
+        updates.status = 'pending';
+        updates.pending_marked_at = new Date().toISOString();
+        updates.pending_marked_by = sessionUser.username;
+      }
+    }
+
+    if (tableName === 'payout_requests' && (updates.status === 'paid' || updates.status === 'completed')) {
+      const prevStatus = existing ? existing.status : null;
+      if (prevStatus !== 'paid' && prevStatus !== 'completed') {
+        const amt = Number(existing.amount || updates.amount || 0);
+        const existingCur = String(existing.currency || 'USD').toUpperCase();
+        const fx = Number(existing.fx_usd_to_pkr) || getUsdToPkrRate();
+        const usdAmt = existingCur === 'PKR' ? (existing.amount_usd != null ? Number(existing.amount_usd) : round6(amt / fx)) : amt;
+        const pkrAmt = existingCur === 'PKR' ? round2(amt) : round2(amt * fx);
+        const targetUsername = String(existing.username || existing.user || '').trim().toLowerCase();
+        const targetRole = String(existing.role || existing.recipient_role || '').trim().toLowerCase();
+        let targetTable = null;
+        if (targetRole === 'agent') targetTable = 'agents';
+        else if (targetRole === 'client') targetTable = 'clients';
+
+        if (targetTable) {
+          const records = readDb(targetTable) || [];
+          const uIdx = records.findIndex(r => r && targetUsername && String(r.username).trim().toLowerCase() === targetUsername);
+          if (uIdx !== -1) {
+            const currentBal = Number(records[uIdx].balance || 0);
+            const currentBalPkr = records[uIdx].balance_pkr != null ? Number(records[uIdx].balance_pkr) : round2(currentBal * fx);
+            if (existingCur === 'PKR') {
+              if (currentBalPkr + 1e-6 < pkrAmt) {
+                return res.status(409).json({ error: `Insufficient user PKR balance (Rs. ${cleanMoneyStr(currentBalPkr, 4)}) for payout of Rs. ${cleanMoneyStr(pkrAmt, 4)}` });
+              }
+              records[uIdx].balance_pkr = Math.max(0, round2(currentBalPkr - pkrAmt));
+              records[uIdx].balance = Math.max(0, Math.round((currentBal - usdAmt) * 1000000) / 1000000);
+            } else {
+              if (currentBal + 1e-9 < amt) {
+                return res.status(409).json({ error: `Insufficient user balance ($${cleanMoneyStr(currentBal, 2)}) for payout of $${cleanMoneyStr(amt, 2)}` });
+              }
+              records[uIdx].balance = Math.max(0, Math.round((currentBal - amt) * 100) / 100);
+              if (targetTable === 'clients' || records[uIdx].balance_pkr != null) {
+                records[uIdx].balance_pkr = Math.max(0, round2(currentBalPkr - pkrAmt));
+              }
+            }
+            writeDb(targetTable, records);
+          } else {
+            return res.status(409).json({ error: 'Target user not found for payout deduction' });
+          }
+        }
+        updates.paid_at = new Date().toISOString();
+        updates.paid_by_username = sessionUser.username;
+        updates.paid_by_role = sessionUser.role;
+
+        // Automatically record into credit_notes
+        try {
+          const creditNotes = readDb('credit_notes') || [];
+          creditNotes.unshift({
+            id: nextId(creditNotes),
+            date: new Date().toISOString(),
+            created: new Date().toISOString(),
+            agent_id: existing.agent_id || (targetRole === 'agent' ? existing.user_id : null),
+            client_id: existing.client_id || (targetRole === 'client' ? existing.user_id : null),
+            user_id: existing.user_id || null,
+            username: existing.username || existing.user,
+            role: existing.role || targetRole,
+            payout_request_id: existing.id,
+            amount: amt,
+            amount_usd: usdAmt,
+            currency: existingCur,
+            fx_usd_to_pkr: fx,
+            term: existing.payterm || existing.term || 'Weekly',
+            reason: `Payout #${existing.id} (${existing.method || 'Direct'})`,
+            status: 'settled'
+          });
+          writeDb('credit_notes', creditNotes);
+        } catch (cnErr) {
+          console.error('Failed to log credit note:', cnErr);
+        }
+
+        const displayAmt = existingCur === 'PKR' ? `Rs. ${cleanMoneyStr(pkrAmt, 4)} PKR` : `$${cleanMoneyStr(amt, 2)}`;
+        // Instant notification to requester
+        sendInstantNotification({
+          recipient_role: targetRole,
+          recipient_id: existing.user_id || null,
+          recipient_username: existing.username || existing.user,
+          title: `Payout Approved & Paid (${displayAmt})`,
+          message: `Your payout request #${existing.id} for ${displayAmt} has been approved and paid by ${sessionUser.username}.`,
+          type: 'payout',
+          category: 'payments',
+          action_page: targetRole === 'client' ? 'payout-requests' : 'payment-requests',
+          status: 'paid',
+          actor_role: sessionUser.role,
+          actor_name: sessionUser.username,
+          metadata: { payout_id: existing.id, amount: amt, currency: existingCur }
+        });
+        if (targetRole === 'agent') {
+          sendInstantNotification({
+            recipient_role: 'owner',
+            title: `Agent Payout #${existing.id} Paid (${displayAmt})`,
+            message: `Payout request #${existing.id} for Agent ${existing.username || existing.user} (${displayAmt}) has been marked paid.`,
+            type: 'payout',
+            category: 'payments',
+            action_page: 'payout-requests',
+            status: 'paid',
+            actor_role: sessionUser.role,
+            actor_name: sessionUser.username,
+            metadata: { payout_id: existing.id }
+          });
+        }
+      }
+    } else if (tableName === 'payout_requests' && updates.status === 'pending') {
+      const targetRole = String(existing?.role || existing?.recipient_role || '').trim().toLowerCase();
+      const existingCur = String(existing?.currency || 'USD').toUpperCase();
+      const dispAmt = existingCur === 'PKR' ? `Rs. ${cleanMoneyStr(Number(existing?.amount || 0), 2)} PKR` : `$${cleanMoneyStr(Number(existing?.amount || 0), 2)}`;
+      const pendingNote = updates.notes || updates.reason || '';
+      sendInstantNotification({
+        recipient_role: targetRole,
+        recipient_id: existing?.user_id || null,
+        recipient_username: existing?.username || existing?.user,
+        title: `Payout Request #${existing?.id} Marked Pending`,
+        message: `Your payout request #${existing?.id} for ${dispAmt} is in Pending / Processing queue (${sessionUser.username})${pendingNote ? ` — ${pendingNote}` : ''}.`,
+        type: 'payout',
+        category: 'payments',
+        action_page: targetRole === 'client' ? 'payout-requests' : 'payment-requests',
+        status: 'pending',
+        actor_role: sessionUser.role,
+        actor_name: sessionUser.username,
+        metadata: { payout_id: existing?.id, amount: existing?.amount, currency: existingCur }
+      });
+    }
+
+    data[idx] = { ...data[idx], ...updates };
+    writeDb(tableName, data);
+    logAudit(sessionUser.username || 'Owner', `Update ${tableName}`, `Updated item #${id}`, tableName);
+
+    const safeItem = (tableName === 'clients' && isOwner)
+      ? safeClientForOwner(data[idx])
+      : (isAccountTable ? safeUser(data[idx]) : { ...data[idx] });
+    res.json(safeItem);
+  });
+
+  app.delete(`/api/${routePath}/:id`, requireAuth, (req, res) => {
+    let data = readDb(tableName);
+    if (!Array.isArray(data)) return res.json({ success: true });
+    const rawId = String(req.params.id);
+    const numId = Number(req.params.id);
+
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    const target = data.find(x => x.id === numId || String(x.id) === rawId);
+    if (target) {
+      if (tableName === 'payout_requests' && isOwner && String(target.role || target.recipient_role || '').toLowerCase() === 'client') {
+        return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
+      }
+      if (tableName === 'bank_accounts') {
+        if (!isOwner) {
+          if (isAgent && Number(target.agent_id) !== Number(sessionUser.id)) {
+            return res.status(403).json({ error: 'Forbidden. You can only delete your own bank accounts.' });
+          }
+          if (isClient) return res.status(403).json({ error: 'Access denied.' });
+        }
+      }
+      if (tableName === 'agents' || tableName === 'clients') {
+        if (!isOwner) {
+          return res.status(403).json({ error: 'Forbidden. Agents may only deactivate or reactivate their own downline, never delete.' });
+        }
+      }
+      if (tableName === 'users' && !isOwner) {
+        return res.status(403).json({ error: 'Access denied. Only Owner can delete users.' });
+      }
+      if (tableName === 'payout_requests' && !isOwner) {
+        const reqTargetRole = String(target.role || target.recipient_role || '').trim().toLowerCase();
+        const isSelfReq = Number(target.user_id) === Number(sessionUser.id) ||
+          String(target.username || target.user || '').trim().toLowerCase() === String(sessionUser.username || '').trim().toLowerCase() ||
+          reqTargetRole === 'agent';
+        const clientRec = reqTargetRole === 'client'
+          ? (readDb('clients') || []).find(c => Number(c.id) === Number(target.client_id || target.user_id))
+          : null;
+        const ownsClient = (target.agent_id != null && Number(target.agent_id) === Number(sessionUser.id))
+          || (clientRec && Number(clientRec.agent_id) === Number(sessionUser.id));
+        if (!isAgent || !ownsClient || isSelfReq) {
+          return res.status(403).json({ error: 'Forbidden. You can only delete downline client payout requests.' });
+        }
+      }
+
+      // Owner protection: Cannot delete Owner
+      if (tableName === 'users') {
+        if (target.username === 'Kamran_Bhatti' || target.id === 1 || (target.role || '').toLowerCase() === 'owner') {
+          return res.status(400).json({ error: 'Owner account is fixed and cannot be deleted.' });
+        }
+      }
+
+      // Deactivation required before Owner can delete an account with history
+      if (isOwner && ['users', 'agents', 'clients'].includes(tableName)) {
+        if (hasAccountHistory(tableName, target.id, target.username)) {
+          const isDeactivated = (target.status || '').toLowerCase() === 'inactive' || (target.status || '').toLowerCase() === 'deactivated';
+          if (!isDeactivated) {
+            return res.status(400).json({ error: 'Cannot delete account with existing history unless it is first deactivated (status inactive).' });
+          }
+        }
+      }
+    }
+
+    const filtered = data.filter(x => {
+      if (!isNaN(numId) && x.id === numId) return false;
+      if (String(x.id) === rawId) return false;
+      if (tableName === 'numbers' && String(x.number) === rawId) return false;
+      return true;
+    });
+    writeDb(tableName, filtered);
+    logAudit(sessionUser.username || 'Owner', `Delete ${tableName}`, `Deleted item #${rawId}`, tableName);
+    res.json({ success: true });
+  });
+}
+
+registerPaginatedCrud('numbers', 'numbers');
+
+// Number diagnostic and verification endpoint
+app.post('/api/numbers/test', (req, res) => {
+  try {
+    const rawNumber = String(req.body.number || '').trim();
+    const testType = String(req.body.test_type || 'ping').trim().toLowerCase();
+
+    if (!rawNumber) {
+      return res.status(400).json({ success: false, error: 'Phone number is required' });
+    }
+
+    const digitsOnly = rawNumber.replace(/\D/g, '');
+    if (digitsOnly.length < 6) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number format: too short' });
+    }
+
+    const numbers = readDb('numbers') || [];
+    const ranges = readDb('sms_ranges') || [];
+
+    const foundNum = numbers.find(n => {
+      const nDigits = String(n.number || '').replace(/\D/g, '');
+      return nDigits === digitsOnly || String(n.number).trim() === rawNumber;
+    });
+
+    let provider = foundNum?.provider || '';
+    let country = foundNum?.country || '';
+
+    if (!provider) {
+      const matchingRange = ranges.find(r => r.prefix && digitsOnly.startsWith(String(r.prefix).replace(/\D/g, '')));
+      if (matchingRange) {
+        provider = matchingRange.provider || '';
+        country = matchingRange.country || '';
+      }
+    }
+
+    if (!provider) {
+      provider = 'Direct Route (Tier 1)';
+    }
+
+    logAudit('Admin', 'Test Number', `Tested ${rawNumber} [${testType}] -> ${provider}`, 'Numbers');
+
+    return res.json({
+      success: true,
+      number: rawNumber,
+      test_type: testType,
+      provider: provider,
+      country: country || 'International',
+      status: 'active',
+      valid: true,
+      message: `${testType.toUpperCase()} test completed successfully on ${rawNumber}`
+    });
+  } catch (err) {
+    console.error('Number test error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Bulk number delete & unassign endpoints
+app.post('/api/numbers/bulk-delete-many', (req, res) => {
+  try {
+    const numberIds = req.body.number_ids || req.body.ids || [];
+    if (!Array.isArray(numberIds) || !numberIds.length) {
+      return res.status(400).json({ error: 'No number IDs provided' });
+    }
+    let numbers = readDb('numbers') || [];
+    const initialCount = numbers.length;
+    const idSet = new Set(numberIds.map(String));
+    numbers = numbers.filter(n => !idSet.has(String(n.id)) && !idSet.has(String(n.number)));
+    writeDb('numbers', numbers);
+    const deleted = initialCount - numbers.length;
+
+    logAudit('Admin', 'Bulk Delete Numbers', `Deleted ${deleted} numbers`, 'Numbers');
+    res.json({ success: true, deleted });
+  } catch (err) {
+    console.error('bulk-delete-many error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/numbers/bulk-unassign-many', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    if (!isOwner && !isAgent) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    const numberIds = req.body.number_ids || req.body.ids || [];
+    let numbers = readDb('numbers') || [];
+    const idSet = new Set(numberIds.map(String));
+
+    let count = 0;
+    numbers = numbers.map(n => {
+      if (idSet.has(String(n.id)) || idSet.has(String(n.number))) {
+        if (isAgent) {
+          if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
+          count++;
+          // Agent unallocates from Client back into Agent pool (agent_id remains)
+          return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+        } else if (isOwner) {
+          count++;
+          // Owner recalls downward into Owner pool
+          return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', status: 'active' };
+        }
+      }
+      return n;
+    });
+    writeDb('numbers', numbers);
+
+    res.json({ success: true, revoked: count, count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/numbers/revoke', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    if (!isOwner && !isAgent) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    const { user_id, number, count: reqCount } = req.body || {};
+    const targetUserId = Number(user_id);
+    if (!targetUserId && !number) {
+      return res.status(400).json({ error: 'user_id or number is required' });
+    }
+    let numbers = readDb('numbers') || [];
+    if (!isOwner) {
+      if (number) {
+        const prefix = String(number).replace('*', '');
+        const matching = numbers.filter(n => n.number === number || String(n.number).startsWith(prefix));
+        const inScope = matching.some(n => Number(n.agent_id) === Number(sessionUser.id));
+        if (matching.length > 0 && !inScope) {
+          return res.status(403).json({ error: 'Forbidden. You cannot revoke numbers outside your scope.' });
+        }
+      }
+      if (targetUserId) {
+        const clients = readDb('clients') || [];
+        const targetClient = clients.find(c => Number(c.id) === targetUserId);
+        if (!targetClient || Number(targetClient.agent_id) !== Number(sessionUser.id)) {
+          return res.status(403).json({ error: 'Forbidden. You can only revoke numbers from your own clients.' });
+        }
+      }
+    }
+    let revokedCount = 0;
+    const revokedByTarget = new Map();
+
+    numbers = numbers.map(n => {
+      if (reqCount && revokedCount >= reqCount) return n;
+      if (number && n.number !== number && !String(n.number).startsWith(String(number).replace('*', ''))) return n;
+      if (isAgent && Number(n.agent_id) !== Number(sessionUser.id)) return n;
+
+      const matchesUser = targetUserId
+        ? (isAgent
+            ? Number(n.client_id) === targetUserId
+            : (Number(n.client_id) === targetUserId || Number(n.agent_id) === targetUserId))
+        : true;
+      if (!matchesUser) return n;
+
+      revokedCount++;
+      const rName = n.range_name || n.country || 'Direct';
+      if (isAgent && n.client_id) {
+        const k = `client:${n.client_id}`;
+        const prev = revokedByTarget.get(k) || { role: 'client', id: Number(n.client_id), username: n.client_username || n.user || '', count: 0, ranges: new Set() };
+        prev.count++;
+        prev.ranges.add(rName);
+        revokedByTarget.set(k, prev);
+      } else if (!isAgent && n.agent_id) {
+        const k = `agent:${n.agent_id}`;
+        const prev = revokedByTarget.get(k) || { role: 'agent', id: Number(n.agent_id), username: n.agent_username || '', count: 0, ranges: new Set() };
+        prev.count++;
+        prev.ranges.add(rName);
+        revokedByTarget.set(k, prev);
+      }
+
+      if (isAgent) {
+        return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+      } else {
+        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, status: 'active' };
+      }
+    });
+
+    writeDb('numbers', numbers);
+    for (const info of revokedByTarget.values()) {
+      const rngTxt = Array.from(info.ranges).slice(0, 3).join(', ') || 'Direct';
+      sendInstantNotification({
+        recipient_role: info.role,
+        recipient_id: info.id,
+        recipient_username: info.username,
+        title: `Numbers Recalled (-${info.count}) — ${rngTxt}`,
+        message: `${info.count} number(s) in range "${rngTxt}" were recalled from your panel by ${isAgent ? (sessionUser.username || 'Agent') : 'Owner'}.`,
+        type: 'revocation',
+        category: 'numbers',
+        action_page: info.role === 'client' ? 'my-numbers' : 'my-sms-numbers',
+        count: info.count,
+        range_name: rngTxt,
+        status: 'recalled',
+        actor_role: isAgent ? 'Agent' : 'Owner',
+        actor_name: sessionUser.username || (isAgent ? 'Agent' : 'Owner')
+      });
+    }
+    res.json({ success: true, revoked: revokedCount, count: revokedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/numbers/:id/unassign', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    if (!isOwner && !isAgent) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    const rawId = String(req.params.id);
+    let numbers = readDb('numbers') || [];
+    const idx = numbers.findIndex(n => String(n.id) === rawId || String(n.number) === rawId);
+    if (idx !== -1) {
+      const n = numbers[idx];
+      const rngTxt = n.range_name || n.country || 'Direct';
+      if (isAgent) {
+        if (Number(n.agent_id) !== Number(sessionUser.id)) {
+          return res.status(403).json({ error: 'Forbidden. You can only unassign numbers from your own pool.' });
+        }
+        const prevClientId = n.client_id ? Number(n.client_id) : null;
+        const prevClientUser = n.client_username || n.user || '';
+        numbers[idx] = { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+        writeDb('numbers', numbers);
+        if (prevClientId) {
+          sendInstantNotification({
+            recipient_role: 'client',
+            recipient_id: prevClientId,
+            recipient_username: prevClientUser,
+            title: `Number Recalled (-1) — ${rngTxt}`,
+            message: `Number ${n.number} in range "${rngTxt}" was unassigned from your panel by ${sessionUser.username || 'Agent'}.`,
+            type: 'revocation',
+            category: 'numbers',
+            action_page: 'my-numbers',
+            count: 1,
+            range_name: rngTxt,
+            status: 'recalled',
+            actor_role: 'Agent',
+            actor_name: sessionUser.username || 'Agent'
+          });
+        }
+      } else if (isOwner) {
+        const prevAgentId = n.agent_id ? Number(n.agent_id) : null;
+        numbers[idx] = { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, status: 'active' };
+        writeDb('numbers', numbers);
+        if (prevAgentId) {
+          sendInstantNotification({
+            recipient_role: 'agent',
+            recipient_id: prevAgentId,
+            title: `Number Recalled (-1) — ${rngTxt}`,
+            message: `Number ${n.number} in range "${rngTxt}" was recalled from your pool by Owner.`,
+            type: 'revocation',
+            category: 'numbers',
+            action_page: 'my-sms-numbers',
+            count: 1,
+            range_name: rngTxt,
+            status: 'recalled',
+            actor_role: 'Owner',
+            actor_name: sessionUser.username || 'Owner'
+          });
+        }
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Explicit Move Number Endpoint
+app.post(['/api/numbers/:id/move', '/api/numbers/move'], requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    const numId = req.params.id ? String(req.params.id) : String(req.body.number_id || req.body.id || '');
+    const toClientId = Number(req.body.to_client_id || req.body.target_id || req.body.client_id);
+    if (!toClientId) return res.status(400).json({ error: 'Target to_client_id is required' });
+
+    if (req.body.payterm) {
+      const norm = normalizePaytermKey(req.body.payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid payterm "${req.body.payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      req.body.payterm = norm;
+    }
+    if (req.body.client_payterm) {
+      const norm = normalizePaytermKey(req.body.client_payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid client_payterm "${req.body.client_payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      req.body.client_payterm = norm;
+    }
+
+    let numbers = readDb('numbers') || [];
+    const n = numbers.find(x => String(x.id) === numId || String(x.number) === numId);
+    if (!n) return res.status(404).json({ error: 'Number not found' });
+
+    const clients = readDb('clients') || [];
+    const targetClient = clients.find(c => Number(c.id) === toClientId);
+    if (!targetClient) return res.status(404).json({ error: 'Target client not found' });
+
+    if (isAgent) {
+      if (Number(n.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You can only move numbers within your own pool.' });
+      }
+      if (Number(targetClient.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. Target client must belong to your account.' });
+      }
+    } else if (!isOwner) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    const fromClientId = n.client_id;
+    const fromClientName = n.client_name || n.user || '';
+
+    const rawMoveRate = req.body.client_rate !== undefined ? req.body.client_rate : req.body.client_payout;
+    const moveRanges = readDb('sms_ranges') || [];
+    const moveRng = moveRanges.find(r => Number(r.id) === Number(n.range_id)) || moveRanges.find(r => r.range_name === n.range_name);
+    const moveAgRate = Number(n.agent_rate || 0) || getRangeAgentRate(moveRng, n.payterm || 'Weekly');
+    const moveResolved = resolveClientRatePair({
+      agentId: targetClient.agent_id || n.agent_id || (isAgent ? sessionUser.id : null),
+      rangeId: n.range_id || (moveRng && moveRng.id),
+      rangeName: n.range_name || (moveRng && moveRng.range_name),
+      payterm: req.body.client_payterm || n.client_payterm || n.payterm || 'Weekly',
+      agentRateUsd: moveAgRate,
+      explicitClientRate: (rawMoveRate !== undefined && rawMoveRate !== null && !isNaN(Number(rawMoveRate))) ? rawMoveRate : null,
+      clientRecord: targetClient
+    });
+    if (moveResolved.error) {
+      return res.status(400).json({ error: moveResolved.error });
+    }
+    n.client_rate = moveResolved.client_rate;
+    n.client_payout = moveResolved.client_rate;
+    n.client_rate_pkr = moveResolved.client_rate_pkr;
+    n.client_currency = moveResolved.client_currency;
+    n.fx_usd_to_pkr = moveResolved.fx_usd_to_pkr;
+    n.rate_source = moveResolved.source;
+
+    n.client_id = toClientId;
+    n.client_name = targetClient.username;
+    n.client_username = targetClient.username;
+    n.user = targetClient.username;
+    n.status = 'assigned';
+    n.assigned_at = new Date().toISOString();
+    n.assigned_date = n.assigned_at;
+
+    writeDb('numbers', numbers);
+
+    const transfers = readDb('number_transfers') || [];
+    transfers.unshift({
+      id: nextId(transfers),
+      from_user_id: fromClientId,
+      from_username: fromClientName,
+      from_role: 'Client',
+      to_user_id: toClientId,
+      to_username: targetClient.username,
+      to_role: 'Client',
+      number_ids: [n.id],
+      timestamp: new Date().toISOString(),
+      action: 'move',
+      status: 'completed'
+    });
+    writeDb('number_transfers', transfers);
+
+    res.json({ success: true, number: n });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Explicit Return Number Endpoint (Holder returns number to upstream holder)
+app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-return'], requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    const rawIds = req.params.id ? [String(req.params.id)] : (req.body.number_ids || (req.body.number_id ? [String(req.body.number_id)] : (req.body.id ? [String(req.body.id)] : []))).map(String);
+    if (!rawIds.length) return res.status(400).json({ error: 'No number IDs provided' });
+    const idSet = new Set(rawIds);
+
+    let numbers = readDb('numbers') || [];
+    let count = 0;
+
+    numbers = numbers.map(n => {
+      if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return n;
+
+      if (isClient) {
+        if (Number(n.client_id) !== Number(sessionUser.id)) return n;
+        count++;
+        // Client returns to Agent pool
+        return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+      } else if (isAgent) {
+        if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
+        count++;
+        // Agent returns directly to Owner pool
+        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', status: 'active' };
+      }
+      return n;
+    });
+
+    writeDb('numbers', numbers);
+    res.json({ success: true, returned: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Single number assign (Direct 3-Tier: Owner -> Agent -> Client)
+app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    if (!isOwner && !isAgent) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    if (req.body.payterm) {
+      const norm = normalizePaytermKey(req.body.payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid payterm "${req.body.payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+    }
+    if (req.body.client_payterm) {
+      const norm = normalizePaytermKey(req.body.client_payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid client_payterm "${req.body.client_payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+    }
+
+    const rawId = String(req.params.id);
+    let numbers = readDb('numbers') || [];
+    const n = numbers.find(x => String(x.id) === rawId || String(x.number) === rawId);
+    if (!n) return res.status(404).json({ error: 'Number not found' });
+
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const isWnNumber = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+    if (isWnNumber && !hasWhitenoiseAccess(sessionUser)) {
+      return res.status(403).json({ error: isOwner ? 'Forbidden. Whitenoise access is not enabled for your account.' : 'Forbidden. Monthly Route (CDR 2) access is not enabled for your account.' });
+    }
+
+    const targetType = (req.body.target_type || 'client').toLowerCase();
+    const targetId = Number(req.body.target_id || req.body.client_id);
+    const notes = req.body.notes || '';
+    if (!targetId) return res.status(400).json({ error: 'target_id is required' });
+
+    if (isOwner) {
+      if (Boolean(n.agent_id) || Boolean(n.client_id)) {
+        return res.status(400).json({ error: 'Number is held downline. Recall it to Owner pool first before assigning.' });
+      }
+      if (targetType !== 'agent') {
+        return res.status(400).json({ error: 'Owner can only assign numbers directly to Agents. Flow is Owner -> Agent -> Client.' });
+      }
+    } else if (isAgent) {
+      if (Number(n.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You can only assign numbers inside your own pool.' });
+      }
+      if (targetType !== 'client') {
+        return res.status(400).json({ error: 'Agent can only assign numbers to Clients.' });
+      }
+    }
+
+    let toUsername = '';
+    let toRole = '';
+
+    if (targetType === 'agent') {
+      if (!isOwner) return res.status(403).json({ error: 'Only Owner can assign numbers to Agents.' });
+      const agents = readDb('agents') || [];
+      const ag = agents.find(a => Number(a.id) === targetId);
+      if (!ag) return res.status(404).json({ error: 'Agent not found' });
+      if (isWnNumber && !hasWhitenoiseAccess({ role: 'Agent', id: ag.id, whitenoise_access: ag.whitenoise_access })) {
+        return res.status(403).json({ error: `Agent "${ag.username}" does not have Whitenoise access enabled.` });
+      }
+      const payterm = isWnNumber ? 'Monthly' : normalizePaytermKey(req.body.payterm || n.payterm || 'Weekly');
+      const ptMeta = getPaytermMeta(payterm);
+      const ranges = readDb('sms_ranges') || [];
+      const rng = ranges.find(r => Number(r.id) === Number(n.range_id)) || ranges.find(r => r.range_name === n.range_name);
+      const fixedAgentRate = getRangeAgentRate(rng, ptMeta.key);
+
+      n.agent_id = targetId;
+      n.client_id = null;
+      n.client_name = '';
+      n.client_username = '';
+      n.user = '';
+      n.payterm = ptMeta.key;
+      n.payout_schedule = ptMeta.schedule;
+      n.cycle_days = ptMeta.cycle_days;
+      n.hold_days = ptMeta.hold_days;
+      if (isWnNumber) {
+        n.is_whitenoise = true;
+      }
+      n.agent_rate = fixedAgentRate;
+      n.payout = fixedAgentRate;
+      toUsername = ag.username;
+      toRole = 'Agent';
+    } else {
+      const clients = readDb('clients') || [];
+      const cl = clients.find(c => Number(c.id) === targetId);
+      if (!cl) return res.status(404).json({ error: 'Client not found' });
+
+      const effectiveAgentId = cl.agent_id || null;
+      if (isAgent && Number(cl.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You can only assign to your own clients.' });
+      }
+      if (isWnNumber && !hasWhitenoiseAccess({ role: 'Client', id: cl.id, agent_id: effectiveAgentId, whitenoise_access: cl.whitenoise_access })) {
+        return res.status(403).json({ error: isOwner ? `Client "${cl.username}" (or their parent Agent) does not have Whitenoise access enabled.` : `Client "${cl.username}" does not have CDR 2 / Monthly Route access enabled.` });
+      }
+
+      const clientPayterm = isWnNumber ? 'Monthly' : normalizePaytermKey(req.body.client_payterm || req.body.payterm || n.client_payterm || n.payterm || 'Weekly');
+      const ptMeta = getPaytermMeta(clientPayterm);
+      const ranges = readDb('sms_ranges') || [];
+      const rng = ranges.find(r => Number(r.id) === Number(n.range_id)) || ranges.find(r => r.range_name === n.range_name);
+      const agentRate = (n.agent_rate !== undefined && n.agent_rate !== null && Number(n.agent_rate) > 0)
+        ? Number(n.agent_rate)
+        : getRangeAgentRate(rng, isWnNumber ? 'Monthly' : (n.payterm || 'Weekly'));
+
+      const rawClientRate = req.body.client_rate !== undefined ? req.body.client_rate : req.body.client_payout;
+      const ratePair = resolveClientRatePair({
+        agentId: effectiveAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null),
+        rangeId: n.range_id || (rng && rng.id),
+        rangeName: n.range_name || (rng && rng.range_name),
+        payterm: ptMeta.key,
+        agentRateUsd: agentRate,
+        explicitClientRate: (rawClientRate !== undefined && rawClientRate !== null && !isNaN(Number(rawClientRate))) ? rawClientRate : null,
+        clientRecord: cl
+      });
+      if (ratePair.error) {
+        return res.status(400).json({ error: ratePair.error });
+      }
+
+      n.agent_id = effectiveAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
+      n.client_id = targetId;
+      n.client_name = cl.username;
+      n.client_username = cl.username;
+      n.user = cl.username;
+      if (isWnNumber) {
+        n.payterm = 'Monthly';
+        n.is_whitenoise = true;
+      }
+      n.client_payterm = ptMeta.key;
+      n.payout_schedule = ptMeta.schedule;
+      n.cycle_days = ptMeta.cycle_days;
+      n.hold_days = ptMeta.hold_days;
+      n.client_rate = ratePair.client_rate;
+      n.client_payout = ratePair.client_rate;
+      n.client_rate_pkr = ratePair.client_rate_pkr;
+      n.client_currency = ratePair.client_currency;
+      n.fx_usd_to_pkr = ratePair.fx_usd_to_pkr;
+      n.rate_source = ratePair.source;
+      toUsername = cl.username;
+      toRole = 'Client';
+    }
+
+    n.status = 'assigned';
+    n.assigned_at = new Date().toISOString();
+    n.assigned_date = n.assigned_at;
+    n.notes = notes;
+    writeDb('numbers', numbers);
+
+    // Instant Notification with Range, Payterm & Rate details
+    if (targetType === 'client') {
+      const rngLabel = n.range_name || n.country || 'Direct';
+      const termLabel = formatNotifPayterm(n.client_payterm || n.payterm, !!n.is_whitenoise);
+      const rateLabel = formatNotifRate(n.client_rate_pkr, 'PKR') || formatNotifRate(n.client_rate, 'USD');
+      sendInstantNotification({
+        recipient_role: 'client',
+        recipient_id: targetId,
+        recipient_username: toUsername,
+        title: `Number Added (+1) — ${rngLabel}`,
+        message: `1 number (${n.number}) added to your panel in range "${rngLabel}" on ${termLabel} term${rateLabel ? ` at ${rateLabel}` : ''} by ${sessionUser.username || 'Agent'}.`,
+        type: 'allocation',
+        category: 'numbers',
+        action_page: 'my-numbers',
+        payterm: termLabel,
+        rate_label: rateLabel,
+        status: 'added',
+        count: 1,
+        range_id: n.range_id,
+        range_name: rngLabel,
+        actor_role: 'Agent',
+        actor_name: sessionUser.username || 'Agent'
+      });
+    } else if (targetType === 'agent') {
+      const rngLabel = n.range_name || n.country || 'Direct';
+      const termLabel = formatNotifPayterm(n.payterm, !!n.is_whitenoise);
+      const rateLabel = formatNotifRate(n.agent_rate || n.payout, 'USD');
+      sendInstantNotification({
+        recipient_role: 'agent',
+        recipient_id: targetId,
+        recipient_username: toUsername,
+        title: `Number Allocated (+1) — ${rngLabel}`,
+        message: `Owner allocated 1 number (${n.number}) in range "${rngLabel}" on ${termLabel} term${rateLabel ? ` at ${rateLabel}` : ''}.`,
+        type: 'allocation',
+        category: 'numbers',
+        action_page: 'my-sms-numbers',
+        payterm: termLabel,
+        rate_label: rateLabel,
+        status: 'allocated',
+        count: 1,
+        range_id: n.range_id,
+        range_name: rngLabel,
+        actor_role: 'Owner',
+        actor_name: 'Kamran_Bhatti'
+      });
+    }
+
+    const transfers = readDb('number_transfers') || [];
+    transfers.unshift({
+      id: nextId(transfers),
+      from_user_id: null,
+      from_username: sessionUser.username || 'Owner',
+      from_role: sessionUser.role || 'Owner',
+      to_user_id: targetId,
+      to_username: toUsername,
+      to_role: toRole,
+      count: 1,
+      number_ids: [n.id],
+      service: n.app || '',
+      notes: notes,
+      timestamp: new Date().toISOString(),
+      status: 'completed'
+    });
+    writeDb('number_transfers', transfers);
+    logAudit(sessionUser.username || 'Owner', 'Assign Number', `${n.number} -> ${toRole} '${toUsername}'`, 'Numbers');
+
+    res.json({ success: true, ...n, data: n });
+  } catch (err) {
+    console.error('Assign number error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk assign selected numbers (Direct 3-Tier: Owner -> Agent -> Client)
+app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    if (!isOwner && !isAgent) {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    if (req.body.payterm) {
+      const norm = normalizePaytermKey(req.body.payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid payterm "${req.body.payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      req.body.payterm = norm;
+    }
+    if (req.body.client_payterm) {
+      const norm = normalizePaytermKey(req.body.client_payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid client_payterm "${req.body.client_payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      req.body.client_payterm = norm;
+    }
+
+    const rawNumberIds = (req.body.number_ids || []).map(Number);
+    if (!rawNumberIds.length) return res.status(400).json({ error: 'No numbers selected' });
+
+    const targetType = (req.body.target_type || 'client').toLowerCase();
+    const targetId = Number(req.body.target_id || req.body.client_id);
+    const notes = req.body.notes || '';
+    if (!targetId) return res.status(400).json({ error: 'target_id is required' });
+
+    let numbers = readDb('numbers') || [];
+    const assignableIds = rawNumberIds;
+
+    if (isOwner) {
+      const outsidePool = assignableIds.some(id => {
+        const num = numbers.find(n => Number(n.id) === id);
+        return !num || num.agent_id != null || num.client_id != null;
+      });
+      if (outsidePool) {
+        return res.status(400).json({ error: 'Selected numbers contain numbers held downline. Recall them first.' });
+      }
+      if (targetType !== 'agent') {
+        return res.status(400).json({ error: 'Owner can only assign numbers directly to Agents. Flow is Owner -> Agent -> Client.' });
+      }
+    } else if (isAgent) {
+      const outsidePool = assignableIds.some(id => {
+        const num = numbers.find(n => Number(n.id) === id);
+        return !num || Number(num.agent_id) !== Number(sessionUser.id);
+      });
+      if (outsidePool) {
+        return res.status(403).json({ error: 'Forbidden. You can only assign numbers inside your own pool.' });
+      }
+      if (targetType !== 'client') {
+        return res.status(400).json({ error: 'Agent can only assign numbers to Clients.' });
+      }
+    }
+
+    const numberIds = new Set(assignableIds);
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const hasWnSelected = numbers.some(n => numberIds.has(Number(n.id)) && isWhitenoiseRecord(n, wnRangesMap, wnTags));
+    if (hasWnSelected && !hasWhitenoiseAccess(sessionUser)) {
+      return res.status(403).json({ error: isOwner ? 'Forbidden. Whitenoise access is not enabled for your account.' : 'Forbidden. Monthly Route (CDR 2) access is not enabled for your account.' });
+    }
+
+    let toUsername = '';
+    let toRole = '';
+    let parentAgentId = null;
+
+    if (targetType === 'agent') {
+      if (!isOwner) return res.status(403).json({ error: 'Only Owner can assign numbers to Agents.' });
+      const agents = readDb('agents') || [];
+      const ag = agents.find(a => Number(a.id) === targetId);
+      if (!ag) return res.status(404).json({ error: 'Agent not found' });
+      if (hasWnSelected && !hasWhitenoiseAccess({ role: 'Agent', id: ag.id, whitenoise_access: ag.whitenoise_access })) {
+        return res.status(403).json({ error: `Agent "${ag.username}" does not have Whitenoise access enabled.` });
+      }
+      toUsername = ag.username;
+      toRole = 'Agent';
+    } else {
+      const clients = readDb('clients') || [];
+      const cl = clients.find(c => Number(c.id) === targetId);
+      if (!cl) return res.status(404).json({ error: 'Client not found' });
+      toUsername = cl.username;
+      toRole = 'Client';
+      parentAgentId = cl.agent_id || null;
+
+      if (isAgent && Number(cl.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You can only assign to your own clients.' });
+      }
+      if (hasWnSelected && !hasWhitenoiseAccess({ role: 'Client', id: cl.id, agent_id: parentAgentId, whitenoise_access: cl.whitenoise_access })) {
+        return res.status(403).json({ error: isOwner ? `Client "${cl.username}" (or their parent Agent) does not have Whitenoise access enabled.` : `Client "${cl.username}" does not have CDR 2 / Monthly Route access enabled.` });
+      }
+    }
+
+    let clientRateToSet = null;
+    let clientPaytermToSet = normalizePaytermKey(req.body.client_payterm || req.body.payterm || 'Weekly');
+    let bulkClientRecord = null;
+    if (targetType === 'client') {
+      bulkClientRecord = (readDb('clients') || []).find(c => Number(c.id) === targetId) || null;
+      const rawClientRate = req.body.client_rate !== undefined ? req.body.client_rate : req.body.client_payout;
+      if (rawClientRate !== undefined && rawClientRate !== null && !isNaN(Number(rawClientRate))) {
+        clientRateToSet = Number(rawClientRate);
+        for (const numObj of numbers) {
+          if (numberIds.has(Number(numObj.id))) {
+            const agRate = Number(numObj.agent_rate || 0);
+            if (agRate > 0 && clientRateToSet >= agRate) {
+              return res.status(400).json({
+                error: `Client rate ($${clientRateToSet}) must be strictly less than agent rate ($${agRate}) for number ${numObj.number || numObj.id}.`
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const bulkRanges = readDb('sms_ranges') || [];
+    let updatedCount = 0;
+    const assignedIds = [];
+    const bulkAssignedIso = new Date().toISOString();
+
+    numbers = numbers.map(n => {
+      if (numberIds.has(Number(n.id))) {
+        updatedCount++;
+        assignedIds.push(n.id);
+        const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+        if (targetType === 'agent') {
+          const effPayterm = isWn ? 'Monthly' : normalizePaytermKey(n.payterm || 'Weekly');
+          const ptMeta = getPaytermMeta(effPayterm);
+          const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
+          const agRate = isWn ? getRangeAgentRate(rObj, 'Monthly') : (n.agent_rate || getRangeAgentRate(rObj, ptMeta.key));
+          return {
+            ...n,
+            agent_id: targetId,
+            client_id: null,
+            client_name: '',
+            client_username: '',
+            user: '',
+            payterm: ptMeta.key,
+            payout_schedule: ptMeta.schedule,
+            cycle_days: ptMeta.cycle_days,
+            hold_days: ptMeta.hold_days,
+            ...(isWn ? { is_whitenoise: true } : {}),
+            agent_rate: agRate,
+            payout: agRate,
+            status: 'assigned',
+            assigned_at: bulkAssignedIso,
+            assigned_date: bulkAssignedIso,
+            notes
+          };
+        } else {
+          const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
+          const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
+          const effPayterm = isWn ? 'Monthly' : clientPaytermToSet;
+          const ptMeta = getPaytermMeta(effPayterm);
+          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, isWn ? 'Monthly' : (n.payterm || clientPaytermToSet));
+          const rp = resolveClientRatePair({
+            agentId: effAgId,
+            rangeId: n.range_id || (rObj && rObj.id),
+            rangeName: n.range_name || (rObj && rObj.range_name),
+            payterm: ptMeta.key,
+            agentRateUsd: agRate,
+            explicitClientRate: clientRateToSet,
+            clientRecord: bulkClientRecord
+          });
+          return {
+            ...n,
+            agent_id: effAgId,
+            client_id: targetId,
+            client_name: toUsername,
+            client_username: toUsername,
+            user: toUsername,
+            ...(isWn ? { payterm: 'Monthly', is_whitenoise: true } : {}),
+            payout_schedule: ptMeta.schedule,
+            cycle_days: ptMeta.cycle_days,
+            hold_days: ptMeta.hold_days,
+            client_rate: clientRateToSet !== null ? clientRateToSet : (rp.source === 'agent_client_rates' ? rp.client_rate : (n.client_rate ?? rp.client_rate)),
+            client_payout: clientRateToSet !== null ? clientRateToSet : (rp.source === 'agent_client_rates' ? rp.client_rate : (n.client_payout ?? n.client_rate ?? rp.client_rate)),
+            client_rate_pkr: rp.client_rate_pkr,
+            client_currency: rp.client_currency,
+            fx_usd_to_pkr: rp.fx_usd_to_pkr,
+            rate_source: rp.source,
+            client_payterm: ptMeta.key,
+            status: 'assigned',
+            assigned_at: bulkAssignedIso,
+            assigned_date: bulkAssignedIso,
+            notes
+          };
+        }
+      }
+      return n;
+    });
+
+    writeDb('numbers', numbers);
+
+    if (updatedCount > 0) {
+      const transfers = readDb('number_transfers') || [];
+      transfers.unshift({
+        id: nextId(transfers),
+        from_user_id: null,
+        from_username: 'Owner',
+        from_role: 'Owner',
+        to_user_id: targetId,
+        to_username: toUsername,
+        to_role: toRole,
+        count: updatedCount,
+        number_ids: assignedIds,
+        notes: notes,
+        timestamp: new Date().toISOString(),
+        status: 'completed'
+      });
+      writeDb('number_transfers', transfers);
+      logAudit('Owner', 'Bulk Assign Numbers', `${updatedCount} numbers -> ${toRole} '${toUsername}'`, 'Numbers');
+
+      // Instant Notification to Client or Agent with Range, Payterm & Rate
+      const affectedNums = numbers.filter(n => numberIds.has(Number(n.id)));
+      const rngNames = [...new Set(affectedNums.map(n => n.range_name || n.country || 'Direct'))].filter(Boolean);
+      const rngLabel = rngNames.length ? rngNames.join(', ') : 'Direct';
+      const firstAff = affectedNums[0] || {};
+      const termLabel = formatNotifPayterm(targetType === 'client' ? (firstAff.client_payterm || firstAff.payterm) : firstAff.payterm, !!firstAff.is_whitenoise);
+      if (targetType === 'client') {
+        const rateLabel = formatNotifRate(firstAff.client_rate_pkr, 'PKR') || formatNotifRate(firstAff.client_rate, 'USD');
+        sendInstantNotification({
+          recipient_role: 'client',
+          recipient_id: targetId,
+          recipient_username: toUsername,
+          title: `Numbers Added (+${updatedCount}) — ${rngLabel}`,
+          message: `${updatedCount} number(s) added to your panel in range "${rngLabel}" on ${termLabel} term${rateLabel ? ` at ${rateLabel}` : ''} by ${sessionUser.username || 'Agent'}.`,
+          type: 'allocation',
+          category: 'numbers',
+          action_page: 'my-numbers',
+          payterm: termLabel,
+          rate_label: rateLabel,
+          status: 'added',
+          count: updatedCount,
+          range_name: rngLabel,
+          actor_role: 'Agent',
+          actor_name: sessionUser.username || 'Agent'
+        });
+      } else if (targetType === 'agent') {
+        const rateLabel = formatNotifRate(firstAff.agent_rate || firstAff.payout, 'USD');
+        sendInstantNotification({
+          recipient_role: 'agent',
+          recipient_id: targetId,
+          recipient_username: toUsername,
+          title: `Numbers Allocated (+${updatedCount}) — ${rngLabel}`,
+          message: `Owner allocated ${updatedCount} number(s) in range "${rngLabel}" on ${termLabel} term${rateLabel ? ` at ${rateLabel}` : ''}.`,
+          type: 'allocation',
+          category: 'numbers',
+          action_page: 'my-sms-numbers',
+          payterm: termLabel,
+          rate_label: rateLabel,
+          status: 'allocated',
+          count: updatedCount,
+          range_name: rngLabel,
+          actor_role: 'Owner',
+          actor_name: 'Kamran_Bhatti'
+        });
+      }
+    }
+
+    res.json({ success: true, assigned: updatedCount });
+  } catch (err) {
+    console.error('bulk-assign-many error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Resolve effective number acquisition mode ("request" vs "self_allocate") & quota limits for any user
+function resolveAllocationPolicy(sessionUser) {
+  const sRole = String(sessionUser?.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const settings = readDb('settings') || {};
+  const allowAgtConfig = settings.allow_agent_alloc_config !== false;
+
+  if (isOwner) {
+    return {
+      mode: 'self_allocate',
+      daily_limit: 0,
+      total_limit: 0,
+      used_today: 0,
+      daily_remaining: null,
+      total_held: 0,
+      pending_requested: 0,
+      total_remaining: null,
+      can_configure_downline: true,
+      allow_agent_alloc_config: allowAgtConfig
+    };
+  }
+
+  let dbTable = 'users';
+  if (sRole === 'agent') dbTable = 'agents';
+  else if (sRole === 'client') dbTable = 'clients';
+
+  const records = readDb(dbTable) || [];
+  const acct = (Array.isArray(records) ? records.find(x => Number(x.id) === Number(sessionUser.id)) : null) || sessionUser;
+
+  const roleKey = sRole === 'agent' ? 'agent' : 'client';
+  const defaultMode = settings[`${roleKey}_alloc_mode`] === 'self_allocate' ? 'self_allocate' : 'request';
+  const defaultDaily = Math.max(0, parseInt(settings[`${roleKey}_alloc_daily_limit`], 10) || 0);
+  const defaultTotal = Math.max(0, parseInt(settings[`${roleKey}_alloc_total_limit`], 10) || 0);
+
+  const acctMode = acct.alloc_mode === 'self_allocate' || acct.alloc_mode === 'request' ? acct.alloc_mode : null;
+  const mode = acctMode || defaultMode;
+
+  const daily_limit = (acct.alloc_daily_limit !== undefined && acct.alloc_daily_limit !== null && acct.alloc_daily_limit !== '')
+    ? Math.max(0, parseInt(acct.alloc_daily_limit, 10) || 0)
+    : defaultDaily;
+  const total_limit = (acct.alloc_total_limit !== undefined && acct.alloc_total_limit !== null && acct.alloc_total_limit !== '')
+    ? Math.max(0, parseInt(acct.alloc_total_limit, 10) || 0)
+    : defaultTotal;
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const numbers = readDb('numbers') || [];
+  const total_held = Array.isArray(numbers) ? numbers.filter(n => {
+    if (!n) return false;
+    if (sRole === 'agent') return Number(n.agent_id) === Number(sessionUser.id);
+    return Number(n.client_id) === Number(sessionUser.id);
+  }).length : 0;
+
+  const requests = readDb('number_requests') || [];
+  const myRequests = Array.isArray(requests) ? requests.filter(r => {
+    if (!r) return false;
+    if (r.requester_role) {
+      return String(r.requester_role).toLowerCase() === roleKey && Number(r.requester_id) === Number(sessionUser.id);
+    }
+    if (sRole === 'client') return Number(r.client_id) === Number(sessionUser.id);
+    return Number(r.agent_id) === Number(sessionUser.id) && !r.client_id;
+  }) : [];
+
+  const pending_requested = myRequests
+    .filter(r => String(r.status || '').toLowerCase() === 'pending')
+    .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
+
+  let used_today = 0;
+  if (mode === 'request') {
+    used_today = myRequests
+      .filter(r => String(r.status || '').toLowerCase() !== 'rejected' && String(r.created || r.timestamp || '').slice(0, 10) === todayIso)
+      .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
+  } else {
+    const history = readDb('allocation_history') || [];
+    used_today = Array.isArray(history) ? history.filter(h => {
+      if (!h) return false;
+      const d = String(h.timestamp || h.created || '').slice(0, 10);
+      if (d !== todayIso) return false;
+      if (h.to_user_id != null && Number(h.to_user_id) === Number(sessionUser.id) && String(h.to_role || '').toLowerCase() === sRole) return true;
+      return String(h.to_user || '').toLowerCase() === String(sessionUser.username || '').toLowerCase()
+          && String(h.to_role || '').toLowerCase() === sRole;
+    }).reduce((sum, h) => sum + (parseInt(h.count, 10) || 0), 0) : 0;
+  }
+
+  const daily_remaining = daily_limit > 0 ? Math.max(0, daily_limit - used_today) : null;
+  const total_remaining = total_limit > 0 ? Math.max(0, total_limit - total_held - (mode === 'request' ? pending_requested : 0)) : null;
+
+  return {
+    mode,
+    daily_limit,
+    total_limit,
+    used_today,
+    daily_remaining,
+    total_held,
+    pending_requested,
+    total_remaining,
+    can_configure_downline: sRole === 'agent' && allowAgtConfig,
+    allow_agent_alloc_config: allowAgtConfig
+  };
+}
+
+app.get('/api/numbers/allocation-policy', requireAuth, (req, res) => {
+  try {
+    const policy = resolveAllocationPolicy(req.sessionUser);
+    res.json({ success: true, ...policy });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Self Range Allocation Endpoint (Agent / Client when mode === 'self_allocate')
+app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser?.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    if (!isOwner && !isAgent && !isClient) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const policy = resolveAllocationPolicy(sessionUser);
+    if (!isOwner && policy.mode !== 'self_allocate') {
+      return res.status(403).json({ error: 'Self-allocate is disabled for your account. Please use Number Request instead.' });
+    }
+
+    const { range_name, range_id, count, quantity, payterm } = req.body || {};
+    const qty = parseInt(count ?? quantity, 10) || 1;
+    if (qty <= 0) return res.status(400).json({ error: 'Quantity must be at least 1' });
+
+    if (!isOwner && policy.daily_remaining !== null && qty > policy.daily_remaining) {
+      return res.status(400).json({ error: `Daily self-allocate limit exceeded. Remaining today: ${policy.daily_remaining}` });
+    }
+    if (!isOwner && policy.total_remaining !== null && qty > policy.total_remaining) {
+      return res.status(400).json({ error: `Overall allocation limit exceeded. Remaining allowed: ${policy.total_remaining}` });
+    }
+
+    let numbers = readDb('numbers') || [];
+    const rId = range_id ? Number(range_id) : null;
+    const cleanRangeName = String(range_name || '').trim().toLowerCase();
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const matchedRng = (rId && wnRangesMap.get(rId)) || (readDb('sms_ranges') || []).find(r => cleanRangeName && String(r.range_name || r.name || '').trim().toLowerCase() === cleanRangeName);
+    const wnAllowed = hasWhitenoiseAccess(sessionUser);
+
+    if (!isOwner && !wnAllowed && ((matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(cleanRangeName))) {
+      return res.status(403).json({ error: 'Forbidden. CDR 2 / Monthly Route access is not enabled for your account.' });
+    }
+
+    const available = numbers.filter(n => {
+      if (!n || n.client_id) return false;
+      if (!isOwner && !wnAllowed && isWhitenoiseRecord(n, wnRangesMap, wnTags)) return false;
+      const nRange = String(n.range_name || n.name || '').trim().toLowerCase();
+      const nRid = n.range_id ? Number(n.range_id) : null;
+      const matchesRange = (rId && nRid === rId) || (cleanRangeName && (nRange === cleanRangeName || nRange.includes(cleanRangeName)));
+      if (!matchesRange) return false;
+
+      if (isClient) {
+        if (sessionUser.agent_id) {
+          return Number(n.agent_id) === Number(sessionUser.agent_id) && !n.client_id;
+        }
+        return !n.agent_id && !n.client_id;
+      }
+      return !n.agent_id && !n.client_id;
+    });
+
+    if (available.length === 0) {
+      return res.status(400).json({ error: 'No available numbers in this range to allocate right now.' });
+    }
+
+    const toAllocate = available.slice(0, qty);
+    const now = new Date().toISOString();
+    const targetPayterm = normalizePaytermKey(payterm || 'Weekly');
+
+    toAllocate.forEach(n => {
+      const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+      const effTerm = isWn ? 'Monthly' : targetPayterm;
+      const ptMeta = getPaytermMeta(effTerm);
+      if (isClient) {
+        n.client_id = sessionUser.id;
+        n.client_username = sessionUser.username;
+        n.client_name = sessionUser.full_name || sessionUser.username;
+        n.user = sessionUser.username;
+        n.agent_id = sessionUser.agent_id || n.agent_id || null;
+      } else if (isAgent) {
+        n.agent_id = sessionUser.id;
+        n.agent_username = sessionUser.username;
+      }
+      n.status = 'assigned';
+      n.payterm = ptMeta.key;
+      n.payout_schedule = ptMeta.schedule;
+      n.cycle_days = ptMeta.cycle_days;
+      n.hold_days = ptMeta.hold_days;
+      if (isWn) {
+        if (isClient) n.client_payterm = 'Monthly';
+        n.is_whitenoise = true;
+      }
+      n.assigned_at = now;
+      n.assigned_date = now;
+      n.updated_at = now;
+    });
+
+    writeDb('numbers', numbers);
+
+    const history = readDb('allocation_history') || [];
+    const historyEntry = {
+      id: nextId(history),
+      from_user: isClient ? (sessionUser.agent_id ? 'Agent' : 'Owner') : 'Owner',
+      to_user_id: sessionUser.id,
+      to_user: sessionUser.username,
+      to_role: sessionUser.role,
+      range_name: range_name || toAllocate[0]?.range_name || 'General Range',
+      count: toAllocate.length,
+      sample_start: toAllocate[0]?.number,
+      sample_end: toAllocate[toAllocate.length - 1]?.number,
+      timestamp: now,
+      created: now
+    };
+    history.unshift(historyEntry);
+    writeDb('allocation_history', history);
+
+    logAudit(sessionUser.username, 'Range Self-Allocation', `Self-allocated ${toAllocate.length} numbers from ${historyEntry.range_name}`, 'Numbers');
+
+    res.json({ success: true, allocated: toAllocate.length, range_name: historyEntry.range_name });
+  } catch (err) {
+    console.error('agent-allocate error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Allocate Numbers (Direct 3-Tier: Owner -> Agent -> Client)
+app.post('/api/numbers/bulk-allocate', (req, res) => {
+  try {
+    const sessionUser = getSessionUser(req);
+    const sRole = (sessionUser?.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    const targetType = (req.body.target_type || 'client').toLowerCase();
+    const targetId = Number(req.body.target_id || req.body.client_id);
+    const count = parseInt(req.body.count) || 0;
+    const rangeId = req.body.range_id ? Number(req.body.range_id) : null;
+    const rangeStart = String(req.body.range_start || '').trim();
+    const rangeEnd = String(req.body.range_end || '').trim();
+    const notes = req.body.notes || '';
+
+    if (!targetId) return res.status(400).json({ error: 'target_id is required' });
+
+    if (isOwner && targetType !== 'agent') {
+      return res.status(403).json({ error: 'Owner can only allocate numbers directly to Agents.' });
+    }
+    if (isAgent && targetType !== 'client') {
+      return res.status(403).json({ error: 'Agents can only allocate numbers to Clients.' });
+    }
+
+    const rawPayterm = String(req.body.payterm || '').trim();
+    let allocPayterm = null;
+    if (rawPayterm && rawPayterm !== 'From range' && rawPayterm !== 'from_range') {
+      const norm = normalizePaytermKey(rawPayterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid payterm "${rawPayterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      allocPayterm = norm;
+      req.body.payterm = norm;
+    }
+    if (req.body.client_payterm) {
+      const norm = normalizePaytermKey(req.body.client_payterm);
+      if (!isValidPayterm(norm)) {
+        return res.status(400).json({ error: `Invalid client_payterm "${req.body.client_payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+      }
+      req.body.client_payterm = norm;
+    }
+
+    let toUsername = '';
+    let toRole = '';
+    let parentAgentId = null;
+    let targetAgentRec = null;
+    let targetClientRec = null;
+
+    if (targetType === 'agent') {
+      const agents = readDb('agents') || [];
+      const ag = agents.find(a => Number(a.id) === targetId);
+      if (!ag) return res.status(404).json({ error: 'Agent not found' });
+      targetAgentRec = ag;
+      toUsername = ag.username;
+      toRole = 'Agent';
+    } else {
+      const clients = readDb('clients') || [];
+      const cl = clients.find(c => Number(c.id) === targetId);
+      if (!cl) return res.status(404).json({ error: 'Client not found' });
+      if (isAgent && Number(cl.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Client does not belong to your agent account.' });
+      }
+      targetClientRec = cl;
+      toUsername = cl.username;
+      toRole = 'Client';
+      parentAgentId = cl.agent_id || null;
+    }
+
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const wnAllowed = hasWhitenoiseAccess(sessionUser);
+    let numbers = readDb('numbers') || [];
+    let pool = isAgent
+      ? numbers.filter(n => Number(n.agent_id) === Number(sessionUser.id) && !n.client_id)
+      : numbers.filter(n => !n.agent_id && !n.client_id);
+
+    let rng = null;
+    if (rangeId) {
+      const ranges = readDb('sms_ranges') || [];
+      rng = ranges.find(r => Number(r.id) === rangeId);
+      if (rng) {
+        if (!isOwner && !wnAllowed && isWhitenoiseRecord(rng, wnRangesMap, wnTags)) {
+          return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
+        }
+        pool = pool.filter(n => (n.range_id && Number(n.range_id) === rangeId) || (n.country === rng.country && n.provider === rng.provider));
+      }
+    } else if (rangeStart && rangeEnd) {
+      pool = pool.filter(n => {
+        const num = String(n.number || '');
+        return num >= rangeStart && num <= rangeEnd;
+      });
+    }
+
+    if (!isOwner && !wnAllowed) {
+      pool = pool.filter(n => !isWhitenoiseRecord(n, wnRangesMap, wnTags));
+    }
+
+    if (!pool.length) {
+      return res.status(400).json({ error: 'No free numbers available for this selection' });
+    }
+
+    const allocCount = count > 0 ? Math.min(count, pool.length) : pool.length;
+    const selectedNumbers = pool.slice(0, allocCount);
+    const hasWnSelected = selectedNumbers.some(n => isWhitenoiseRecord(n, wnRangesMap, wnTags)) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags));
+
+    if (hasWnSelected) {
+      if (!wnAllowed) {
+        return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
+      }
+      if (targetType === 'agent' && targetAgentRec && !hasWhitenoiseAccess({ role: 'Agent', id: targetAgentRec.id, whitenoise_access: targetAgentRec.whitenoise_access })) {
+        return res.status(403).json({ error: `Agent "${targetAgentRec.username}" does not have Whitenoise access enabled.` });
+      }
+      if (targetType === 'client' && targetClientRec && !hasWhitenoiseAccess({ role: 'Client', id: targetClientRec.id, agent_id: targetClientRec.agent_id, whitenoise_access: targetClientRec.whitenoise_access })) {
+        return res.status(403).json({ error: `Client "${targetClientRec.username}" (or their parent Agent) does not have Whitenoise access enabled.` });
+      }
+    }
+
+    const selectedIds = new Set(selectedNumbers.map(n => n.id));
+    const rngLabel = rng ? (rng.range_name || rng.name || rng.country) : (rangeStart && rangeEnd ? `${rangeStart} - ${rangeEnd}` : 'Direct');
+
+    const allRangesBulk = readDb('sms_ranges') || [];
+    const explicitBulkRate = (req.body.client_rate !== undefined && req.body.client_rate !== null && !isNaN(Number(req.body.client_rate)))
+      ? Number(req.body.client_rate)
+      : ((req.body.client_payout !== undefined && req.body.client_payout !== null && !isNaN(Number(req.body.client_payout))) ? Number(req.body.client_payout) : null);
+
+    const bulkAllocNowIso = new Date().toISOString();
+    numbers = numbers.map(n => {
+      if (selectedIds.has(n.id)) {
+        const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags));
+        const effTargetTerm = isWn ? 'Monthly' : (allocPayterm || n.payterm || 'Weekly');
+        const ptMeta = getPaytermMeta(effTargetTerm);
+        const paytermUpdate = isWn
+          ? { payterm: 'Monthly', is_whitenoise: true, payout_schedule: 'monthly30_5', cycle_days: 30, hold_days: 5 }
+          : (allocPayterm ? { payterm: ptMeta.key, payout_schedule: ptMeta.schedule, cycle_days: ptMeta.cycle_days, hold_days: ptMeta.hold_days } : {});
+        if (targetType === 'agent') {
+          const rObj = rng || allRangesBulk.find(r => Number(r.id) === Number(n.range_id)) || allRangesBulk.find(r => r.range_name === n.range_name);
+          const agRate = getRangeAgentRate(rObj, ptMeta.key);
+          return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', user: toUsername, status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
+        } else {
+          const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
+          const rObj = rng || allRangesBulk.find(r => Number(r.id) === Number(n.range_id)) || allRangesBulk.find(r => r.range_name === n.range_name);
+          const effClientPayterm = isWn ? 'Monthly' : normalizePaytermKey(req.body.client_payterm || allocPayterm || n.client_payterm || n.payterm || 'Weekly');
+          const clPtMeta = getPaytermMeta(effClientPayterm);
+          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, isWn ? 'Monthly' : (allocPayterm || n.payterm || 'Weekly'));
+          const rp = resolveClientRatePair({
+            agentId: effAgId,
+            rangeId: n.range_id || (rObj && rObj.id),
+            rangeName: n.range_name || (rObj && rObj.range_name),
+            payterm: clPtMeta.key,
+            agentRateUsd: agRate,
+            explicitClientRate: explicitBulkRate,
+            clientRecord: targetClientRec
+          });
+          return {
+            ...n,
+            ...paytermUpdate,
+            agent_id: effAgId,
+            client_id: targetId,
+            client_name: toUsername,
+            client_username: toUsername,
+            user: toUsername,
+            client_payterm: clPtMeta.key,
+            payout_schedule: clPtMeta.schedule,
+            cycle_days: clPtMeta.cycle_days,
+            hold_days: clPtMeta.hold_days,
+            client_rate: rp.client_rate,
+            client_payout: rp.client_rate,
+            client_rate_pkr: rp.client_rate_pkr,
+            client_currency: rp.client_currency,
+            fx_usd_to_pkr: rp.fx_usd_to_pkr,
+            rate_source: rp.source,
+            status: 'assigned',
+            assigned_at: bulkAllocNowIso,
+            assigned_date: bulkAllocNowIso,
+            client_assigned_at: bulkAllocNowIso,
+            allocated_at: bulkAllocNowIso,
+            notes
+          };
+        }
+      }
+      return n;
+    });
+
+    writeDb('numbers', numbers);
+
+    const history = readDb('allocation_history') || [];
+    const entry = {
+      id: nextId(history),
+      from_user: isOwner ? 'Owner' : (sessionUser?.username || 'Agent'),
+      to_user: toUsername,
+      to_role: toRole,
+      target_id: targetId,
+      agent_id: targetType === 'agent' ? targetId : null,
+      range_id: rangeId,
+      range_name: rngLabel,
+      payterm: hasWnSelected ? 'Monthly' : (allocPayterm || (rng?.payterm || 'From range')),
+      range_start: rangeStart,
+      range_end: rangeEnd,
+      count: allocCount,
+      number_ids: Array.from(selectedIds),
+      timestamp: new Date().toISOString(),
+      status: 'completed',
+      notes: notes
+    };
+    history.unshift(entry);
+    writeDb('allocation_history', history);
+
+    logAudit(isOwner ? 'Owner' : (sessionUser?.username || 'Agent'), 'Bulk Allocate', `Allocated ${allocCount} numbers to ${toRole} '${toUsername}'`, 'Numbers');
+
+    const firstBulk = numbers.find(n => selectedIds.has(n.id)) || {};
+    const bulkTermLabel = formatNotifPayterm(
+      targetType === 'client' ? (firstBulk.client_payterm || firstBulk.payterm || entry.payterm) : (firstBulk.payterm || entry.payterm),
+      Boolean(hasWnSelected || firstBulk.is_whitenoise)
+    );
+    if (targetType === 'client') {
+      const rateLabel = formatNotifRate(firstBulk.client_rate_pkr, 'PKR') || formatNotifRate(firstBulk.client_rate, 'USD');
+      sendInstantNotification({
+        recipient_role: 'client',
+        recipient_id: targetId,
+        recipient_username: toUsername,
+        title: `Numbers Added (+${allocCount}) — ${rngLabel}`,
+        message: `${allocCount} number(s) added to your panel in range "${rngLabel}" on ${bulkTermLabel} term${rateLabel ? ` at ${rateLabel}` : ''} by ${sessionUser?.username || 'Agent'}.`,
+        type: 'allocation',
+        category: 'numbers',
+        action_page: 'my-numbers',
+        payterm: bulkTermLabel,
+        rate_label: rateLabel,
+        status: 'added',
+        count: allocCount,
+        range_id: rangeId,
+        range_name: rngLabel,
+        actor_role: 'Agent',
+        actor_name: sessionUser?.username || 'Agent'
+      });
+    } else if (targetType === 'agent') {
+      const rateLabel = formatNotifRate(firstBulk.agent_rate || firstBulk.payout, 'USD');
+      sendInstantNotification({
+        recipient_role: 'agent',
+        recipient_id: targetId,
+        recipient_username: toUsername,
+        title: `Numbers Allocated (+${allocCount}) — ${rngLabel}`,
+        message: `Owner allocated ${allocCount} number(s) in range "${rngLabel}" on ${bulkTermLabel} term${rateLabel ? ` at ${rateLabel}` : ''}.`,
+        type: 'allocation',
+        category: 'numbers',
+        action_page: 'my-sms-numbers',
+        payterm: bulkTermLabel,
+        rate_label: rateLabel,
+        status: 'allocated',
+        count: allocCount,
+        range_id: rangeId,
+        range_name: rngLabel,
+        actor_role: 'Owner',
+        actor_name: 'Kamran_Bhatti'
+      });
+    }
+
+    res.json({ success: true, allocated: allocCount, to_user: toUsername, ...entry });
+  } catch (err) {
+    console.error('bulk-allocate error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Undo Allocation Endpoint ──────────────────────────────────────
+app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser?.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    if (!isOwner && !isAgent) return res.status(403).json({ error: 'Access denied' });
+
+    const id = Number(req.params.id);
+    const history = readDb('allocation_history') || [];
+    const entry = history.find(h => Number(h.id) === id);
+    if (!entry) return res.status(404).json({ error: 'Allocation record not found' });
+    if (entry.status === 'undone') return res.status(400).json({ error: 'This allocation has already been undone.' });
+
+    if (!isOwner) {
+      const fromMe = String(entry.from_user || '').toLowerCase() === String(sessionUser.username || '').toLowerCase() ||
+                     (entry.from_user_id && Number(entry.from_user_id) === Number(sessionUser.id));
+      if (!fromMe) {
+        return res.status(403).json({ error: 'Permission denied: You can only undo allocations created by you.' });
+      }
+    }
+
+    let numbers = readDb('numbers') || [];
+    const numIdSet = new Set((entry.number_ids || []).map(Number));
+    if (numIdSet.size === 0) {
+      return res.status(400).json({ error: 'Cannot undo allocation: No specific number IDs recorded in this allocation entry.' });
+    }
+
+    const toRole = String(entry.to_role || '').toLowerCase();
+
+    if (toRole === 'agent' || (!toRole && entry.agent_id)) {
+      const downstreamAssigned = numbers.filter(n => numIdSet.has(Number(n.id)) && n.client_id);
+      if (downstreamAssigned.length > 0) {
+        return res.status(400).json({
+          error: `Cannot undo: ${downstreamAssigned.length} number(s) have already been allocated to clients downstream. Revoke them from clients first.`
+        });
+      }
+    }
+
+    let revertedCount = 0;
+    numbers = numbers.map(n => {
+      if (!numIdSet.has(Number(n.id))) return n;
+      revertedCount++;
+
+      if (toRole === 'client' || n.client_id) {
+        const agentStillAssigned = Boolean(n.agent_id || entry.agent_id);
+        return {
+          ...n,
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          client_rate: 0,
+          user: n.agent_name || n.agent_username || '',
+          status: agentStillAssigned ? 'assigned' : 'unassigned'
+        };
+      } else {
+        return {
+          ...n,
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          client_rate: 0,
+          agent_id: null,
+          agent_name: '',
+          agent_username: '',
+          agent_rate: 0,
+          user: '',
+          status: 'unassigned'
+        };
+      }
+    });
+
+    writeDb('numbers', numbers);
+    entry.status = 'undone';
+    entry.undone_at = new Date().toISOString();
+    entry.undone_by = sessionUser.username;
+    writeDb('allocation_history', history);
+
+    // Notify the recipient user
+    if (entry.to_user) {
+      sendInstantNotification({
+        recipient_role: entry.to_role ? String(entry.to_role).toLowerCase() : 'all',
+        recipient_username: entry.to_user,
+        title: 'Numbers Recalled',
+        message: `${revertedCount} number(s) from allocation #${id} were recalled by ${sessionUser.username}.`,
+        type: 'warning',
+        count: revertedCount,
+        actor_role: sessionUser.role,
+        actor_name: sessionUser.username
+      });
+    }
+
+    logAudit(sessionUser.username, 'Undo Allocation', `Undid allocation #${id} (${revertedCount} numbers recalled from ${entry.to_user})`, 'Numbers');
+    res.json({ success: true, message: `Successfully recalled ${revertedCount} number(s) back to your pool.`, count: revertedCount });
+  } catch (err) {
+    console.error('undo allocation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Export Allocation Numbers (TXT / CSV HUMEX SMS standard) ─────────
+app.get('/api/numbers/allocation-history/:id/export', requireAuth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const format = String(req.query.format || 'txt').toLowerCase();
+    const history = readDb('allocation_history') || [];
+    const entry = history.find(h => Number(h.id) === id);
+    if (!entry) return res.status(404).send('Not found');
+
+    const numbers = readDb('numbers') || [];
+    const numIdSet = new Set((entry.number_ids || []).map(Number));
+    let matched = numbers.filter(n => numIdSet.has(Number(n.id)));
+    if (!matched.length && entry.range_id) {
+      matched = numbers.filter(n => Number(n.range_id) === Number(entry.range_id)).slice(0, entry.count || 25);
+    }
+
+    if (format === 'csv') {
+      const header = 'Number,Range,Status,AssignedTo\n';
+      const rows = matched.map(n => `"${n.number}","${n.range_name || ''}","${n.status || ''}","${entry.to_user || ''}"`).join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="allocation_${id}.csv"`);
+      return res.send(header + rows);
+    } else {
+      const lines = matched.map(n => n.number).join('\n');
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Content-Disposition', `attachment; filename="allocation_${id}.txt"`);
+      return res.send(lines);
+    }
+  } catch (err) {
+    res.status(500).send('Export error: ' + err.message);
+  }
+});
+
+
+
+registerPaginatedCrud('agents', 'agents');
+registerPaginatedCrud('clients', 'clients');
+registerPaginatedCrud('users', 'users');
+
+// ── Balance Adjustment Endpoint with RBAC ──────────────────────
+app.post('/api/:table(agents|clients|users)/:id/adjust-balance', requireAuth, (req, res) => {
+  const { table, id: rawId } = req.params;
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgent = sRole === 'agent';
+
+  const rows = readDb(table) || [];
+  const targetId = Number(rawId);
+  const idx = rows.findIndex(r => r && (Number(r.id) === targetId || String(r.id) === String(rawId)));
+  if (idx === -1) {
+    return res.status(404).json({ error: `${table.slice(0, -1)} not found` });
+  }
+
+  const target = rows[idx];
+
+  // RBAC Permission checks: Agent can adjust his downline clients; Owner all
+  if (!isOwner) {
+    if (table === 'users' || table === 'agents') {
+      return res.status(403).json({ error: `Forbidden. Only Owner can adjust ${table.slice(0, -1)} balances.` });
+    }
+    if (table === 'clients') {
+      if (isAgent) {
+        if (Number(target.agent_id) !== Number(sessionUser.id) && String(target.agent_username || '').toLowerCase() !== String(sessionUser.username).toLowerCase()) {
+          return res.status(403).json({ error: 'Forbidden. You can only adjust balances for your downline clients.' });
+        }
+      } else {
+        return res.status(403).json({ error: 'Forbidden. You do not have permission to adjust balances.' });
+      }
+    }
+  }
+
+  const { operation = 'add', amount = 0, reason = '' } = req.body || {};
+  const amt = Number(amount);
+  if (isNaN(amt) || amt < 0) {
+    return res.status(400).json({ error: 'Amount must be a valid non-negative number.' });
+  }
+
+  const before = Number(target.balance || 0);
+  let after = before;
+  const op = String(operation).toLowerCase();
+  if (op === 'add') {
+    after = before + amt;
+  } else if (op === 'subtract') {
+    after = Math.max(0, before - amt);
+  } else if (op === 'set') {
+    after = amt;
+  } else {
+    return res.status(400).json({ error: 'Invalid operation. Must be add, subtract, or set.' });
+  }
+
+  after = Math.round(after * 100) / 100;
+  target.balance = after;
+  rows[idx] = target;
+  writeDb(table, rows);
+
+  logAudit(sessionUser.username, `Balance Adjustment (${op})`, `${table} #${target.id} (${target.username}): ${before} -> ${after}. Reason: ${reason}`, 'Finance');
+
+  res.json({
+    success: true,
+    before,
+    after,
+    user: safeUser(target)
+  });
+});
+
+// ── Owner-only System Announcements & Global Broadcasts ─────────
+app.post('/api/announcements', (req, res) => {
+  try {
+    let announcements = readDb('announcements');
+    if (!Array.isArray(announcements)) announcements = [];
+
+    const { title, body, type, is_popup, target_role, recipient_role, role: reqRole, sender_role } = req.body || {};
+    if (!title || !body) {
+      return res.status(400).json({ error: 'Title and body are required' });
+    }
+
+    // Role check: Only Owner / Admin can broadcast
+    const senderRoleNorm = (sender_role || '').toLowerCase();
+    if (senderRoleNorm && senderRoleNorm !== 'admin' && senderRoleNorm !== 'owner') {
+      return res.status(403).json({ error: 'Only the System Owner (Kamran_Bhatti) can send broadcasts and announcements.' });
+    }
+
+    const now = new Date().toISOString();
+    const effectiveTarget = (target_role || recipient_role || reqRole || 'All').toLowerCase();
+    const isPopup = is_popup !== false; // Default true for pop-up
+
+    const entry = {
+      id: nextId(announcements),
+      title: title.trim(),
+      body: body.trim(),
+      type: type || 'info',
+      role: effectiveTarget === 'all' ? 'All' : (effectiveTarget.charAt(0).toUpperCase() + effectiveTarget.slice(1)),
+      target_role: effectiveTarget,
+      is_popup: isPopup,
+      is_broadcast: true,
+      sender_role: 'Owner',
+      sender_name: 'Kamran_Bhatti (Owner)',
+      created: now,
+      created_at: now
+    };
+
+    announcements.unshift(entry);
+    if (announcements.length > 500) announcements.pop();
+    writeDb('announcements', announcements);
+
+    // Also trigger instant notification
+    const notif = sendInstantNotification({
+      recipient_role: effectiveTarget,
+      title: `📢 Announcement from Owner: ${entry.title}`,
+      message: entry.body,
+      type: entry.type === 'warning' ? 'warning' : 'announcement',
+      actor_role: 'Owner',
+      actor_name: 'Kamran_Bhatti',
+      metadata: {
+        is_popup: isPopup,
+        announcement_id: entry.id
+      }
+    });
+
+    // Real-time broadcast specifically for popup modal
+    broadcastWs({
+      type: 'owner_broadcast',
+      data: entry,
+      notification: notif
+    });
+
+    logAudit('Owner', 'Broadcast Announcement', `Broadcast "${entry.title}" to ${effectiveTarget}`, 'Announcements');
+
+    res.json(entry);
+  } catch (err) {
+    console.error('POST /api/announcements error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+registerPaginatedCrud('announcements', 'announcements');
+registerPaginatedCrud('audit-logs', 'audit_logs');
+
+// Clear/Wipe Audit Logs (Owner/Admin only)
+app.post(['/api/audit-logs/clear', '/api/audit-logs/wipe'], requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('audit_logs', []);
+  res.json({ success: true, message: 'Audit logs cleared successfully' });
+});
+app.delete('/api/audit-logs', requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('audit_logs', []);
+  res.json({ success: true, message: 'Audit logs cleared successfully' });
+});
+
+// Clear/Wipe Login Activity (Owner/Admin only)
+app.post(['/api/login-activity/clear', '/api/login-activity/wipe'], requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('login_activity', []);
+  res.json({ success: true, message: 'Login activity cleared successfully' });
+});
+app.delete('/api/login-activity', requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('login_activity', []);
+  res.json({ success: true, message: 'Login activity cleared successfully' });
+});
+
+// Clear/Wipe Firewall Events (Owner/Admin only)
+app.post(['/api/firewall/events/clear', '/api/firewall/events/wipe'], requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('firewall_events', []);
+  res.json({ success: true, message: 'Firewall events cleared successfully' });
+});
+app.delete('/api/firewall/events', requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('firewall_events', []);
+  res.json({ success: true, message: 'Firewall events cleared successfully' });
+});
+
+// Clear/Wipe Announcements (Owner/Admin only)
+app.post(['/api/announcements/clear', '/api/announcements/wipe'], requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('announcements', []);
+  res.json({ success: true, message: 'Announcements cleared successfully' });
+});
+app.delete('/api/announcements', requireApiRole(['owner', 'admin']), (req, res) => {
+  writeDb('announcements', []);
+  res.json({ success: true, message: 'Announcements cleared successfully' });
+});
+
+registerPaginatedCrud('firewall/events', 'firewall_events');
+registerPaginatedCrud('rate-limits', 'rate_limits');
+registerPaginatedCrud('payout-requests', 'payout_requests');
+registerPaginatedCrud('bank-accounts', 'bank_accounts');
+registerPaginatedCrud('number-transfers', 'number_transfers');
+app.post('/api/number-transfers/:id/cancel', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+
+  if (!isOwner) {
+    return res.status(403).json({ success: false, error: 'Only Owner can cancel number transfers.' });
+  }
+
+  const transferId = Number(req.params.id);
+  const transfers = readDb('number_transfers') || [];
+  const idx = transfers.findIndex(t => Number(t.id) === transferId);
+
+  if (idx === -1) {
+    return res.status(404).json({ success: false, error: 'Transfer not found.' });
+  }
+
+  transfers[idx].status = 'cancelled';
+  transfers[idx].updated_at = new Date().toISOString();
+  writeDb('number_transfers', transfers);
+
+  logAudit(sessionUser.username, 'Cancel Transfer', `Cancelled number transfer #${transferId}`, 'Transfers');
+  return res.json({ success: true, message: 'Transfer cancelled successfully', transfer: transfers[idx] });
+});
+registerPaginatedCrud('login-activity', 'login_activity');
+
+// ── Notifications Endpoints (Real-Time Role-Aware) ───────────
+app.get('/api/notifications/preferences', (req, res) => {
+  try {
+    const su = req.sessionUser;
+    if (!su) return res.status(401).json({ error: 'Unauthorized' });
+    const found = findUserAnywhere(su.username);
+    const prefs = normalizeNotificationPrefs(found && found.user && found.user.notification_prefs);
+    res.json({ success: true, preferences: prefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/notifications/preferences', (req, res) => {
+  try {
+    const su = req.sessionUser;
+    if (!su) return res.status(401).json({ error: 'Unauthorized' });
+    const found = findUserAnywhere(su.username);
+    if (!found || !found.table) return res.status(404).json({ error: 'User account not found' });
+    const rows = readDb(found.table) || [];
+    const idx = rows.findIndex(r => r && (Number(r.id) === Number(found.user.id) || String(r.username || '').toLowerCase() === String(su.username || '').toLowerCase()));
+    if (idx === -1) return res.status(404).json({ error: 'User account not found' });
+    const nextPrefs = normalizeNotificationPrefs(req.body && req.body.preferences ? req.body.preferences : req.body);
+    rows[idx].notification_prefs = nextPrefs;
+    rows[idx].updated_at = new Date().toISOString();
+    writeDb(found.table, rows);
+    res.json({ success: true, preferences: nextPrefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/notifications', (req, res) => {
+  try {
+    const notifications = readDb('notifications') || [];
+    let { role, recipient_username, unread, category, q, scope } = req.query;
+    const su = req.sessionUser;
+    const sr = normRole(su && su.role);
+    let list = Array.isArray(notifications) ? [...notifications] : [];
+
+    if (sr !== 'owner') {
+      list = list.filter(n => canAccessNotification(su, n));
+    } else {
+      const wantAll = scope === 'all' || role === 'all';
+      if (!wantAll) {
+        const targetRoleFilter = role ? String(role).trim().toLowerCase() : 'owner';
+        list = list.filter(n => {
+          const nr = String(n.recipient_role ?? n.role ?? '').trim().toLowerCase();
+          if (targetRoleFilter === 'owner' || targetRoleFilter === 'admin') {
+            return !nr || nr === 'owner' || nr === 'admin' || nr === 'all';
+          }
+          return nr === targetRoleFilter;
+        });
+      }
+      if (recipient_username) {
+        const uname = String(recipient_username).trim().toLowerCase();
+        list = list.filter(n => {
+          const targetU = n.recipient_username ?? n.username;
+          if (!targetU) return true;
+          return String(targetU).trim().toLowerCase() === uname;
+        });
+      }
+    }
+
+    const unreadCount = list.filter(n => !n.read).length;
+
+    if (unread === 'true' || unread === '1') {
+      list = list.filter(n => !n.read);
+    }
+    if (category && category !== 'all') {
+      const cat = String(category).trim().toLowerCase();
+      list = list.filter(n => inferNotifCategory(n.type, n.category || n.metadata?.category) === cat);
+    }
+    if (q && String(q).trim()) {
+      const needle = String(q).trim().toLowerCase();
+      list = list.filter(n =>
+        String(n.title || '').toLowerCase().includes(needle) ||
+        String(n.message || n.body || '').toLowerCase().includes(needle) ||
+        String(n.range_name || '').toLowerCase().includes(needle) ||
+        String(n.actor_name || '').toLowerCase().includes(needle)
+      );
+    }
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const start = (page - 1) * limit;
+
+    const sliced = list.slice(start, start + limit).map(n => ({
+      ...n,
+      category: inferNotifCategory(n.type, n.category || n.metadata?.category)
+    }));
+
+    res.json({
+      data: sliced,
+      unread_count: unreadCount,
+      total: list.length
+    });
+  } catch (err) {
+    console.error('GET /api/notifications error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function canAccessNotification(su, n) {
+  if (!su || !n) return false;
+  const sr = normRole(su.role);
+  if (sr === 'owner') return true;
+  const rid = Number(su.id);
+  const uname = String(su.username || '').trim().toLowerCase();
+  const nr = String(n.recipient_role ?? n.role ?? '').trim().toLowerCase();
+  if (nr && nr !== 'all' && nr !== sr) return false;
+  const targetId = n.recipient_id ?? n.user_id;
+  if (targetId != null && Number(targetId) !== rid) return false;
+  const targetUname = n.recipient_username ?? n.username;
+  if (targetUname && String(targetUname).trim().toLowerCase() !== uname) return false;
+  return true;
+}
+
+// Professional Header Notification & Live Activity Feed (Strictly Top 5 for Bell Dropdown)
+app.get('/api/notifications/header-feed', (req, res) => {
+  try {
+    const notifications = readDb('notifications') || [];
+    let smsLog = readDb('sms_log') || [];
+    const announcements = readDb('announcements') || [];
+    const su = req.sessionUser;
+    const sr = normRole(su && su.role);
+    const isOwner = sr === 'owner';
+
+    const uname = String(su.username || '').trim().toLowerCase();
+    const rid = isOwner ? (req.query.recipient_id ? Number(req.query.recipient_id) : null) : Number(su.id);
+
+    // Filter user notifications strictly by role
+    let filteredNotifs = Array.isArray(notifications) ? [...notifications] : [];
+    if (!isOwner) {
+      filteredNotifs = filteredNotifs.filter(n => canAccessNotification(su, n));
+    } else {
+      filteredNotifs = filteredNotifs.filter(n => {
+        const nr = String(n.recipient_role ?? n.role ?? '').trim().toLowerCase();
+        return !nr || nr === 'owner' || nr === 'admin' || nr === 'all';
+      });
+    }
+    const unreadCount = filteredNotifs.filter(n => !n.read).length;
+
+    // Strictly scope SMS records by session role & chain (NEVER fall back to all logs when 0 matches)
+    let recentSms = [];
+    if (sr === 'owner') {
+      recentSms = Array.isArray(smsLog) ? [...smsLog] : [];
+    } else if (sr === 'agent' && rid) {
+      recentSms = (Array.isArray(smsLog) ? smsLog : []).filter(s => Number(s.agent_id) === rid);
+    } else if (sr === 'client') {
+      recentSms = (Array.isArray(smsLog) ? smsLog : []).filter(s =>
+        (rid && Number(s.client_id) === rid) ||
+        (uname && ((s.user || '').toLowerCase() === uname || (s.client_username || '').toLowerCase() === uname))
+      );
+    } else {
+      recentSms = [];
+    }
+
+    const latestSms = recentSms.slice(0, 8).map(s => {
+      if (sr === 'client') {
+        return { ...s, cli: serverMaskCli(s.cli || s.app || s.sender) };
+      }
+      return s;
+    });
+
+    // Latest Owner Broadcast (for popup modal on open)
+    const latestBroadcast = (Array.isArray(announcements) ? announcements : []).find(a => {
+      const aRole = (a.role || a.target_role || 'All').toLowerCase();
+      const isOwnerPost = a.sender_role === 'Owner' || a.sender_role === 'Admin' || a.is_broadcast;
+      const targetMatches = aRole === 'all' || aRole === sr || sr === 'owner';
+      return isOwnerPost && targetMatches && a.is_popup !== false;
+    }) || null;
+
+    const foundUser = findUserAnywhere(su.username);
+    const prefs = normalizeNotificationPrefs(foundUser && foundUser.user && foundUser.user.notification_prefs);
+
+    res.json({
+      notifications: filteredNotifs.slice(0, 5).map(n => ({
+        ...n,
+        category: inferNotifCategory(n.type, n.category || n.metadata?.category)
+      })),
+      unread_count: unreadCount,
+      total_count: filteredNotifs.length,
+      preferences: prefs,
+      recent_sms: latestSms,
+      latest_broadcast: latestBroadcast
+    });
+  } catch (err) {
+    console.error('GET /api/notifications/header-feed error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/notifications', (req, res) => {
+  try {
+    const notif = sendInstantNotification(req.body);
+    res.json({ success: true, notification: notif });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/notifications/:id/read', (req, res) => {
+  try {
+    const notifications = readDb('notifications') || [];
+    const id = Number(req.params.id);
+    const notif = notifications.find(n => n.id === id);
+    if (!notif) return res.status(404).json({ error: 'Notification not found' });
+    if (!canAccessNotification(req.sessionUser, notif)) {
+      return res.status(403).json({ error: 'Forbidden. Cannot mark another user notification as read.' });
+    }
+    notif.read = true;
+    writeDb('notifications', notifications);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/notifications/mark-all-read', (req, res) => {
+  try {
+    let notifications = readDb('notifications') || [];
+    const su = req.sessionUser;
+    const sr = normRole(su && su.role);
+    const { role, recipient_id, recipient_username, scope } = req.body || {};
+    const ownerTargetRole = sr === 'owner'
+      ? (scope === 'all' ? '' : String(role || 'owner').trim().toLowerCase())
+      : '';
+    notifications.forEach(n => {
+      if (sr !== 'owner') {
+        if (canAccessNotification(su, n)) n.read = true;
+      } else {
+        let match = true;
+        const nr = String(n.recipient_role ?? n.role ?? '').trim().toLowerCase();
+        if (ownerTargetRole) {
+          if (ownerTargetRole === 'owner' || ownerTargetRole === 'admin') {
+            if (nr && nr !== 'owner' && nr !== 'admin' && nr !== 'all') match = false;
+          } else if (nr !== 'all' && nr !== ownerTargetRole) {
+            match = false;
+          }
+        }
+        if (recipient_id && n.recipient_id && Number(n.recipient_id) !== Number(recipient_id)) match = false;
+        if (recipient_username && n.recipient_username && n.recipient_username.toLowerCase() !== String(recipient_username).toLowerCase()) match = false;
+        if (match) n.read = true;
+      }
+    });
+    writeDb('notifications', notifications);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Wipe & Clean Notifications endpoints (Clean & Wipe functionality)
+app.all(['/api/notifications/wipe', '/api/notifications/clear'], (req, res) => {
+  try {
+    let notifications = readDb('notifications') || [];
+    let { role, recipient_id, recipient_username, clear_all } = req.body || {};
+    const su = req.sessionUser;
+    const sr = normRole(su && su.role);
+    if (sr !== 'owner') {
+      role = sr;
+      recipient_id = su ? su.id : null;
+      recipient_username = su ? su.username : '';
+      clear_all = false;
+    } else {
+      if (req.query && req.query.clear_all === 'true') clear_all = true;
+      if (req.body && req.body.clear_all === true) clear_all = true;
+      if (!clear_all && !role && !recipient_id && !recipient_username) {
+        role = 'owner';
+      }
+    }
+    const r = (role || '').trim().toLowerCase();
+    const uname = (recipient_username || '').trim().toLowerCase();
+    const rid = recipient_id ? Number(recipient_id) : null;
+
+    const initialLen = notifications.length;
+    if (clear_all && (sr === 'owner')) {
+      notifications = [];
+    } else if (sr !== 'owner') {
+      notifications = notifications.filter(n => !canAccessNotification(su, n));
+    } else {
+      notifications = notifications.filter(n => {
+        const nr = String(n.recipient_role ?? n.role ?? '').trim().toLowerCase();
+        let match = false;
+        if (r === 'owner' || r === 'admin') {
+          if (!nr || nr === 'owner' || nr === 'admin') match = true;
+        } else if (r && nr === r) {
+          match = true;
+        }
+        if (rid && n.recipient_id && Number(n.recipient_id) === rid) match = true;
+        if (uname && n.recipient_username && n.recipient_username.toLowerCase() === uname) match = true;
+        return !match;
+      });
+    }
+
+    writeDb('notifications', notifications);
+    res.json({ success: true, count: initialLen - notifications.length, message: 'Notifications cleared successfully' });
+  } catch (err) {
+    console.error('Clear notifications error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/notifications/:id', (req, res) => {
+  try {
+    let notifications = readDb('notifications') || [];
+    const id = Number(req.params.id);
+    const notif = notifications.find(n => n.id === id);
+    if (notif && !canAccessNotification(req.sessionUser, notif)) {
+      return res.status(403).json({ error: 'Forbidden. Cannot delete another user notification.' });
+    }
+    const initialLen = notifications.length;
+    notifications = notifications.filter(n => n.id !== id);
+    if (notifications.length !== initialLen) {
+      writeDb('notifications', notifications);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Strict range-level available pool helper (never steals numbers from unrelated ranges)
+function getRangeFreePool(numbers, { isAgent, agentId, rangeId, rangeName, country, provider }) {
+  const list = Array.isArray(numbers) ? numbers : [];
+  const basePool = isAgent
+    ? list.filter(n => n && Number(n.agent_id) === Number(agentId) && !n.client_id)
+    : list.filter(n => n && !n.agent_id && !n.client_id);
+
+  const rIdNum = rangeId ? Number(rangeId) : null;
+  const rNameLow = String(rangeName || '').trim().toLowerCase();
+  const cLow = String(country || '').trim().toLowerCase();
+  const pLow = String(provider || '').trim().toLowerCase();
+
+  if (!rIdNum && !rNameLow && !(cLow && pLow)) return basePool;
+
+  return basePool.filter(n => {
+    if (rIdNum && n.range_id && Number(n.range_id) === rIdNum) return true;
+    if (rNameLow) {
+      const nRng = String(n.range_name || n.range || n.name || '').trim().toLowerCase();
+      if (nRng && nRng === rNameLow) return true;
+    }
+    if (!rIdNum && cLow && pLow) {
+      return String(n.country || '').trim().toLowerCase() === cLow && String(n.provider || '').trim().toLowerCase() === pLow;
+    }
+    return false;
+  });
+}
+
+// ── Live Number Requests & Hierarchy Dispatch Control ─────────────
+app.get('/api/agent-requests', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    if (!isOwner && !isAgent && !isClient) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const requests = readDb('number_requests') || [];
+    let list = Array.isArray(requests) ? [...requests] : [];
+
+    if (isClient) {
+      list = list.filter(r => Number(r.client_id) === Number(sessionUser.id));
+    } else if (isAgent) {
+      list = list.filter(r => Number(r.agent_id) === Number(sessionUser.id));
+    }
+
+    const { status, scope } = req.query;
+    if (scope === 'downline') {
+      if (isAgent) {
+        list = list.filter(r => String(r.requester_role || '').toLowerCase() === 'client' || !!r.client_id);
+      }
+    } else if (scope === 'mine') {
+      if (isAgent) {
+        list = list.filter(r => (!r.requester_role || String(r.requester_role).toLowerCase() === 'agent') && !r.client_id);
+      }
+    }
+
+    if (status) {
+      list = list.filter(r => (r.status || '').toLowerCase() === String(status).toLowerCase());
+    }
+
+    // Enrich each request with exact real-time Free Pool count for that range
+    const allNumbers = readDb('numbers') || [];
+    const allRanges = readDb('sms_ranges') || [];
+    const rangeById = new Map(allRanges.map(rg => [Number(rg.id), rg]));
+    const enriched = list.map(r => {
+      const rg = r.range_id ? rangeById.get(Number(r.range_id)) : null;
+      const pool = getRangeFreePool(allNumbers, {
+        isAgent: isAgent && scope !== 'mine',
+        agentId: isAgent ? sessionUser.id : null,
+        rangeId: r.range_id || (rg && rg.id) || null,
+        rangeName: r.range_name || (rg && (rg.range_name || rg.name)) || '',
+        country: r.country || (rg && rg.country) || '',
+        provider: (rg && rg.provider) || ''
+      });
+      return { ...r, free_count: pool.length };
+    });
+
+    res.json(enriched);
+  } catch (err) {
+    console.error('GET /api/agent-requests error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function handleCreateNumberRequest(req, res) {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    if (!isOwner && !isAgent && !isClient) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const policy = resolveAllocationPolicy(sessionUser);
+    if (!isOwner && policy.mode !== 'request') {
+      return res.status(403).json({ error: 'Number Request mode is disabled for your account. Use Self-Allocate instead.' });
+    }
+
+    const { range_id, range_name, country, app_name, service_name, quantity, urgency, notes, payterm } = req.body || {};
+    const qty = parseInt(quantity, 10);
+    if (!qty || qty <= 0) {
+      return res.status(400).json({ error: 'Please enter a valid quantity of numbers' });
+    }
+
+    if (!isOwner && policy.daily_remaining !== null && qty > policy.daily_remaining) {
+      return res.status(400).json({ error: `Daily request limit exceeded. Remaining today: ${policy.daily_remaining}` });
+    }
+    if (!isOwner && policy.total_remaining !== null && qty > policy.total_remaining) {
+      return res.status(400).json({ error: `Overall number limit exceeded. Remaining allowed: ${policy.total_remaining}` });
+    }
+
+    // Derive requester identity securely from session (Direct 3-tier: Owner -> Agent -> Client)
+    const requesterRole = isClient ? 'Client' : (isAgent ? 'Agent' : 'Owner');
+    const clRecFresh = isClient ? ((readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser) : null;
+    const effectiveClientId = isClient ? sessionUser.id : null;
+    const effectiveClientUsername = isClient ? sessionUser.username : '';
+    const effectiveAgentId = isClient ? (clRecFresh?.agent_id || sessionUser.agent_id || null) : (isAgent ? sessionUser.id : (Number(req.body.agent_id) || null));
+    const effectiveAgentUsername = isClient ? (clRecFresh?.agent_username || sessionUser.agent_username || (effectiveAgentId ? `Agent #${effectiveAgentId}` : '')) : (isAgent ? sessionUser.username : (req.body.agent_username || ''));
+
+    const requests = readDb('number_requests') || [];
+    const ranges = readDb('sms_ranges') || [];
+    const matchedRng = ranges.find(r => range_id && Number(r.id) === Number(range_id)) ||
+                       ranges.find(r => range_name && String(r.range_name || r.name || '').trim().toLowerCase() === String(range_name).trim().toLowerCase()) ||
+                       null;
+    const resolvedRangeId = matchedRng ? Number(matchedRng.id) : (range_id ? Number(range_id) : null);
+    const resolvedRangeName = ((matchedRng && (matchedRng.range_name || matchedRng.name)) || range_name || country || 'General SMS Range').trim();
+    const wnTags = getWhitenoiseProviderTags();
+    const isWnRange = (matchedRng && isWhitenoiseRecord(matchedRng, null, wnTags)) || isWhitenoiseText(resolvedRangeName);
+
+    if (isWnRange && !isOwner && !hasWhitenoiseAccess(sessionUser)) {
+      return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
+    }
+    const effectivePayterm = isWnRange ? 'Monthly' : normalizePaytermKey(payterm || 'Weekly');
+    if (!isWnRange && payterm && !isValidPayterm(effectivePayterm)) {
+      return res.status(400).json({ error: `Invalid payterm "${payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+    }
+    const reqPtMeta = getPaytermMeta(effectivePayterm);
+
+    let stampedClientRatePkr = null;
+    let stampedFx = getUsdToPkrRate();
+    if (isClient) {
+      const acr = effectiveAgentId ? findAgentClientRate(effectiveAgentId, resolvedRangeId, resolvedRangeName) : null;
+      if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) {
+        return res.status(400).json({ error: 'This range is not enabled by your Agent yet.' });
+      }
+      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
+      if (!allowedQty.includes(qty)) {
+        return res.status(400).json({ error: `Allowed request quantities for "${resolvedRangeName}": ${allowedQty.join(' or ')} numbers.` });
+      }
+      const dailyRangeLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const sameRangeToday = requests.filter(r => {
+        if (!r || Number(r.client_id) !== Number(sessionUser.id)) return false;
+        if (String(r.status || '').toLowerCase() === 'rejected') return false;
+        if (String(r.created || r.timestamp || '').slice(0, 10) !== todayIso) return false;
+        if (resolvedRangeId && r.range_id && Number(r.range_id) === resolvedRangeId) return true;
+        return String(r.range_name || '').trim().toLowerCase() === resolvedRangeName.toLowerCase();
+      }).length;
+      if (sameRangeToday >= dailyRangeLimit) {
+        return res.status(429).json({ error: `Daily limit reached: you can only submit ${dailyRangeLimit} request(s) per day for "${resolvedRangeName}".` });
+      }
+      stampedClientRatePkr = getAgentRangeClientPkrRate(acr, reqPtMeta.key);
+    }
+
+    const now = new Date().toISOString();
+    const cleanApp = (app_name || service_name || 'General Application').trim();
+    const cleanDisplayActor = isClient ? sessionUser.username : String(effectiveAgentUsername || sessionUser.username || 'User').trim();
+    const entry = {
+      id: nextId(requests),
+      requester_role: requesterRole,
+      requester_id: sessionUser.id,
+      requester_username: sessionUser.username,
+      client_id: effectiveClientId,
+      client_username: effectiveClientUsername,
+      agent_id: effectiveAgentId,
+      agent_username: cleanDisplayActor,
+      range_id: resolvedRangeId,
+      range_name: resolvedRangeName,
+      country: ((matchedRng && matchedRng.country) || country || '').trim(),
+      app_name: cleanApp,
+      payterm: reqPtMeta.key,
+      payout_schedule: reqPtMeta.schedule,
+      cycle_days: reqPtMeta.cycle_days,
+      hold_days: reqPtMeta.hold_days,
+      ...(isWnRange ? { is_whitenoise: true } : {}),
+      quantity: qty,
+      urgency: urgency || 'normal',
+      notes: (notes || '').trim(),
+      ...(stampedClientRatePkr !== null ? { client_rate_pkr: stampedClientRatePkr, client_currency: 'PKR', fx_usd_to_pkr: stampedFx } : {}),
+      status: 'pending',
+      created: now,
+      timestamp: now
+    };
+
+    requests.unshift(entry);
+    writeDb('number_requests', requests);
+
+    // Instant WebSocket broadcast for Live Requests Queue
+    broadcastWs({
+      type: 'agent_number_request',
+      data: entry,
+      message: `New Number Request: ${requesterRole} ${sessionUser.username} requested ${entry.quantity} numbers in range "${entry.range_name}"`
+    });
+
+    // Send instant notification directly up the 3-tier chain (Client -> Agent -> Owner)
+    const reqTermLabel = formatNotifPayterm(entry.payterm, Boolean(entry.is_whitenoise));
+    if (isClient) {
+      const clRateLbl = formatNotifRate(entry.client_rate_pkr, 'PKR');
+      sendInstantNotification({
+        recipient_role: effectiveAgentId ? 'agent' : 'owner',
+        recipient_id: effectiveAgentId || null,
+        title: `New Client Number Request (+${entry.quantity})`,
+        message: `Client ${sessionUser.username} requested ${entry.quantity} number(s) in range "${entry.range_name}" on ${reqTermLabel} term${clRateLbl ? ` at ${clRateLbl}` : ''}.`,
+        type: 'request',
+        category: 'requests',
+        action_page: effectiveAgentId ? 'client-requests' : 'agent-requests',
+        payterm: reqTermLabel,
+        rate_label: clRateLbl,
+        status: 'pending',
+        count: entry.quantity,
+        range_id: entry.range_id,
+        range_name: entry.range_name,
+        actor_role: 'Client',
+        actor_name: sessionUser.username,
+        metadata: { request_id: entry.id, client_id: sessionUser.id }
+      });
+    } else {
+      sendInstantNotification({
+        recipient_role: 'owner',
+        recipient_id: null,
+        title: `New Agent Number Request (+${entry.quantity})`,
+        message: `Agent ${entry.agent_username} requested ${entry.quantity} number(s) in range "${entry.range_name}" on ${reqTermLabel} term for ${cleanApp}.`,
+        type: 'request',
+        category: 'requests',
+        action_page: 'agent-requests',
+        payterm: reqTermLabel,
+        status: 'pending',
+        count: entry.quantity,
+        range_id: entry.range_id,
+        range_name: entry.range_name,
+        actor_role: 'Agent',
+        actor_name: entry.agent_username,
+        metadata: { request_id: entry.id, agent_id: entry.agent_id, app_name: cleanApp }
+      });
+    }
+
+    res.json({ success: true, request: entry });
+  } catch (err) {
+    console.error('POST /api/numbers/request error:', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.post('/api/agent-requests', requireAuth, (req, res) => {
+  const sRole = (req.sessionUser?.role || '').toLowerCase();
+  if (sRole === 'client') {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+  return handleCreateNumberRequest(req, res);
+});
+
+app.post(['/api/numbers/request', '/api/client-requests'], requireAuth, handleCreateNumberRequest);
+
+// Fulfill / Accept Request & Dispatch Numbers downline
+app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    const id = Number(req.params.id);
+    const requests = readDb('number_requests') || [];
+    const reqItem = requests.find(r => r.id === id);
+    if (!reqItem) return res.status(404).json({ error: 'Request not found' });
+
+    const reqRoleLower = String(reqItem.requester_role || (reqItem.client_id ? 'client' : 'agent')).toLowerCase();
+    const canFulfill = isOwner
+      || (isAgent && Number(reqItem.agent_id) === Number(sessionUser.id) && reqRoleLower === 'client');
+
+    if (!canFulfill) {
+      return res.status(403).json({ error: 'Forbidden. You can only fulfill requests submitted by your downline.' });
+    }
+
+    const payload = req.body || {};
+    const allocCount = parseInt(payload.count || reqItem.quantity, 10) || reqItem.quantity;
+    const rangeId = payload.range_id ? Number(payload.range_id) : reqItem.range_id;
+    const ranges = readDb('sms_ranges') || [];
+    const rng = ranges.find(r => Number(r.id) === Number(rangeId)) || null;
+    const rangeLabel = (payload.range_name || (rng && (rng.range_name || rng.name)) || reqItem.range_name || 'Direct Range').trim();
+    const prefix = (rng && rng.prefix) || '';
+    const country = (rng && rng.country) || reqItem.country || 'International';
+    const provider = (rng && rng.provider) || 'Manual';
+
+    let numbers = readDb('numbers') || [];
+    let allocatedNumbers = [];
+
+    const isClientReq = reqRoleLower === 'client' && !!reqItem.client_id;
+    const reqClientRec = isClientReq ? ((readDb('clients') || []).find(c => Number(c.id) === Number(reqItem.client_id)) || null) : null;
+    const effAgentId = reqItem.agent_id || (isAgent ? sessionUser.id : null);
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const hasSelectedWn = Array.isArray(payload.selected_number_ids) && payload.selected_number_ids.some(sid => {
+      const found = numbers.find(n => Number(n.id) === Number(sid));
+      return found && isWhitenoiseRecord(found, wnRangesMap, wnTags);
+    });
+    const isWnReq = Boolean(reqItem.is_whitenoise) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags)) || isWhitenoiseText(rangeLabel) || isWhitenoiseText(provider) || hasSelectedWn;
+
+    if (isWnReq) {
+      if (isAgent && !hasWhitenoiseAccess(sessionUser)) {
+        return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
+      }
+      if (isClientReq) {
+        if (!hasWhitenoiseAccess({ role: 'Client', id: reqItem.client_id, agent_id: effAgentId, whitenoise_access: reqClientRec?.whitenoise_access })) {
+          return res.status(403).json({ error: `Client "${reqItem.client_username || reqItem.client_id}" does not have Whitenoise access enabled.` });
+        }
+      } else if (effAgentId) {
+        const agRec = (readDb('agents') || []).find(a => Number(a.id) === Number(effAgentId));
+        if (!hasWhitenoiseAccess({ role: 'Agent', id: effAgentId, whitenoise_access: agRec?.whitenoise_access })) {
+          return res.status(403).json({ error: `Agent "${reqItem.agent_username || effAgentId}" does not have Whitenoise access enabled.` });
+        }
+      }
+    }
+
+    const targetPayterm = isWnReq ? 'Monthly' : normalizePaytermKey(reqItem.payterm || payload.payterm || 'Weekly');
+    const targetRecipientName = isClientReq ? reqItem.client_username : reqItem.agent_username;
+    const fixedRngAgRate = getRangeAgentRate(rng, targetPayterm);
+
+    const applyAssignment = (n) => {
+      const assignNowIso = new Date().toISOString();
+      const isWn = isWnReq || isWhitenoiseRecord(n, wnRangesMap, wnTags);
+      const effPayterm = isWn ? 'Monthly' : targetPayterm;
+      const ptMeta = getPaytermMeta(effPayterm);
+      const agRate = Number(n.agent_rate || 0) || (isWn ? getRangeAgentRate(rng, 'Monthly') : fixedRngAgRate);
+      if (!isClientReq) {
+        return {
+          ...n,
+          agent_id: effAgentId,
+          agent_name: reqItem.agent_username || (isAgent ? sessionUser.username : ''),
+          agent_username: reqItem.agent_username || (isAgent ? sessionUser.username : ''),
+          agent_rate: agRate || n.agent_rate,
+          payout: agRate || n.payout,
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          user: targetRecipientName,
+          payterm: ptMeta.key,
+          payout_schedule: ptMeta.schedule,
+          cycle_days: ptMeta.cycle_days,
+          hold_days: ptMeta.hold_days,
+          ...(isWn ? { is_whitenoise: true } : {}),
+          status: 'assigned',
+          assigned_at: assignNowIso,
+          assigned_date: assignNowIso,
+          allocated_at: assignNowIso,
+          notes: `Allocated via Request #${reqItem.id}`
+        };
+      }
+      const rp = resolveClientRatePair({
+        agentId: effAgentId,
+        rangeId: n.range_id || rangeId,
+        rangeName: n.range_name || rangeLabel,
+        payterm: ptMeta.key,
+        agentRateUsd: agRate,
+        explicitClientRate: null,
+        clientRecord: reqClientRec
+      });
+      return {
+        ...n,
+        agent_id: effAgentId,
+        agent_name: reqItem.agent_username || (isAgent ? sessionUser.username : ''),
+        agent_rate: agRate || n.agent_rate,
+        client_id: reqItem.client_id,
+        client_name: reqItem.client_username || '',
+        client_username: reqItem.client_username || '',
+        client_rate: rp.client_rate,
+        client_payout: rp.client_rate,
+        client_rate_pkr: rp.client_rate_pkr,
+        client_currency: rp.client_currency,
+        fx_usd_to_pkr: rp.fx_usd_to_pkr,
+        rate_source: rp.source,
+        user: targetRecipientName,
+        payterm: ptMeta.key,
+        client_payterm: ptMeta.key,
+        payout_schedule: ptMeta.schedule,
+        cycle_days: ptMeta.cycle_days,
+        hold_days: ptMeta.hold_days,
+        ...(isWn ? { is_whitenoise: true } : {}),
+        status: 'assigned',
+        assigned_at: assignNowIso,
+        assigned_date: assignNowIso,
+        client_assigned_at: assignNowIso,
+        allocated_at: assignNowIso,
+        notes: `Allocated via Request #${reqItem.id}`
+      };
+    };
+
+    if (Array.isArray(payload.selected_number_ids) && payload.selected_number_ids.length > 0) {
+      const selectedIdSet = new Set(payload.selected_number_ids.map(Number));
+      for (const n of numbers) {
+        if (selectedIdSet.has(Number(n.id))) {
+          if (n.client_id || (!isClientReq && n.agent_id)) {
+            return res.status(400).json({ error: `Number ${n.number} is already allocated.` });
+          }
+          if (isAgent && Number(n.agent_id) !== Number(sessionUser.id)) {
+            return res.status(403).json({ error: `Number ${n.number} does not belong to your agent pool.` });
+          }
+        }
+      }
+      numbers = numbers.map(n => {
+        if (selectedIdSet.has(Number(n.id))) {
+          const updated = applyAssignment(n);
+          allocatedNumbers.push(updated);
+          return updated;
+        }
+        return n;
+      });
+    } else if (payload.numbers_text && String(payload.numbers_text).trim()) {
+      const rawLines = String(payload.numbers_text).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const validLines = rawLines.filter(l => !/^(number|phone|msisdn|mobile)$/i.test(l));
+      const baseNumId = nextId(numbers);
+      validLines.forEach((num, idx) => {
+        const item = applyAssignment({
+          id: baseNumId + idx,
+          number: num,
+          range_id: rangeId || null,
+          range_name: rangeLabel,
+          prefix: prefix,
+          app: 'Unassigned',
+          country: country,
+          provider: provider,
+          otp_limit: (rng && rng.otp_limit) || 0,
+          last_sms: null,
+          sms_count: 0
+        });
+        numbers.push(item);
+        allocatedNumbers.push(item);
+      });
+    } else {
+      const pool = getRangeFreePool(numbers, {
+        isAgent,
+        agentId: isAgent ? sessionUser.id : null,
+        rangeId,
+        rangeName: rangeLabel,
+        country,
+        provider
+      });
+
+      if (!allocCount || allocCount <= 0) {
+        return res.status(400).json({ error: 'Please enter a valid number of DID lines to allocate.' });
+      }
+      if (pool.length === 0) {
+        return res.status(400).json({ error: `No free numbers available in range "${rangeLabel}". Free pool: 0.` });
+      }
+      if (pool.length < allocCount) {
+        return res.status(400).json({ error: `Only ${pool.length} free number(s) available in range "${rangeLabel}". Please enter ${pool.length} or fewer.` });
+      }
+
+      const selected = pool.slice(0, allocCount);
+      const selectedIds = new Set(selected.map(n => n.id));
+      numbers = numbers.map(n => {
+        if (selectedIds.has(n.id)) {
+          const updated = applyAssignment(n);
+          allocatedNumbers.push(updated);
+          return updated;
+        }
+        return n;
+      });
+    }
+
+    writeDb('numbers', numbers);
+
+    // Generate Stamped File
+    const cleanActor = String(targetRecipientName || 'Account').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanRange = String(rangeLabel || 'Range').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `Batch_${cleanActor}_${cleanRange}_${Date.now()}.txt`;
+    const filePath = path.join(AGENT_FILES_DIR, filename);
+
+    const fileContent = [
+      '================================================================================',
+      'HUMAX SMS GATEWAY — OFFICIAL NUMBER ALLOCATION FILE',
+      '================================================================================',
+      `RECIPIENT       : ${targetRecipientName} (${reqItem.requester_role || 'Agent'})`,
+      `REQUEST ID      : #${reqItem.id}`,
+      `RANGE NAME      : ${rangeLabel}`,
+      `COUNTRY / PREFIX: ${country} (${prefix || 'Standard'})`,
+      `TOTAL ALLOCATED : ${allocatedNumbers.length}`,
+      `DISPATCHED DATE : ${new Date().toISOString()}`,
+      `DISPATCHED BY   : ${sessionUser.username} (${sessionUser.role})`,
+      '================================================================================',
+      '',
+      '--- NUMBERS LIST ---',
+      ...allocatedNumbers.map(n => n.number),
+      '',
+      '================================================================================',
+      'END OF BATCH ALLOCATION FILE',
+      '================================================================================'
+    ].join('\n');
+
+    fs.writeFileSync(filePath, fileContent, 'utf-8');
+
+    // Update request state
+    reqItem.status = 'approved';
+    reqItem.fulfilled_at = new Date().toISOString();
+    reqItem.fulfilled_by = payload.fulfilled_by || sessionUser.username;
+    reqItem.requested_quantity = Number(reqItem.quantity || allocatedNumbers.length);
+    reqItem.fulfilled_count = allocatedNumbers.length;
+    reqItem.partial = allocatedNumbers.length < Number(reqItem.quantity || 0);
+    reqItem.fulfilled_range = rangeLabel;
+    reqItem.batch_filename = filename;
+    writeDb('number_requests', requests);
+
+    // Record in number_transfers
+    const transfers = readDb('number_transfers') || [];
+    transfers.unshift({
+      id: nextId(transfers),
+      from_user_id: sessionUser.id,
+      from_username: sessionUser.username,
+      from_role: sessionUser.role,
+      to_user_id: isClientReq ? reqItem.client_id : reqItem.agent_id,
+      to_username: targetRecipientName,
+      to_role: reqItem.requester_role || 'Agent',
+      count: allocatedNumbers.length,
+      number_ids: allocatedNumbers.map(n => n.id),
+      batch_filename: filename,
+      notes: `Fulfillment of Request #${reqItem.id} (${rangeLabel})`,
+      timestamp: new Date().toISOString(),
+      status: 'completed'
+    });
+    writeDb('number_transfers', transfers);
+
+    // Record in allocation_history
+    const history = readDb('allocation_history') || [];
+    history.unshift({
+      id: nextId(history),
+      from_user: sessionUser.username,
+      to_user_id: isClientReq ? reqItem.client_id : reqItem.agent_id,
+      to_user: targetRecipientName,
+      to_role: reqItem.requester_role || 'Agent',
+      range_id: rangeId,
+      range_name: rangeLabel,
+      count: allocatedNumbers.length,
+      batch_filename: filename,
+      timestamp: new Date().toISOString(),
+      status: 'completed',
+      notes: `Request #${reqItem.id} fulfilled`
+    });
+    writeDb('allocation_history', history);
+
+    // Send instant live notification to requester (and live confirmation to Owner for Agent requests)
+    const notifyRole = isClientReq ? 'client' : 'agent';
+    const notifyId = isClientReq ? reqItem.client_id : reqItem.agent_id;
+    const firstFulfilled = allocatedNumbers[0] || {};
+    const fulTermLabel = formatNotifPayterm(
+      isClientReq ? (firstFulfilled.client_payterm || firstFulfilled.payterm || reqItem.payterm) : (firstFulfilled.payterm || reqItem.payterm),
+      Boolean(firstFulfilled.is_whitenoise || reqItem.is_whitenoise)
+    );
+    const fulRateLabel = isClientReq
+      ? (formatNotifRate(firstFulfilled.client_rate_pkr || reqItem.client_rate_pkr, 'PKR') || formatNotifRate(firstFulfilled.client_rate, 'USD'))
+      : formatNotifRate(firstFulfilled.agent_rate || firstFulfilled.payout, 'USD');
+
+    sendInstantNotification({
+      recipient_role: notifyRole,
+      recipient_id: notifyId,
+      recipient_username: targetRecipientName,
+      title: `Request Approved (+${allocatedNumbers.length}) — ${rangeLabel}`,
+      message: `Your request #${reqItem.id} was approved! ${allocatedNumbers.length} number(s) added in range "${rangeLabel}" on ${fulTermLabel} term${fulRateLabel ? ` at ${fulRateLabel}` : ''}.`,
+      type: 'allocation',
+      category: 'numbers',
+      action_page: isClientReq ? 'my-numbers' : 'my-sms-numbers',
+      payterm: fulTermLabel,
+      rate_label: fulRateLabel,
+      status: 'approved',
+      count: allocatedNumbers.length,
+      range_id: rangeId,
+      range_name: rangeLabel,
+      actor_role: sessionUser.role,
+      actor_name: sessionUser.username,
+      metadata: { request_id: reqItem.id, filename: filename }
+    });
+
+    if (!isClientReq) {
+      sendInstantNotification({
+        recipient_role: 'owner',
+        title: `Agent Request #${reqItem.id} Accepted (+${allocatedNumbers.length})`,
+        message: `Dispatched ${allocatedNumbers.length} number(s) in range "${rangeLabel}" (${fulTermLabel}) to Agent ${targetRecipientName}.`,
+        type: 'request_approved',
+        category: 'requests',
+        action_page: 'agent-requests',
+        payterm: fulTermLabel,
+        rate_label: fulRateLabel,
+        status: 'approved',
+        count: allocatedNumbers.length,
+        range_id: rangeId,
+        range_name: rangeLabel,
+        actor_role: sessionUser.role,
+        actor_name: sessionUser.username,
+        metadata: { request_id: reqItem.id, agent_id: reqItem.agent_id }
+      });
+    }
+
+    broadcastWs({
+      type: 'agent_request_updated',
+      data: reqItem,
+      message: `Request #${reqItem.id} fulfilled: ${allocatedNumbers.length} numbers dispatched to ${targetRecipientName}`
+    });
+
+    res.json({
+      success: true,
+      request: reqItem,
+      allocated: allocatedNumbers.length,
+      batch_filename: filename
+    });
+  } catch (err) {
+    console.error('fulfill agent-request error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reject Number Request
+app.post('/api/agent-requests/:id/reject', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    const id = Number(req.params.id);
+    const requests = readDb('number_requests') || [];
+    const reqItem = requests.find(r => r.id === id);
+    if (!reqItem) return res.status(404).json({ error: 'Request not found' });
+
+    const reqRoleLower = String(reqItem.requester_role || (reqItem.client_id ? 'client' : 'agent')).toLowerCase();
+    const canReject = isOwner
+      || (isAgent && Number(reqItem.agent_id) === Number(sessionUser.id) && reqRoleLower === 'client');
+
+    if (!canReject) {
+      return res.status(403).json({ error: 'Forbidden. You can only reject requests submitted by your downline.' });
+    }
+
+    const reason = (req.body && req.body.reason) || 'Capacity unavailable at this time';
+    reqItem.status = 'rejected';
+    reqItem.rejected_at = new Date().toISOString();
+    reqItem.rejected_reason = reason;
+    writeDb('number_requests', requests);
+
+    const isClientReq = reqRoleLower === 'client' && !!reqItem.client_id;
+    const notifyRole = isClientReq ? 'client' : 'agent';
+    const notifyId = isClientReq ? reqItem.client_id : reqItem.agent_id;
+    const notifyName = isClientReq ? reqItem.client_username : reqItem.agent_username;
+    const rejTermLabel = formatNotifPayterm(reqItem.payterm, Boolean(reqItem.is_whitenoise));
+
+    sendInstantNotification({
+      recipient_role: notifyRole,
+      recipient_id: notifyId,
+      recipient_username: notifyName,
+      title: `Number Request #${reqItem.id} Rejected`,
+      message: `Your request for ${reqItem.quantity} number(s) in range "${reqItem.range_name}" (${rejTermLabel}) was declined. Reason: ${reason}`,
+      type: 'request_rejected',
+      category: 'requests',
+      action_page: isClientReq ? 'sms-overview' : 'sms-ranges',
+      payterm: rejTermLabel,
+      status: 'rejected',
+      count: reqItem.quantity,
+      range_name: reqItem.range_name,
+      actor_role: sessionUser.role,
+      actor_name: sessionUser.username,
+      metadata: { request_id: reqItem.id, reason }
+    });
+
+    if (!isClientReq) {
+      sendInstantNotification({
+        recipient_role: 'owner',
+        title: `Agent Request #${reqItem.id} Rejected`,
+        message: `Request for ${reqItem.quantity} number(s) in "${reqItem.range_name}" by Agent ${notifyName} was rejected. Reason: ${reason}`,
+        type: 'request_rejected',
+        category: 'requests',
+        action_page: 'agent-requests',
+        payterm: rejTermLabel,
+        status: 'rejected',
+        count: reqItem.quantity,
+        range_name: reqItem.range_name,
+        actor_role: sessionUser.role,
+        actor_name: sessionUser.username,
+        metadata: { request_id: reqItem.id, agent_id: reqItem.agent_id, reason }
+      });
+    }
+
+    broadcastWs({
+      type: 'agent_request_updated',
+      data: reqItem
+    });
+
+    res.json({ success: true, request: reqItem });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Download / View Allocation File
+app.get('/api/agent-requests/:id/file', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = (sessionUser.role || '').toLowerCase();
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+
+    const id = Number(req.params.id);
+    const requests = readDb('number_requests') || [];
+    const reqItem = requests.find(r => r.id === id);
+    if (!reqItem || !reqItem.batch_filename) {
+      return res.status(404).json({ error: 'File not found for this request' });
+    }
+
+    const canAccess = isOwner ||
+      (isAgent && Number(reqItem.agent_id) === Number(sessionUser.id));
+
+    if (!canAccess) {
+      return res.status(403).json({ error: 'Forbidden. You do not have permission to download this allocation file.' });
+    }
+
+    const filePath = path.join(AGENT_FILES_DIR, reqItem.batch_filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File does not exist on disk' });
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${reqItem.batch_filename}"`);
+    fs.createReadStream(filePath).pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Registration Requests (Owner only)
+app.get('/api/registration-requests', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const data = readDb('registration_requests') || [];
+  if (req.query.page || (req.query.limit && req.query.limit !== '10000')) {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100;
+    const start = (page - 1) * limit;
+    return res.json({ data: data.slice(start, start + limit), total: data.length });
+  }
+  res.json(data);
+});
+
+app.post('/api/registration-requests', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const data = readDb('registration_requests') || [];
+  if (req.body && req.body.username && isUsernameTaken(req.body.username)) {
+    return res.status(400).json({ error: 'This username already exists', detail: 'This username already exists. Please choose a different username.' });
+  }
+  const item = { id: nextId(data), ...req.body, status: req.body.status || 'pending', timestamp: new Date().toISOString() };
+  data.unshift(item);
+  writeDb('registration_requests', data);
+  res.json(item);
+});
+
+app.patch('/api/registration-requests/:id', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const data = readDb('registration_requests') || [];
+  const id = Number(req.params.id);
+  const idx = data.findIndex(x => x.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Request not found' });
+  data[idx] = { ...data[idx], ...req.body };
+  writeDb('registration_requests', data);
+  res.json(data[idx]);
+});
+
+app.delete('/api/registration-requests/:id', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const data = readDb('registration_requests') || [];
+  const id = Number(req.params.id);
+  writeDb('registration_requests', data.filter(x => x.id !== id));
+  res.json({ success: true });
+});
+
+// CR API Connections
+app.get('/api/cr-api-connections', (req, res) => {
+  const data = readDb('cr_api_connections') || [];
+  const mapped = data.map(c => ({
+    ...c,
+    token_masked: (c.token && c.token.length > 8) ? `${c.token.slice(0, 4)}…${c.token.slice(-4)}` : (c.token ? '••••••••' : '—')
+  }));
+  if (req.query.page) {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const start = (page - 1) * limit;
+    return res.json({ data: mapped.slice(start, start + limit), total: mapped.length });
+  }
+  res.json({ data: mapped, total: mapped.length });
+});
+
+app.post('/api/cr-api-connections', (req, res) => {
+  const data = readDb('cr_api_connections') || [];
+  const { panel_name, panel_url, token } = req.body || {};
+  if (!panel_url || !token) {
+    return res.status(400).json({ error: 'panel_url and token are required' });
+  }
+
+  const cleanUrl = String(panel_url).trim().replace(/\/+$/, '');
+  const cleanToken = String(token).trim();
+  const cleanName = String(panel_name || 'CR API Panel').trim();
+
+  // Strict duplicate check: token or same panel URL + name
+  const dupToken = data.find(c => String(c.token || '').trim() === cleanToken);
+  if (dupToken) {
+    return res.status(409).json({
+      error: `Connection with this API token already exists ("${dupToken.panel_name}")`,
+      detail: `This API token is already attached to connection #${dupToken.id} (${dupToken.panel_name}).`
+    });
+  }
+
+  const dupUrl = data.find(c => String(c.panel_url || '').trim().replace(/\/+$/, '') === cleanUrl && String(c.panel_name || '').trim().toLowerCase() === cleanName.toLowerCase());
+  if (dupUrl) {
+    return res.status(409).json({
+      error: `Connection with URL "${cleanUrl}" and name "${cleanName}" already exists`,
+      detail: `A connection matching this panel URL and name is already registered (#${dupUrl.id}).`
+    });
+  }
+
+  const item = {
+    id: nextId(data),
+    panel_name: cleanName,
+    panel_url: cleanUrl,
+    token: cleanToken,
+    interval: req.body.interval ? Math.max(3, parseInt(req.body.interval)) : 5,
+    active: req.body.active !== undefined ? Boolean(req.body.active) : true,
+    last_pulled_at: null,
+    last_status: 'Not polled yet',
+    total_pulled: 0,
+    created: new Date().toISOString()
+  };
+  data.push(item);
+  writeDb('cr_api_connections', data);
+  logAudit('Admin', 'Add CR API Connection', `Connected '${item.panel_name}' (Provider registered)`, 'CR API');
+  pollSingleCrApiConnection(item.id, true).catch(e => console.error('CR API poll error:', e));
+  res.json(item);
+});
+
+app.post('/api/cr-api-connections/:id/pull', async (req, res) => {
+  const id = Number(req.params.id);
+  const conns = readDb('cr_api_connections') || [];
+  const conn = conns.find(c => c.id === id);
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+  try {
+    const pulled = await pollSingleCrApiConnection(id, true);
+    const updated = (readDb('cr_api_connections') || []).find(c => c.id === id);
+    res.json({ success: true, pulled: pulled || 0, status: updated?.last_status || 'OK' });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.patch('/api/cr-api-connections/:id', (req, res) => {
+  const data = readDb('cr_api_connections') || [];
+  const id = Number(req.params.id);
+  const idx = data.findIndex(x => x.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Connection not found' });
+  data[idx] = { ...data[idx], ...req.body };
+  writeDb('cr_api_connections', data);
+  res.json(data[idx]);
+});
+
+app.delete('/api/cr-api-connections/:id', (req, res) => {
+  const data = readDb('cr_api_connections') || [];
+  const id = Number(req.params.id);
+  writeDb('cr_api_connections', data.filter(x => x.id !== id));
+  logAudit('Admin', 'Delete CR API Connection', `Deleted connection #${id}`, 'CR API');
+  res.json({ success: true });
+});
+
+// Whitenoise Connections (Owner only via API_RULES)
+app.get('/api/whitenoise-connections', (req, res) => {
+  const data = readDb('whitenoise_connections') || [];
+  const numbers = readDb('numbers') || [];
+  const wnRangesMap = buildRangesLookupMap();
+  const wnTags = getWhitenoiseProviderTags();
+  const wnNumbers = numbers.filter(n => isWhitenoiseRecord(n, wnRangesMap, wnTags));
+
+  const mapped = data.map(c => {
+    const tag = String(c.provider_tag || 'Whitenoise').trim().toLowerCase();
+    const matchedCount = wnNumbers.filter(n => {
+      const p = String(n.provider || '').toLowerCase();
+      return !tag || p.includes(tag) || p.includes('whitenoise');
+    }).length;
+    const ak = String(c.api_key || '').trim();
+    const maskedKey = ak.length > 6 ? `${ak.slice(0, 3)}••••••${ak.slice(-3)}` : (ak ? '••••••' : '—');
+    const maskedCookie = (c.web_cookie && c.web_cookie.length > 6)
+      ? `${c.web_cookie.slice(0, 4)}••••${c.web_cookie.slice(-4)}`
+      : (c.web_cookie ? '••••••' : 'None');
+    const { api_key: _ak, web_cookie: _wc, ...safeRest } = c;
+    return {
+      ...safeRest,
+      panel_name: c.panel_name || c.name || 'Whitenoise Main',
+      poll_interval_sec: c.interval || c.poll_interval_sec || 240,
+      pool_interval_sec: c.pool_interval_sec || 540,
+      api_key_masked: maskedKey,
+      cookie_masked: maskedCookie,
+      has_api_key: Boolean(c.api_key),
+      has_web_cookie: Boolean(c.web_cookie),
+      numbers_count: matchedCount
+    };
+  });
+
+  if (req.query.page) {
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const start = (page - 1) * limit;
+    return res.json({ data: mapped.slice(start, start + limit), total: mapped.length });
+  }
+  res.json({ data: mapped, total: mapped.length });
+});
+
+app.post('/api/whitenoise-connections', (req, res) => {
+  const body = req.body || {};
+  const data = readDb('whitenoise_connections') || [];
+  const name = String(body.name || body.panel_name || 'Whitenoise Provider').trim();
+  const mode = String(body.mode || 'api_key').trim().toLowerCase() === 'hybrid' ? 'hybrid' : 'api_key';
+  const apiKey = String(body.api_key || '').trim();
+  const webCookie = String(body.web_cookie || body.cookie || '').trim();
+  const baseUrl = String(body.base_url || 'https://api.whitenoise.one').trim().replace(/\/+$/, '');
+  const webUrl = String(body.web_url || 'https://whitenoise.one/sms').trim().replace(/\/+$/, '');
+  const providerTag = String(body.provider_tag || 'Whitenoise').trim() || 'Whitenoise';
+
+  if (mode === 'api_key' && apiKey.length < 6) {
+    return res.status(400).json({ error: 'Valid Whitenoise api_key (12 chars) is required for API Key mode.' });
+  }
+  if (mode === 'hybrid' && !webCookie && apiKey.length < 6) {
+    return res.status(400).json({ error: 'Hybrid mode requires a Web Session Cookie (web_cookie) and/or api_key.' });
+  }
+
+  const dup = data.find(c =>
+    (apiKey && String(c.api_key || '').trim() === apiKey) ||
+    (String(c.name || '').trim().toLowerCase() === name.toLowerCase())
+  );
+  if (dup) {
+    return res.status(409).json({ error: `Whitenoise connection "${dup.name}" with matching name or API key already exists.` });
+  }
+
+  const convModeRaw = String(body.conversion_mode || 'on_client_match').trim().toLowerCase();
+  const conversionMode = ['on_client_match', 'always', 'off'].includes(convModeRaw) ? convModeRaw : 'on_client_match';
+  const effInterval = Math.max(5, parseInt(body.interval ?? body.poll_interval_sec, 10) || 240);
+  const effPoolInterval = Math.max(60, parseInt(body.pool_interval_sec, 10) || 540);
+
+  const item = {
+    id: nextId(data),
+    name,
+    panel_name: name,
+    mode,
+    api_key: apiKey,
+    web_cookie: webCookie,
+    base_url: baseUrl,
+    web_url: webUrl,
+    provider_tag: providerTag,
+    service_name: String(body.service_name || '').trim(),
+    interval: effInterval,
+    poll_interval_sec: effInterval,
+    client_interval_sec: Math.max(10, parseInt(body.client_interval_sec, 10) || effInterval),
+    pool_interval_sec: effPoolInterval,
+    concurrency: Math.min(10, Math.max(1, parseInt(body.concurrency, 10) || 4)),
+    max_numbers_per_cycle: Math.min(200, Math.max(1, parseInt(body.max_numbers_per_cycle, 10) || 20)),
+    since: Math.max(60, parseInt(body.since, 10) || 600),
+    conversion_mode: conversionMode,
+    active: body.active !== undefined ? Boolean(body.active) : true,
+    last_pulled_at: null,
+    last_status: 'Not polled yet',
+    total_pulled: 0,
+    total_conversions: 0,
+    created: new Date().toISOString()
+  };
+
+  data.push(item);
+  writeDb('whitenoise_connections', data);
+  logAudit(req.sessionUser?.username || 'Owner', 'Add Whitenoise Connection', `Added Whitenoise '${item.name}' (${item.mode}, Monthly 30/5 {W})`, 'Whitenoise');
+
+  const { api_key: _ak, web_cookie: _wc, ...safeItem } = item;
+  res.json({
+    ...safeItem,
+    api_key_masked: apiKey ? `${apiKey.slice(0, 3)}••••••${apiKey.slice(-3)}` : '—',
+    has_api_key: Boolean(apiKey),
+    has_web_cookie: Boolean(webCookie),
+    numbers_count: 0
+  });
+});
+
+app.patch('/api/whitenoise-connections/:id', (req, res) => {
+  const data = readDb('whitenoise_connections') || [];
+  const id = Number(req.params.id);
+  const idx = data.findIndex(x => Number(x.id) === id);
+  if (idx === -1) return res.status(404).json({ error: 'Whitenoise connection not found' });
+
+  const body = req.body || {};
+  const next = { ...data[idx] };
+  if (body.name !== undefined || body.panel_name !== undefined) {
+    const nm = String(body.name ?? body.panel_name ?? '').trim();
+    if (nm) { next.name = nm; next.panel_name = nm; }
+  }
+  if (body.mode !== undefined) next.mode = String(body.mode).trim().toLowerCase() === 'hybrid' ? 'hybrid' : 'api_key';
+  if (body.api_key !== undefined && String(body.api_key).trim()) next.api_key = String(body.api_key).trim();
+  const rawCk = body.web_cookie ?? body.cookie;
+  if (rawCk !== undefined && String(rawCk).trim()) next.web_cookie = String(rawCk).trim();
+  if (body.base_url !== undefined && String(body.base_url).trim()) next.base_url = String(body.base_url).trim().replace(/\/+$/, '');
+  if (body.web_url !== undefined && String(body.web_url).trim()) next.web_url = String(body.web_url).trim().replace(/\/+$/, '');
+  if (body.provider_tag !== undefined && String(body.provider_tag).trim()) next.provider_tag = String(body.provider_tag).trim();
+  if (body.service_name !== undefined) next.service_name = String(body.service_name).trim();
+  if (body.interval !== undefined || body.poll_interval_sec !== undefined) {
+    const iv = Math.max(5, parseInt(body.interval ?? body.poll_interval_sec, 10) || next.interval || 240);
+    next.interval = iv;
+    next.poll_interval_sec = iv;
+    next.client_interval_sec = iv;
+  }
+  if (body.pool_interval_sec !== undefined) {
+    next.pool_interval_sec = Math.max(60, parseInt(body.pool_interval_sec, 10) || 540);
+  }
+  if (body.concurrency !== undefined) next.concurrency = Math.min(10, Math.max(1, parseInt(body.concurrency, 10) || 4));
+  if (body.max_numbers_per_cycle !== undefined) next.max_numbers_per_cycle = Math.min(200, Math.max(1, parseInt(body.max_numbers_per_cycle, 10) || 20));
+  if (body.since !== undefined) next.since = Math.max(60, parseInt(body.since, 10) || 600);
+  if (body.conversion_mode !== undefined) {
+    const cm = String(body.conversion_mode).trim().toLowerCase();
+    if (['on_client_match', 'always', 'off'].includes(cm)) next.conversion_mode = cm;
+  }
+  if (body.active !== undefined) next.active = Boolean(body.active);
+
+  data[idx] = next;
+  writeDb('whitenoise_connections', data);
+  const { api_key: _ak, web_cookie: _wc, ...safe } = next;
+  res.json({
+    ...safe,
+    api_key_masked: next.api_key ? `${next.api_key.slice(0, 3)}••••••${next.api_key.slice(-3)}` : '—',
+    has_api_key: Boolean(next.api_key),
+    has_web_cookie: Boolean(next.web_cookie)
+  });
+});
+
+app.delete('/api/whitenoise-connections/:id', (req, res) => {
+  const data = readDb('whitenoise_connections') || [];
+  const id = Number(req.params.id);
+  writeDb('whitenoise_connections', data.filter(x => Number(x.id) !== id));
+  logAudit(req.sessionUser?.username || 'Owner', 'Delete Whitenoise Connection', `Deleted Whitenoise connection #${id}`, 'Whitenoise');
+  res.json({ success: true });
+});
+
+app.post('/api/whitenoise-connections/:id/test-number', async (req, res) => {
+  const id = Number(req.params.id);
+  const conns = readDb('whitenoise_connections') || [];
+  const conn = conns.find(c => Number(c.id) === id);
+  if (!conn) return res.status(404).json({ error: 'Whitenoise connection not found' });
+  const phone = formatWhitenoisePhone(req.body?.phone || req.body?.number || '');
+  if (!phone || phone.length < 6) {
+    return res.status(400).json({ error: 'Valid phone number is required to test Whitenoise.' });
+  }
+  if (!conn.api_key) {
+    return res.status(400).json({ error: 'Connection does not have an api_key configured for single-number lookup.' });
+  }
+  try {
+    const result = await fetchWhitenoiseSinglePhone(conn, phone, {
+      bypassCooldown: true,
+      onDemand: true,
+      includeCount: true,
+      since: parseInt(req.body?.since, 10) || conn.since || 600,
+      service_name: req.body?.service_name || conn.service_name || ''
+    });
+    res.json({
+      success: true,
+      phone,
+      source: 'whitenoise',
+      ingested: result.new_sms || 0,
+      messages: result.latest_sms || [],
+      ...result
+    });
+  } catch (err) {
+    res.status(502).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/whitenoise-connections/:id/pull', async (req, res) => {
+  const id = Number(req.params.id);
+  const conns = readDb('whitenoise_connections') || [];
+  const conn = conns.find(c => Number(c.id) === id);
+  if (!conn) return res.status(404).json({ error: 'Whitenoise connection not found' });
+  try {
+    const pulled = await pollSingleWhitenoiseConnection(id, true);
+    const updated = (readDb('whitenoise_connections') || []).find(c => Number(c.id) === id);
+    res.json({ success: true, pulled: pulled || 0, status: updated?.last_status || 'OK', total_pulled: updated?.total_pulled || 0 });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// Login Panels (Web Scraping)
+app.get('/api/login-panels', (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const safe = panels.map(p => {
+    const { password, ...rest } = p;
+    return { ...rest, has_password: Boolean(password) };
+  });
+  if (req.query.page) {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const start = (page - 1) * limit;
+    return res.json({ data: safe.slice(start, start + limit), total: safe.length });
+  }
+  res.json({ data: safe, total: safe.length });
+});
+
+app.post('/api/login-panels', (req, res) => {
+  const { name, username, password, panel_url, data_url, interval, rows, columns } = req.body || {};
+  if (!username || !panel_url || !data_url || !password) {
+    return res.status(400).json({ error: 'Username, password, panel_url, and data_url are required' });
+  }
+  const panels = readDb('login_panels') || [];
+  let defaultName = name;
+  if (!defaultName) {
+    try { defaultName = new URL(panel_url).hostname; } catch(e) { defaultName = 'Login Panel'; }
+  }
+  const newPanel = {
+    id: nextId(panels),
+    name: defaultName,
+    username: String(username).trim(),
+    password: String(password),
+    panel_url: String(panel_url).trim(),
+    data_url: String(data_url).trim(),
+    interval: Math.max(10, parseInt(interval) || 20),
+    rows: parseInt(rows) || 200,
+    columns: columns || null,
+    status: 'stopped',
+    total_sms: 0,
+    last_run: null,
+    last_error: '',
+    created: new Date().toISOString()
+  };
+  panels.push(newPanel);
+  writeDb('login_panels', panels);
+  logAudit('Admin', 'Add Login Panel', `Added panel '${newPanel.name}'`, 'Login Panel');
+  const { password: _, ...safe } = newPanel;
+  res.json({ ...safe, has_password: true });
+});
+
+app.patch('/api/login-panels/:id', (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  const idx = panels.findIndex(p => p.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Login panel not found' });
+  const updates = { ...req.body };
+  if (updates.interval) updates.interval = Math.max(10, parseInt(updates.interval) || 20);
+  panels[idx] = { ...panels[idx], ...updates };
+  writeDb('login_panels', panels);
+  const { password: _, ...safe } = panels[idx];
+  res.json({ ...safe, has_password: Boolean(panels[idx].password) });
+});
+
+app.delete('/api/login-panels/:id', (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  writeDb('login_panels', panels.filter(p => p.id !== id));
+  logAudit('Admin', 'Delete Login Panel', `Deleted panel #${id}`, 'Login Panel');
+  res.json({ success: true });
+});
+
+app.post('/api/login-panels/:id/start', (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  const panel = panels.find(p => p.id === id);
+  if (!panel) return res.status(404).json({ error: 'Login panel not found' });
+  panel.status = 'running';
+  panel.last_error = '';
+  writeDb('login_panels', panels);
+  logAudit('Admin', 'Start Login Panel', `Started scraping panel '${panel.name}'`, 'Login Panel');
+  pollSingleLoginPanel(panel.id).catch(e => console.error('Start poll error:', e));
+  res.json({ success: true, status: 'running' });
+});
+
+app.post('/api/login-panels/:id/stop', (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  const panel = panels.find(p => p.id === id);
+  if (!panel) return res.status(404).json({ error: 'Login panel not found' });
+  panel.status = 'stopped';
+  writeDb('login_panels', panels);
+  logAudit('Admin', 'Stop Login Panel', `Stopped scraping panel '${panel.name}'`, 'Login Panel');
+  res.json({ success: true, status: 'stopped' });
+});
+
+app.post('/api/login-panels/:id/test', async (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  const panel = panels.find(p => p.id === id);
+  if (!panel) return res.status(404).json({ error: 'Login panel not found' });
+  try {
+    const scraperScript = path.join(HUMEX_DIR, 'panel_scraper.py');
+    if (!fs.existsSync(scraperScript)) {
+      return res.json({ success: false, error: 'Scraper engine not installed' });
+    }
+    const { stdout } = await execFileAsync('python3', [scraperScript, 'test', JSON.stringify(panel)], { timeout: 60000 });
+    const result = JSON.parse(stdout || '{}');
+    res.json(result);
+  } catch (err) {
+    const errorMsg = err.killed ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
+    res.json({ success: false, error: errorMsg });
+  }
+});
+
+app.post('/api/login-panels/:id/pull', async (req, res) => {
+  const panels = readDb('login_panels') || [];
+  const id = Number(req.params.id);
+  const panel = panels.find(p => p.id === id);
+  if (!panel) return res.status(404).json({ error: 'Login panel not found' });
+  try {
+    const added = await pollSingleLoginPanel(id, true);
+    const updated = (readDb('login_panels') || []).find(p => p.id === id);
+    res.json({
+      success: !updated?.last_error,
+      pulled: added || 0,
+      total: updated?.total_sms || 0,
+      error: updated?.last_error || ''
+    });
+  } catch (err) {
+    const errorMsg = err.killed ? 'Connection timed out. Please try again.' : (err.message || 'Scraper pull failed');
+    res.json({ success: false, error: errorMsg });
+  }
+});
+
+
+
+// ── Agent Endpoints ──────────────────────────────────────────
+app.get('/api/agent/:agent_id/earnings', requireAuth, (req, res) => {
+  const aid = String(req.params.agent_id);
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isAgentSelf = sRole === 'agent' && String(sessionUser.id) === aid;
+
+  if (!isOwner && !isAgentSelf) {
+    return res.status(403).json({ error: 'Forbidden. You can only access your own agent earnings.' });
+  }
+
+  const agents = readDb('agents') || [];
+  const agent = agents.find(a => String(a.id) === aid);
+
+  const sms = readDb('sms_log') || [];
+  const mySms = sms.filter(s => Number(s.agent_id) === Number(aid));
+
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
+  const lastMonthDate = new Date(now.getFullYear(), now.getMonth(), 0);
+  const lastMonthEndStr = lastMonthDate.toISOString().slice(0, 10);
+  const lastMonthStartStr = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+  const sumProfit = (records) => Math.round(records.reduce((acc, r) => acc + (Number(r.profit) || 0), 0) * 100) / 100;
+
+  const todaySms = mySms.filter(s => (s.timestamp || '').slice(0, 10) === todayStr);
+  const monthSms = mySms.filter(s => (s.timestamp || '').slice(0, 10) >= monthStartStr);
+  const lastMonthSms = mySms.filter(s => {
+    const ts = (s.timestamp || '').slice(0, 10);
+    return ts >= lastMonthStartStr && ts <= lastMonthEndStr;
+  });
+
+  // UTC Mon-Sun Weekly Settlement Cycle (Sunday 23:59:59 UTC cutoff -> shifts to Main Balance)
+  const diffToMonday = (now.getUTCDay() + 6) % 7;
+  const currentWeekStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diffToMonday, 0, 0, 0, 0));
+  const currentWeekEnd = new Date(currentWeekStart.getTime() + 7 * 86400000 - 1);
+  const currentWeekStartIso = currentWeekStart.toISOString();
+  const currentWeekEndIso = currentWeekEnd.toISOString();
+  const monStr = currentWeekStartIso.slice(0, 10);
+  const sunStr = currentWeekEndIso.slice(0, 10);
+  const weekRangeStr = `${monStr} – ${sunStr} UTC`;
+
+  const thisWeekSms = mySms.filter(s => {
+    const ts = s.timestamp || s.created_at || s.date || '';
+    return ts >= currentWeekStartIso && ts <= currentWeekEndIso;
+  });
+  const thisWeekEarnings = sumProfit(thisWeekSms);
+
+  const previousSettledSms = mySms.filter(s => {
+    const ts = s.timestamp || s.created_at || s.date || '';
+    return ts < currentWeekStartIso;
+  });
+  const previousSettledEarnings = sumProfit(previousSettledSms);
+
+  const allPayouts = readDb('payout_requests') || [];
+  const agentPayouts = allPayouts.filter(p => String(p.agent_id) === aid && p.status !== 'rejected');
+  const totalPayoutsDeducted = agentPayouts.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+
+  const agentBaseBal = Number(agent?.balance || 0);
+  const mainBalance = Math.max(0, Math.round((agentBaseBal + previousSettledEarnings - totalPayoutsDeducted) * 100) / 100);
+
+  const chartData = [];
+  const history = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    const dayStr = d.toISOString().slice(0, 10);
+    const daySms = mySms.filter(s => (s.timestamp || '').slice(0, 10) === dayStr);
+    const dayEarn = sumProfit(daySms);
+    chartData.push(dayEarn);
+    if (daySms.length > 0) {
+      history.push({
+        date: dayStr,
+        sms_count: daySms.length,
+        rate: agent ? (agent.commission_rate || 5) : 5,
+        commission: dayEarn,
+        status: i > 0 ? 'paid' : 'pending'
+      });
+    }
+  }
+
+  res.json({
+    main_balance: mainBalance,
+    balance: mainBalance,
+    this_week: thisWeekEarnings,
+    week_range: weekRangeStr,
+    week_start: monStr,
+    week_end: sunStr,
+    today: sumProfit(todaySms),
+    this_month: sumProfit(monthSms),
+    last_month: sumProfit(lastMonthSms),
+    all_time: sumProfit(mySms),
+    chart_data: chartData,
+    history: history.reverse()
+  });
+});
+
+app.get('/api/agents/:agent_id/weekly-earnings', requireAuth, (req, res) => {
+  res.json({ data: [], total: 0 });
+});
+
+// ── Client Endpoints ──────────────────────────────────────────
+app.get('/api/client/:client_id/stats', requireAuth, (req, res) => {
+  const cid = String(req.params.client_id);
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const clients = readDb('clients') || [];
+  const client = clients.find(c => String(c.id) === cid);
+  if (!client) {
+    return res.status(404).json({ error: 'Client not found' });
+  }
+
+  const isClientSelf = sRole === 'client' && String(sessionUser.id) === cid;
+  const isClientAgent = sRole === 'agent' && Number(client.agent_id) === Number(sessionUser.id);
+
+  if (!isOwner && !isClientSelf && !isClientAgent) {
+    return res.status(403).json({ error: 'Forbidden. You can only access your own client data.' });
+  }
+
+  const numbers = readDb('numbers') || [];
+  const numbersAssigned = numbers.filter(n => String(n.client_id) === cid).length;
+
+  if (isOwner) {
+    return res.json({
+      numbers_assigned: numbersAssigned,
+      total_sms: client.total_sms || 0,
+      status: client.status || 'active',
+      privacy_redacted: true
+    });
+  }
+
+  const fx = getUsdToPkrRate();
+  const balUsd = Number(client.balance || 0);
+  const balPkr = client.balance_pkr != null ? Number(client.balance_pkr) : round2(balUsd * fx);
+  res.json({
+    numbers_assigned: numbersAssigned,
+    total_sms: client.total_sms || 0,
+    balance: balUsd,
+    balance_pkr: balPkr,
+    daily_limit: client.daily_limit || 0,
+    monthly_limit: client.monthly_limit || 0,
+    status: client.status || 'active'
+  });
+});
+
+app.get('/api/client/:client_id/earnings', requireAuth, (req, res) => {
+  const cid = String(req.params.client_id);
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  if (isOwner) {
+    return res.status(403).json({ error: 'Forbidden. Client financial earnings are private to their Agent.' });
+  }
+  const clients = readDb('clients') || [];
+  const client = clients.find(c => String(c.id) === cid);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  const isClientSelf = sRole === 'client' && String(sessionUser.id) === cid;
+  const isClientAgent = sRole === 'agent' && Number(client.agent_id) === Number(sessionUser.id);
+
+  if (!isClientSelf && !isClientAgent) {
+    return res.status(403).json({ error: 'Forbidden. You can only access your own client earnings.' });
+  }
+
+  const sms = readDb('sms_log') || [];
+  const clientSms = sms.filter(s => {
+    return String(s.client_id) === cid || String(s.client) === cid || (client && (s.client === client.username || s.user === client.username));
+  });
+
+  const fxRate = getUsdToPkrRate();
+  const sumClientPayout = (records) => Math.round(records.reduce((acc, r) => acc + (Number(r.client_payout != null ? r.client_payout : (r.client_rate || r.payout || 0)) || 0), 0) * 100) / 100;
+  const sumClientPayoutPkr = (records) => round2(records.reduce((acc, r) => {
+    if (r && r.client_amount_pkr != null) return acc + (Number(r.client_amount_pkr) || 0);
+    const usdAmt = Number(r?.client_payout != null ? r.client_payout : (r?.client_amount != null ? r.client_amount : (r?.client_rate || r?.payout || 0))) || 0;
+    return acc + (usdAmt * (Number(r?.fx_usd_to_pkr) || fxRate));
+  }, 0));
+
+  const now = new Date();
+  const diffToMonday = (now.getUTCDay() + 6) % 7;
+  const currentWeekStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diffToMonday, 0, 0, 0, 0));
+  const currentWeekEnd = new Date(currentWeekStart.getTime() + 7 * 86400000 - 1);
+  const currentWeekStartIso = currentWeekStart.toISOString();
+  const currentWeekEndIso = currentWeekEnd.toISOString();
+  const monStr = currentWeekStartIso.slice(0, 10);
+  const sunStr = currentWeekEndIso.slice(0, 10);
+  const weekRangeStr = `${monStr} – ${sunStr} UTC`;
+
+  const thisWeekSms = clientSms.filter(s => {
+    const ts = s.timestamp || s.created_at || s.date || '';
+    return ts >= currentWeekStartIso && ts <= currentWeekEndIso;
+  });
+  const thisWeekEarnings = sumClientPayout(thisWeekSms);
+  const thisWeekEarningsPkr = sumClientPayoutPkr(thisWeekSms);
+
+  const previousSettledSms = clientSms.filter(s => {
+    const ts = s.timestamp || s.created_at || s.date || '';
+    return ts < currentWeekStartIso;
+  });
+  const previousSettledEarnings = sumClientPayout(previousSettledSms);
+  const previousSettledEarningsPkr = sumClientPayoutPkr(previousSettledSms);
+
+  const allPayouts = readDb('payout_requests') || [];
+  const clientPayouts = allPayouts.filter(p => String(p.client_id) === cid && p.status !== 'rejected');
+  const totalPayoutsDeducted = clientPayouts.reduce((sum, p) => {
+    if (String(p.currency || 'USD').toUpperCase() === 'PKR') {
+      return sum + (p.amount_usd != null ? Number(p.amount_usd) : (Number(p.amount) || 0) / (Number(p.fx_usd_to_pkr) || fxRate));
+    }
+    return sum + (Number(p.amount) || 0);
+  }, 0);
+  const totalPayoutsDeductedPkr = clientPayouts.reduce((sum, p) => {
+    if (String(p.currency || 'USD').toUpperCase() === 'PKR') return sum + (Number(p.amount) || 0);
+    return sum + ((Number(p.amount) || 0) * (Number(p.fx_usd_to_pkr) || fxRate));
+  }, 0);
+  const pendingPkr = allPayouts
+    .filter(p => String(p.client_id) === cid && (p.status === 'pending' || p.status === 'approved'))
+    .reduce((sum, p) => {
+      if (String(p.currency || 'USD').toUpperCase() === 'PKR') return sum + (Number(p.amount) || 0);
+      return sum + ((Number(p.amount) || 0) * (Number(p.fx_usd_to_pkr) || fxRate));
+    }, 0);
+
+  const clientBaseBal = Number(client?.balance || 0);
+  const mainBalance = Math.max(0, Math.round((clientBaseBal + previousSettledEarnings - totalPayoutsDeducted) * 100) / 100);
+  const mainBalancePkr = client?.balance_pkr != null
+    ? Math.max(0, round2(client.balance_pkr))
+    : Math.max(0, round2((clientBaseBal * fxRate) + previousSettledEarningsPkr - totalPayoutsDeductedPkr));
+  const availableBalancePkr = Math.max(0, round2(mainBalancePkr - pendingPkr));
+
+  const todayStr = now.toISOString().slice(0, 10);
+  const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const todaySms = clientSms.filter(s => (s.timestamp || '').slice(0, 10) === todayStr);
+  const monthSms = clientSms.filter(s => (s.timestamp || '').slice(0, 10) >= monthStartStr);
+
+  res.json({
+    currency: 'PKR',
+    usd_to_pkr_rate: fxRate,
+    main_balance: mainBalance,
+    balance: mainBalance,
+    main_balance_pkr: mainBalancePkr,
+    balance_pkr: mainBalancePkr,
+    available_balance_pkr: availableBalancePkr,
+    this_week: thisWeekEarnings,
+    this_week_pkr: thisWeekEarningsPkr,
+    week_range: weekRangeStr,
+    week_start: monStr,
+    week_end: sunStr,
+    today: sumClientPayout(todaySms),
+    today_pkr: sumClientPayoutPkr(todaySms),
+    this_month: sumClientPayout(monthSms),
+    this_month_pkr: sumClientPayoutPkr(monthSms),
+    all_time: sumClientPayout(clientSms),
+    all_time_pkr: sumClientPayoutPkr(clientSms)
+  });
+});
+
+app.get('/api/client/:client_id/numbers', requireAuth, (req, res) => {
+  const cid = String(req.params.client_id);
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const clients = readDb('clients') || [];
+  const client = clients.find(c => String(c.id) === cid);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  const isClientSelf = sRole === 'client' && String(sessionUser.id) === cid;
+  const isClientAgent = sRole === 'agent' && Number(client.agent_id) === Number(sessionUser.id);
+
+  if (!isOwner && !isClientSelf && !isClientAgent) {
+    return res.status(403).json({ error: 'Forbidden. You cannot view this client numbers.' });
+  }
+
+  let numbers = (readDb('numbers') || []).filter(n => String(n.client_id) === cid);
+  if (!isOwner && !hasWhitenoiseAccess(sessionUser)) {
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    numbers = numbers.filter(n => !isWhitenoiseRecord(n, wnRangesMap, wnTags));
+  }
+  if (!isOwner) {
+    const wnTags = getWhitenoiseProviderTags();
+    numbers = numbers.map(n => sanitizeNumberForRole(n, false, wnTags));
+  }
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 100;
+  const start = (page - 1) * limit;
+  res.json({ data: numbers.slice(start, start + limit), total: numbers.length });
+});
+
+app.get('/api/client/:client_id/transactions', requireAuth, (req, res) => {
+  res.json({ data: [], total: 0 });
+});
+
+app.get('/api/sms/client-logs', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser && sessionUser.role ? String(sessionUser.role).toLowerCase() : '');
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const enrich = buildSmsEnricher();
+  let data = getScopedSmsList(req).map(s => {
+    const item = enrich(s);
+    if (!isOwner) {
+      item.cli = serverMaskCli(item.cli || item.app || item.sender);
+      delete item.company_rate;
+      delete item.company_cost;
+      delete item.owner_amount;
+      delete item.profit;
+      delete item.admin_profit;
+      delete item.gross_margin;
+    }
+    return item;
+  });
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 100;
+  const start = (page - 1) * limit;
+  res.json({ data: data.slice(start, start + limit), total: data.length });
+});
+
+// ── Token API /api/sms (Fix 6: Token-Only, Deny Missing/Invalid, Scoped by Token Owner) ──
+app.get('/api/sms', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const apiKeyHeader = req.headers['x-api-key'] || '';
+  let tokenStr = '';
+  if (authHeader.startsWith('Bearer ')) {
+    tokenStr = authHeader.slice(7).trim();
+  } else if (apiKeyHeader) {
+    tokenStr = String(apiKeyHeader).trim();
+  } else if (req.query.token) {
+    tokenStr = String(req.query.token).trim();
+  }
+
+  if (!tokenStr) {
+    return res.status(401).json({ status: 'error', error: 'Authentication required. Missing API token.' });
+  }
+
+  const tokens = readDb('api_tokens') || [];
+  if (!Array.isArray(tokens) || tokens.length === 0) {
+    return res.status(401).json({ status: 'error', error: 'Unauthorized. No active API tokens found.' });
+  }
+
+  const tokenRec = findTokenRecord(tokens, tokenStr);
+  if (tokenRec && (tokenRec.status === 'revoked' || tokenRec.status === 'inactive')) {
+    return res.status(401).json({ status: 'error', error: 'Unauthorized. Invalid API token.' });
+  }
+  if (!tokenRec) {
+    return res.status(401).json({ status: 'error', error: 'Unauthorized. Invalid API token.' });
+  }
+
+  // Update token stats
+  tokenRec.calls = (tokenRec.calls || 0) + 1;
+  tokenRec.last_used = new Date().toISOString();
+  writeDb('api_tokens', tokens);
+
+  let list = readDb('sms_log') || [];
+
+  // Scope results by token owner's role and chain
+  if (tokenRec.client_id) {
+    const cid = Number(tokenRec.client_id);
+    list = list.filter(s => Number(s.client_id) === cid);
+  } else if (tokenRec.agent_id) {
+    const aid = Number(tokenRec.agent_id);
+    list = list.filter(s => Number(s.agent_id) === aid);
+  } else if (tokenRec.role && tokenRec.role.toLowerCase() !== 'owner' && tokenRec.role.toLowerCase() !== 'admin') {
+    list = [];
+  }
+  // Owner level token has no agent/client restriction
+
+  if (req.query.number) {
+    const numDigits = String(req.query.number).replace(/\D/g, '');
+    list = list.filter(s => String(s.number || '').replace(/\D/g, '').includes(numDigits));
+  }
+  if (req.query.cli) {
+    const qCli = String(req.query.cli).toLowerCase();
+    list = list.filter(s => String(s.cli || '').toLowerCase().includes(qCli));
+  }
+  if (req.query.from_date) {
+    list = list.filter(s => (s.timestamp || s.date || '').slice(0, 10) >= String(req.query.from_date));
+  }
+  if (req.query.to_date) {
+    list = list.filter(s => (s.timestamp || s.date || '').slice(0, 10) <= String(req.query.to_date));
+  }
+
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit, 10) || 100));
+  const start = (page - 1) * limit;
+
+  res.json({
+    status: 'success',
+    total: list.length,
+    page,
+    limit,
+    data: list.slice(start, start + limit)
+  });
+});
+
+app.all(['/crapi/viewstats', '/crapi/:user/viewstats', '/api/sms/viewstats'], (req, res) => {
+  const p = { ...(req.query || {}), ...(req.body || {}) };
+  const authHeader = req.headers.authorization || '';
+  const token = p.token || (authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '');
+
+  const tokens = readDb('api_tokens') || [];
+  let currentToken = null;
+  {
+    // A valid token is ALWAYS required (previously this was open when no tokens existed)
+    currentToken = findTokenRecord(tokens, token);
+    if (!currentToken || currentToken.status !== 'active') {
+      return res.status(401).json({ status: 'error', msg: 'Not Authorized' });
+    }
+    currentToken.calls = (currentToken.calls || 0) + 1;
+    currentToken.last_used = new Date().toISOString();
+    writeDb('api_tokens', tokens);
+  }
+
+  let sms = readDb('sms_log') || [];
+
+  if (currentToken.client_id) {
+    const cid = Number(currentToken.client_id);
+    sms = sms.filter(s => Number(s.client_id) === cid);
+  } else if (currentToken.agent_id) {
+    const aid = Number(currentToken.agent_id);
+    const clients = readDb('clients') || [];
+    const myUsernames = new Set(
+      clients.filter(c => Number(c.agent_id) === aid && c.username)
+             .map(c => c.username.toLowerCase())
+    );
+    sms = sms.filter(s => Number(s.agent_id) === aid || myUsernames.has((s.user || '').toLowerCase()));
+  } else if (currentToken.role && currentToken.role.toLowerCase() !== 'owner' && currentToken.role.toLowerCase() !== 'admin') {
+    sms = [];
+  }
+
+  const dt1 = p.dt1 ? p.dt1.replace(' ', 'T').replace('%20', 'T') : '';
+  const dt2 = p.dt2 ? p.dt2.replace(' ', 'T').replace('%20', 'T') : '';
+  if (dt1) sms = sms.filter(s => (s.timestamp || '') >= dt1);
+  if (dt2) sms = sms.filter(s => (s.timestamp || '') <= dt2);
+
+  if (p.filternum) {
+    const fn = String(p.filternum).trim();
+    sms = sms.filter(s => (s.number || '').includes(fn));
+  }
+
+  if (p.filtercli) {
+    const fc = String(p.filtercli).trim().toLowerCase();
+    sms = sms.filter(s => (s.cli || s.sender || '').toLowerCase().includes(fc));
+  }
+
+  const records = Math.min(Math.max(1, parseInt(p.records) || 25), 200);
+  sms.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+  const sliced = sms.slice(0, records);
+
+  const data = sliced.map(s => ({
+    dt: (s.timestamp || '').replace('T', ' ').slice(0, 19),
+    num: s.number || '',
+    cli: s.cli || s.sender || '',
+    message: s.message || '',
+    payout: String(s.profit || s.payout || 0)
+  }));
+
+  res.json({
+    status: 'success',
+    total: data.length,
+    data
+  });
+});
+
+function serverMaskCli(v) {
+  const s = String(v ?? '').trim();
+  if (!s || s === '—') return '—';
+  return s.slice(0, 1) + 'XXXXX';
+}
+
+function cleanSmsHierarchyName(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  const sl = s.toLowerCase();
+  if (['—', '-', 'direct', 'general', 'unassigned', 'unallocated', 'test panel', 'unknown', 'none', 'null', 'n/a'].includes(sl)) return '';
+  return s;
+}
+
+function cleanSmsMetaVal(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  const sl = s.toLowerCase();
+  if (['—', '-', 'manual', 'direct', 'general range', 'unknown', 'none', 'null'].includes(sl)) return '';
+  return s;
+}
+
+function buildSmsEnricher() {
+  const agents = readDb('agents') || [];
+  const agentMap = {};
+  const agentByUsername = {};
+  agents.forEach(a => {
+    if (!a) return;
+    if (a.id != null) agentMap[Number(a.id)] = a;
+    if (a.username) agentByUsername[String(a.username).trim().toLowerCase()] = a;
+  });
+
+  const clients = readDb('clients') || [];
+  const clientMap = {};
+  const clientByUsername = {};
+  clients.forEach(c => {
+    if (!c) return;
+    if (c.id != null) clientMap[Number(c.id)] = c;
+    if (c.username) clientByUsername[String(c.username).trim().toLowerCase()] = c;
+  });
+
+  const numbers = readDb('numbers') || [];
+  const numByRaw = new Map();
+  const numByDigits = new Map();
+  numbers.forEach(n => {
+    if (!n || !n.number) return;
+    const raw = String(n.number).trim();
+    const dig = raw.replace(/\D/g, '');
+    if (raw) numByRaw.set(raw, n);
+    if (dig) numByDigits.set(dig, n);
+  });
+
+  const ranges = readDb('sms_ranges') || [];
+  const rangeById = new Map();
+  const rangeByName = new Map();
+  ranges.forEach(r => {
+    if (!r) return;
+    if (r.id != null) rangeById.set(Number(r.id), r);
+    const rn = String(r.range_name || r.name || '').trim().toLowerCase();
+    if (rn) rangeByName.set(rn, r);
+  });
+
+  return function enrichSms(s) {
+    const item = { ...s };
+    const numRaw = String(item.number || '').trim();
+    const numDig = numRaw.replace(/\D/g, '');
+    const numRec = numByRaw.get(numRaw) || (numDig ? numByDigits.get(numDig) : null) || null;
+
+    const rCandidate = cleanSmsMetaVal(item.range_name || item.range_label || item.range);
+    const rng = (item.range_id && rangeById.get(Number(item.range_id)))
+      || (rCandidate && rangeByName.get(rCandidate.toLowerCase()))
+      || (numRec && numRec.range_id && rangeById.get(Number(numRec.range_id)))
+      || (numRec && numRec.range_name && rangeByName.get(String(numRec.range_name).trim().toLowerCase()))
+      || null;
+
+    // Provider (backfill from panel_name/company for CR API & Login Panel records when not matched to an internal range)
+    const panelProviderFallback = (item.source === 'cr_api' || item.source === 'login_panel' || item.panel_name)
+      ? (cleanSmsMetaVal(item.panel_name) || cleanSmsMetaVal(item.company))
+      : '';
+    const providerVal = cleanSmsMetaVal(item.provider)
+      || cleanSmsMetaVal(rng && rng.provider)
+      || cleanSmsMetaVal(numRec && numRec.provider)
+      || panelProviderFallback
+      || '';
+
+    // Range (also upgrade generic 'International' if dial code resolves to a real country)
+    const detectedCtry = numDig ? detectCountry(numDig) : '';
+    const rawRangeVal = cleanSmsMetaVal(item.range_name || item.range_label || item.range)
+      || cleanSmsMetaVal(rng && (rng.range_name || rng.name))
+      || cleanSmsMetaVal(numRec && (numRec.range_name || numRec.range_label || numRec.range))
+      || cleanSmsMetaVal(item.country)
+      || cleanSmsMetaVal(rng && rng.country)
+      || cleanSmsMetaVal(numRec && numRec.country)
+      || '';
+    const rangeVal = (rawRangeVal === 'International' && detectedCtry && detectedCtry !== 'International' && detectedCtry !== '—')
+      ? detectedCtry
+      : (rawRangeVal || (detectedCtry !== '—' ? detectedCtry : ''));
+
+    const smsType = 'General';
+
+    // Hierarchy: Client -> Agent (strictly '' when not attached)
+    let clientName = cleanSmsHierarchyName(item.client_username)
+      || cleanSmsHierarchyName(item.client)
+      || cleanSmsHierarchyName(item.client_name);
+    let clientRec = (item.client_id != null && clientMap[Number(item.client_id)]) || null;
+    if (!clientName && clientRec) clientName = cleanSmsHierarchyName(clientRec.username || clientRec.name);
+    if (!clientName) {
+      const uName = cleanSmsHierarchyName(item.user);
+      if (uName && clientByUsername[uName.toLowerCase()]) {
+        clientRec = clientByUsername[uName.toLowerCase()];
+        clientName = cleanSmsHierarchyName(clientRec.username || clientRec.name);
+      }
+    }
+    if (!clientRec && clientName) {
+      clientRec = clientByUsername[clientName.toLowerCase()] || null;
+    }
+
+    let agentName = cleanSmsHierarchyName(item.agent_username)
+      || cleanSmsHierarchyName(item.agent)
+      || cleanSmsHierarchyName(item.agent_name);
+    let agentRec = (item.agent_id != null && agentMap[Number(item.agent_id)]) || null;
+    if (!agentName && agentRec) agentName = cleanSmsHierarchyName(agentRec.username || agentRec.name);
+    if (!agentName && clientRec && clientRec.agent_id && agentMap[Number(clientRec.agent_id)]) {
+      agentRec = agentMap[Number(clientRec.agent_id)];
+      agentName = cleanSmsHierarchyName(agentRec.username || agentRec.name);
+    }
+    if (!agentRec && agentName) {
+      agentRec = agentByUsername[agentName.toLowerCase()] || null;
+    }
+
+    if (!(Number(item.company_rate) > 0)) {
+      const fallbackCoRate = parseRateValue(item.company_payout) || parseRateValue(item.carrier_revenue) || 0;
+      if (fallbackCoRate > 0) item.company_rate = fallbackCoRate;
+    }
+    item.provider = providerVal;
+    item.range = rangeVal;
+    item.range_name = rangeVal;
+    item.range_label = rangeVal;
+    item.type = smsType;
+    item.client = clientName || '';
+    item.agent = agentName || '';
+    item.number = numRaw;
+    item.cli = String(item.cli || item.app || item.sender || '').trim();
+    item.message = String(item.message || '');
+    return item;
+  };
+}
+
+function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser && sessionUser.role ? String(sessionUser.role).toLowerCase() : '');
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  const isClient = sRole === 'client';
+  const isAgent = sRole === 'agent';
+
+  // Fix 2 & F3: Scoped strictly from session user, seamlessly loading archives
+  const dateFrom = req.query.date_from || '';
+  const enrichSms = buildSmsEnricher();
+  let list = getScopedSmsList(req, dateFrom).map(enrichSms);
+  if (whitenoiseOnly) {
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    list = list.filter(s => isWhitenoiseRecord(s, wnRangesMap, wnTags));
+  }
+
+  const {
+    date_from,
+    date_to,
+    period,
+    filter_period,
+    range,
+    search,
+    number,
+    cli,
+    status,
+    group_by
+  } = req.query;
+
+  const causeFilter = req.query.fcause || req.query.cause || status;
+  if (causeFilter) {
+    const sLower = String(causeFilter).toLowerCase().trim();
+    if (sLower === '1' || sLower === 'success') {
+      list = list.filter(s => s.status === 'delivered' || s.status === 'success' || (s.cause || '').toLowerCase() === 'success');
+    } else if (sLower === '2' || sLower === 'scrubag') {
+      list = list.filter(s => (s.cause || '').toLowerCase() === 'scrubag' || (s.status || '').toLowerCase() === 'scrubag');
+    } else if (sLower === '3' || sLower === 'others') {
+      list = list.filter(s => s.status !== 'delivered' && s.status !== 'success' && (s.cause || '').toLowerCase() !== 'success' && (s.cause || '').toLowerCase() !== 'scrubag');
+    } else if (sLower !== 'all' && sLower !== '') {
+      list = list.filter(s => String(s.status).toLowerCase() === sLower || String(s.cause || '').toLowerCase() === sLower);
+    }
+  }
+
+  if (req.query.provider) {
+    const pLower = String(req.query.provider).trim().toLowerCase();
+    const wnTags = getWhitenoiseProviderTags();
+    list = list.filter(s => String(maskProviderLabel(s.provider || '', isOwner, wnTags)).toLowerCase().includes(pLower));
+  }
+
+  // Predefined period filtering (today, yesterday, month, year, etc.)
+  const activePeriod = (period || filter_period || '').trim().toLowerCase();
+  const { todaySet, yesterdaySet, weekStartStr, monthStartStr, yearStartStr } = getDateRangeBuckets();
+  if (activePeriod === 'today' || activePeriod === 'daily') {
+    list = list.filter(s => todaySet.has(extractDateStr(s)));
+  } else if (activePeriod === 'yesterday') {
+    list = list.filter(s => yesterdaySet.has(extractDateStr(s)));
+  } else if (activePeriod === 'this_week' || activePeriod === 'week') {
+    list = list.filter(s => extractDateStr(s) >= weekStartStr);
+  } else if (activePeriod === 'this_month' || activePeriod === 'month') {
+    list = list.filter(s => extractDateStr(s) >= monthStartStr);
+  } else if (activePeriod === 'this_year' || activePeriod === 'year') {
+    list = list.filter(s => extractDateStr(s) >= yearStartStr);
+  }
+
+  if (date_from) {
+    let df = String(date_from).trim();
+    if (df.length === 10) df = df + ' 00:00:00';
+    list = list.filter(s => {
+      const ts = (s.timestamp || '').replace('T', ' ');
+      const ds = extractDateStr(s);
+      return ts >= df || ds >= df.slice(0, 10);
+    });
+  }
+  if (date_to) {
+    let dt = String(date_to).trim();
+    if (dt.length === 10) dt = dt + ' 23:59:59';
+    list = list.filter(s => {
+      const ts = (s.timestamp || '').replace('T', ' ');
+      const ds = extractDateStr(s);
+      return ts <= dt || ds <= dt.slice(0, 10);
+    });
+  }
+  if (range) {
+    const rLower = String(range).toLowerCase();
+    list = list.filter(s =>
+      String(s.range_id) === String(range) ||
+      String(s.range || '').toLowerCase().includes(rLower) ||
+      String(s.range_label || '').toLowerCase().includes(rLower) ||
+      String(s.range_name || '').toLowerCase().includes(rLower) ||
+      String(s.country || '').toLowerCase().includes(rLower)
+    );
+  }
+  if (number) {
+    const numOnlyQ = String(number).trim().toLowerCase();
+    if (numOnlyQ) {
+      list = list.filter(s =>
+        phoneDigitsVariantsMatch(s.number, numOnlyQ) ||
+        String(s.number || '').toLowerCase().includes(numOnlyQ) ||
+        String(s.message || '').toLowerCase().includes(numOnlyQ)
+      );
+    }
+  }
+  if (search) {
+    const searchQ = String(search).trim().toLowerCase();
+    if (searchQ) {
+      const tokens = searchQ.split(/\s+/).filter(Boolean);
+      const wnTags = getWhitenoiseProviderTags();
+      const fmtSearchNum = (v) => (v != null && v !== '' && !Number.isNaN(Number(v)))
+        ? `${v} ${cleanMoneyStr(Number(v), 4)}`
+        : '';
+      list = list.filter(s => {
+        const dtNorm = String(s.timestamp || s.date || s.created || '').replace('T', ' ').slice(0, 19);
+        const rawCli = String(s.cli || s.app || s.from || s.sender || '');
+        const visibleCli = isOwner ? rawCli : serverMaskCli(rawCli);
+        const visibleProvider = maskProviderLabel(s.provider || '', isOwner, wnTags);
+        const statusLower = String(s.status || '').toLowerCase();
+        const causeDisplay = s.cause || (statusLower === 'delivered' || statusLower === 'success' ? 'Success' : (s.status || ''));
+        const curText = isClient ? 'pkr' : `${s.currency || '$'} usd`;
+        const ptText = (whitenoiseOnly || String(s.payout_schedule || '').toLowerCase() === 'monthly30_5') ? 'monthly (30/5) {w}' : '';
+        const convText = s.conversion_sent ? 'sent' : '';
+        const parts = [
+          dtNorm,
+          s.timestamp || '',
+          s.date || '',
+          visibleProvider,
+          s.range_name || '',
+          s.range_label || '',
+          s.range || '',
+          s.country || '',
+          s.number || '',
+          visibleCli,
+          s.message || '',
+          causeDisplay,
+          s.status || '',
+          curText,
+          ptText,
+          convText
+        ];
+        if (isOwner) {
+          parts.push(
+            s.agent || '',
+            s.agent_username || '',
+            s.agent_name || '',
+            fmtSearchNum(s.company_rate),
+            fmtSearchNum(s.company_payout),
+            fmtSearchNum(s.carrier_revenue),
+            fmtSearchNum(s.my_payout),
+            fmtSearchNum(s.agent_payout),
+            fmtSearchNum(s.agent_rate),
+            fmtSearchNum(s.owner_amount),
+            fmtSearchNum(s.profit)
+          );
+        } else if (isAgent) {
+          parts.push(
+            s.client || '',
+            s.client_username || '',
+            s.client_name || '',
+            fmtSearchNum(s.agent_payout),
+            fmtSearchNum(s.agent_rate),
+            fmtSearchNum(s.client_payout),
+            fmtSearchNum(s.client_amount),
+            fmtSearchNum(s.agent_amount)
+          );
+        } else if (isClient) {
+          parts.push(
+            fmtSearchNum(s.client_amount_pkr),
+            fmtSearchNum(s.client_payout),
+            fmtSearchNum(s.client_amount)
+          );
+        }
+        const haystack = parts.join(' ').toLowerCase();
+        return tokens.every(t => {
+          if (haystack.includes(t)) return true;
+          const tDig = t.replace(/\D/g, '');
+          if (tDig.length >= 6 && phoneDigitsVariantsMatch(s.number, tDig)) return true;
+          return false;
+        });
+      });
+    }
+  }
+  if (cli) {
+    const cliQ = String(cli).trim().toLowerCase();
+    list = list.filter(s =>
+      String(s.cli || s.app || '').toLowerCase().includes(cliQ)
+    );
+  }
+
+  // Sort descending by timestamp
+  list.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+
+  const isExport = req.query.export === 'csv' || req.path.endsWith('/export');
+  const fxRate = getUsdToPkrRate();
+  const getSmsClientPkr = (s) => {
+    if (s && s.client_amount_pkr != null) return Number(s.client_amount_pkr) || 0;
+    const usdAmt = parseFloat(s?.client_payout ?? s?.client_amount ?? s?.client_rate ?? 0) || 0;
+    return round2(usdAmt * (Number(s?.fx_usd_to_pkr) || fxRate));
+  };
+
+  // ── Group By Logic ──
+  if (group_by) {
+    const rawKeys = Array.isArray(group_by)
+      ? group_by
+      : String(group_by).split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+
+    const validKeys = rawKeys.filter(k => ['hour', 'date', 'daily', 'day', 'month', 'year', 'provider', 'range', 'agent', 'client', 'number', 'cli'].includes(k));
+
+    if (validKeys.length > 0) {
+      const groups = new Map();
+
+      for (const s of list) {
+        const keyParts = {};
+        const dStr = extractDateStr(s);
+        for (const k of validKeys) {
+          if (k === 'hour') {
+            const ts = (s.timestamp || s.created || '').replace('T', ' ');
+            keyParts.hour = ts.length >= 13 ? ts.slice(0, 13) + ':00' : (dStr ? dStr + ' 00:00' : 'Unknown');
+          } else if (k === 'date' || k === 'daily' || k === 'day') {
+            keyParts.date = dStr || 'Unknown';
+          } else if (k === 'month') {
+            keyParts.month = dStr ? dStr.slice(0, 7) : 'Unknown';
+          } else if (k === 'year') {
+            keyParts.year = dStr ? dStr.slice(0, 4) : 'Unknown';
+          } else if (k === 'provider') {
+            keyParts.provider = maskProviderLabel(s.provider || '', isOwner);
+          } else if (k === 'range') {
+            keyParts.range = s.range_name || s.range_label || s.range || '';
+          } else if (k === 'client') {
+            keyParts.client = s.client || '';
+          } else if (k === 'agent') {
+            keyParts.agent = s.agent || '';
+          } else if (k === 'number') {
+            keyParts.number = s.number || '';
+          } else if (k === 'cli') {
+            keyParts.cli = s.cli || '';
+          }
+        }
+
+        const mapKey = validKeys.map(k => `${k}:${keyParts[k]}`).join('|');
+        let grp = groups.get(mapKey);
+        if (!grp) {
+          grp = {
+            ...keyParts,
+            sms_count: 0,
+            delivered_count: 0,
+            failed_count: 0,
+            currency: isClient ? 'PKR' : (s.currency || 'USD'),
+            payout: 0,
+            payout_pkr: 0,
+            agent_payout: 0,
+            client_payout: 0,
+            client_payout_pkr: 0,
+            profit: 0,
+            key: validKeys.map(k => keyParts[k]).join(' / ')
+          };
+          groups.set(mapKey, grp);
+        }
+
+        grp.sms_count++;
+        if (s.status === 'delivered' || s.status === 'success') {
+          grp.delivered_count++;
+        } else if (s.status === 'failed') {
+          grp.failed_count++;
+        }
+
+        const agp = parseFloat(s.agent_payout ?? s.agent_rate ?? 0) || 0;
+        const cp = parseFloat(s.client_payout ?? s.client_amount ?? 0) || 0;
+        const cpPkr = getSmsClientPkr(s);
+        let rolePayout = 0;
+        let prof = 0;
+        if (isAgent) {
+          rolePayout = agp;
+          prof = parseFloat(s.agent_amount ?? Math.max(0, rolePayout - cp)) || 0;
+        } else if (isClient) {
+          rolePayout = cp;
+          prof = 0;
+        } else {
+          rolePayout = parseFloat(s.company_rate ?? s.company_payout ?? s.carrier_revenue ?? s.payout ?? 0) || 0;
+          prof = parseFloat(s.owner_amount ?? s.profit ?? Math.max(0, rolePayout - agp)) || 0;
+        }
+        grp.payout = Math.round((grp.payout + rolePayout) * 10000) / 10000;
+        grp.agent_payout = Math.round((grp.agent_payout + agp) * 10000) / 10000;
+        grp.client_payout = Math.round((grp.client_payout + cp) * 10000) / 10000;
+        grp.client_payout_pkr = round2(grp.client_payout_pkr + cpPkr);
+        grp.payout_pkr = isClient ? grp.client_payout_pkr : round2(grp.payout * fxRate);
+        grp.profit = Math.round((grp.profit + prof) * 10000) / 10000;
+      }
+
+      const groupedResult = Array.from(groups.values());
+      groupedResult.sort((a, b) => b.sms_count - a.sms_count);
+
+      // Global summary totals across all groups
+      let totalSms = 0, totalDelivered = 0, totalFailed = 0, totalPayout = 0, totalAgentPayout = 0, totalClientPayout = 0, totalClientPayoutPkr = 0, totalProfit = 0;
+      for (const g of groupedResult) {
+        totalSms += g.sms_count || 0;
+        totalDelivered += g.delivered_count || 0;
+        totalFailed += g.failed_count || 0;
+        totalPayout += g.payout || 0;
+        totalAgentPayout += g.agent_payout || 0;
+        totalClientPayout += g.client_payout || 0;
+        totalClientPayoutPkr += g.client_payout_pkr || 0;
+        totalProfit += g.profit || 0;
+      }
+      const summary = {
+        total_sms: totalSms,
+        total_groups: groupedResult.length,
+        delivered_count: totalDelivered,
+        failed_count: totalFailed,
+        currency: isClient ? 'PKR' : 'USD',
+        usd_to_pkr_rate: fxRate,
+        payout: Math.round(totalPayout * 10000) / 10000,
+        payout_pkr: isClient ? round2(totalClientPayoutPkr) : round2(totalPayout * fxRate),
+        agent_payout: Math.round(totalAgentPayout * 10000) / 10000,
+        client_payout: Math.round(totalClientPayout * 10000) / 10000,
+        client_payout_pkr: round2(totalClientPayoutPkr),
+        profit: Math.round(totalProfit * 10000) / 10000
+      };
+
+      if (isExport) {
+        const filename = `sms_cdr_grouped_${new Date().toISOString().slice(0, 10)}.csv`;
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Cache-Control', 'no-cache');
+        const secondPayoutLabel = isOwner ? 'AGENT PAYOUT' : 'CLIENT PAYOUT';
+        const headers = [...validKeys.map(k => k.toUpperCase()), 'SMS COUNT', 'DELIVERED', 'FAILED', 'CURRENCY', isClient ? 'MY PAYOUT (PKR)' : 'MY PAYOUT'];
+        if (!isClient) headers.push(secondPayoutLabel, 'PROFIT');
+        res.write(headers.map(h => `"${h}"`).join(',') + '\r\n');
+        for (const g of groupedResult) {
+          const row = [
+            ...validKeys.map(k => {
+              if (k === 'cli' && !isOwner) return serverMaskCli(g[k]);
+              if (k === 'agent' || k === 'client') return g[k] || '';
+              return g[k] || '—';
+            }),
+            g.sms_count || 0,
+            g.delivered_count || 0,
+            g.failed_count || 0,
+            isClient ? 'PKR' : (g.currency || 'USD'),
+            isClient ? cleanMoneyStr(Number(g.client_payout_pkr || 0), 4) : cleanMoneyStr(Number(g.payout || 0), 4)
+          ];
+          if (!isClient) {
+            row.push(cleanMoneyStr(Number(isOwner ? (g.agent_payout || 0) : (g.client_payout || 0)), 4));
+            row.push(cleanMoneyStr(Number(g.profit || 0), 4));
+          }
+          res.write(row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
+        }
+        const footRow = [
+          `Total Groups: ${groupedResult.length}`,
+          ...Array(Math.max(0, validKeys.length - 1)).fill(''),
+          summary.total_sms,
+          summary.delivered_count,
+          summary.failed_count,
+          summary.currency,
+          isClient ? cleanMoneyStr(summary.client_payout_pkr, 4) : cleanMoneyStr(summary.payout, 4)
+        ];
+        if (!isClient) {
+          footRow.push(cleanMoneyStr((isOwner ? summary.agent_payout : summary.client_payout), 4));
+          footRow.push(cleanMoneyStr(summary.profit, 4));
+        }
+        res.write(footRow.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
+        return res.end();
+      }
+
+      const rawLimit = String(req.query.limit || '').trim().toLowerCase();
+      const isAll = rawLimit === 'all' || rawLimit === '0' || rawLimit === '-1';
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = isAll ? groupedResult.length : Math.max(1, parseInt(req.query.limit, 10) || 500);
+      const start = isAll ? 0 : (page - 1) * limit;
+      const totalPages = isAll ? 1 : (limit > 0 ? Math.ceil(groupedResult.length / limit) : 1);
+      if (isClient) {
+        delete summary.profit;
+        delete summary.agent_payout;
+      }
+
+      const pageSlice = isAll ? groupedResult : groupedResult.slice(start, start + limit);
+      const safeGroupedResult = isOwner ? pageSlice : pageSlice.map(g => {
+        const copy = { ...g };
+        if (isClient) {
+          delete copy.profit;
+          delete copy.agent_payout;
+        }
+        if (copy.cli) copy.cli = serverMaskCli(copy.cli);
+        return copy;
+      });
+
+      return res.json({
+        data: safeGroupedResult,
+        total: groupedResult.length,
+        page,
+        limit: isAll ? groupedResult.length : limit,
+        total_pages: totalPages,
+        has_next: page < totalPages,
+        has_prev: page > 1,
+        grouped: true,
+        group_keys: validKeys,
+        summary
+      });
+    }
+  }
+
+  // ── Ungrouped Summary Totals across full matched list (Multi-Currency Breakdown) ──
+  let totalSms = list.length, totalDelivered = 0, totalFailed = 0, totalPayout = 0, totalAgentPayout = 0, totalClientPayout = 0, totalClientPayoutPkr = 0, totalProfit = 0;
+  const currencies = {
+    USD: { in: 0, out: 0, profit: 0, count: 0 },
+    EUR: { in: 0, out: 0, profit: 0, count: 0 },
+    GBP: { in: 0, out: 0, profit: 0, count: 0 }
+  };
+
+  for (const s of list) {
+    if (s.status === 'delivered' || s.status === 'success') totalDelivered++;
+    else if (s.status === 'failed') totalFailed++;
+    const agp = parseFloat(s.agent_payout ?? s.agent_rate ?? 0) || 0;
+    const cp = parseFloat(s.client_payout ?? s.client_amount ?? 0) || 0;
+    const cpPkr = getSmsClientPkr(s);
+    let rolePayout = 0;
+    let pr = 0;
+    if (isAgent) {
+      rolePayout = agp;
+      pr = parseFloat(s.agent_amount ?? Math.max(0, rolePayout - cp)) || 0;
+    } else if (isClient) {
+      rolePayout = cp;
+      pr = 0;
+    } else {
+      rolePayout = parseFloat(s.company_rate ?? s.company_payout ?? s.carrier_revenue ?? s.payout ?? 0) || 0;
+      pr = parseFloat(s.owner_amount ?? s.profit ?? Math.max(0, rolePayout - agp)) || 0;
+    }
+    totalPayout += rolePayout;
+    totalAgentPayout += agp;
+    totalClientPayout += cp;
+    totalClientPayoutPkr += cpPkr;
+    totalProfit += pr;
+
+    const cur = String(s.currency || 'USD').toUpperCase();
+    if (!currencies[cur]) {
+      currencies[cur] = { in: 0, out: 0, profit: 0, count: 0 };
+    }
+    currencies[cur].in += rolePayout;
+    currencies[cur].out += isOwner ? agp : cp;
+    currencies[cur].profit += pr;
+    currencies[cur].count++;
+  }
+
+  // Format multi-currency stats for easy frontend consumption
+  const multi_currency = {};
+  for (const [k, v] of Object.entries(currencies)) {
+    multi_currency[k] = {
+      in: Math.round(v.in * 10000) / 10000,
+      out: Math.round(v.out * 10000) / 10000,
+      profit: Math.round(v.profit * 10000) / 10000,
+      count: v.count
+    };
+  }
+
+  const summary = {
+    total_sms: totalSms,
+    total_groups: 0,
+    delivered_count: totalDelivered,
+    failed_count: totalFailed,
+    currency: isClient ? 'PKR' : 'USD',
+    usd_to_pkr_rate: fxRate,
+    payout: Math.round(totalPayout * 10000) / 10000,
+    payout_pkr: isClient ? round2(totalClientPayoutPkr) : round2(totalPayout * fxRate),
+    agent_payout: Math.round(totalAgentPayout * 10000) / 10000,
+    client_payout: Math.round(totalClientPayout * 10000) / 10000,
+    client_payout_pkr: round2(totalClientPayoutPkr),
+    profit: Math.round(totalProfit * 10000) / 10000,
+    multi_currency
+  };
+
+  if (isExport) {
+    const wnTags = getWhitenoiseProviderTags();
+    const baseName = whitenoiseOnly ? (isOwner ? 'cdr2_whitenoise' : 'cdr2_monthly') : 'sms_cdr';
+    const filename = `${baseName}_${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    const headers = isOwner
+      ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Agent', 'Client', 'Currency', 'My Payout', 'Agent Payout', 'Profit', 'Cause']
+      : isAgent
+      ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Client', 'Currency', 'My Payout', 'Client Payout', 'My Profit']
+      : ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Currency', 'My Payout (PKR)', 'Cause'];
+    res.write(headers.map(h => `"${h}"`).join(',') + '\r\n');
+    for (const s of list) {
+      const safeMsg = String(s.message || '');
+      const sanitizedMsg = /^[=\+\-@\t\r]/.test(safeMsg) ? "'" + safeMsg : safeMsg;
+      const dtStr = (s.timestamp || '').replace('T', ' ').slice(0, 19);
+      const provStr = maskProviderLabel(s.provider || '—', isOwner, wnTags) || '—';
+      const rngStr = scrubWhitenoiseName(s.range_name || s.range_label || s.range || s.country || '—', isOwner);
+      const cliStr = isOwner ? (s.cli || '') : serverMaskCli(s.cli || '');
+      const agpVal = Number(s.agent_payout ?? s.agent_rate ?? 0);
+      const cpVal = Number(s.client_payout ?? s.client_amount ?? 0);
+      const cpPkrVal = getSmsClientPkr(s);
+      const curStr = isClient ? 'PKR' : (s.currency || 'USD');
+      const causeStr = s.cause || (s.status === 'delivered' || s.status === 'success' ? 'Success' : (s.status || '—'));
+      let row;
+      if (isOwner) {
+        const myP = Number(s.company_rate ?? s.company_payout ?? s.carrier_revenue ?? 0);
+        const prof = Number(s.owner_amount ?? s.profit ?? Math.max(0, myP - agpVal));
+        row = [dtStr, provStr, rngStr, s.number || '', cliStr, sanitizedMsg, s.agent || '', s.client || '', curStr, cleanMoneyStr(myP, 4), cleanMoneyStr(agpVal, 4), cleanMoneyStr(prof, 4), causeStr];
+      } else if (isAgent) {
+        const prof = Number(s.agent_amount ?? Math.max(0, agpVal - cpVal));
+        row = [dtStr, provStr, rngStr, s.number || '', cliStr, sanitizedMsg, s.client || '', curStr, cleanMoneyStr(agpVal, 4), cleanMoneyStr(cpVal, 4), cleanMoneyStr(prof, 4)];
+      } else {
+        row = [dtStr, provStr, rngStr, s.number || '', cliStr, sanitizedMsg, 'PKR', cleanMoneyStr(cpPkrVal, 4), causeStr];
+      }
+      res.write(row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
+    }
+    const footRow = isOwner
+      ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.agent_payout, 4), cleanMoneyStr(summary.profit, 4), `Delivered: ${summary.delivered_count}`]
+      : isAgent
+      ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.client_payout, 4), cleanMoneyStr(summary.profit, 4)]
+      : [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', 'PKR', cleanMoneyStr(summary.client_payout_pkr, 4), `Delivered: ${summary.delivered_count}`];
+    res.write(footRow.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
+    return res.end();
+  }
+
+  // ── Ungrouped Standard / Server-side Pagination ──
+  const rawLimit = String(req.query.limit || '').trim().toLowerCase();
+  const isAll = rawLimit === 'all' || rawLimit === '0' || rawLimit === '-1';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = isAll ? list.length : Math.max(1, parseInt(req.query.limit, 10) || 100);
+  const start = isAll ? 0 : (page - 1) * limit;
+  const totalPages = isAll ? 1 : (limit > 0 ? Math.ceil(list.length / limit) : 1);
+  const sliced = isAll ? list : list.slice(start, start + limit);
+
+  const wnTags = getWhitenoiseProviderTags();
+  const sanitizedSliced = sliced.map(s => {
+    const item = { ...s };
+    delete item.ip;
+
+    if (!isOwner) {
+      item.cli = serverMaskCli(item.cli || item.app || item.sender);
+      item.provider = maskProviderLabel(item.provider || '', false, wnTags);
+      if (item.company) item.company = maskProviderLabel(item.company, false, wnTags);
+      if (item.source && isWhitenoiseText(item.source)) item.source = 'monthly_route';
+      if (item.range_name) item.range_name = scrubWhitenoiseName(item.range_name, false);
+      if (item.range_label) item.range_label = scrubWhitenoiseName(item.range_label, false);
+      if (item.range) item.range = scrubWhitenoiseName(item.range, false);
+      if (item.panel_name && (isWhitenoiseText(item.panel_name) || wnTags.has(String(item.panel_name).trim().toLowerCase()))) {
+        item.panel_name = 'Carrier 2';
+      }
+      delete item.company_rate;
+      delete item.company_cost;
+      delete item.owner_amount;
+      delete item.profit;
+      delete item.admin_profit;
+      delete item.gross_margin;
+      if (isClient) {
+        delete item.agent_amount;
+        delete item.agent_rate;
+        delete item.agent_payout;
+        item.my_payout = Number(item.client_amount != null ? item.client_amount : (item.client_payout || 0));
+        item.payout = item.my_payout;
+        item.client_amount_pkr = getSmsClientPkr(item);
+        item.my_payout_pkr = item.client_amount_pkr;
+        item.client_currency = 'PKR';
+      } else if (isAgent) {
+        item.my_payout = Number(item.agent_payout != null ? item.agent_payout : (item.agent_rate || 0));
+        item.payout = item.my_payout;
+      }
+    } else {
+      item.my_payout = Number(item.company_rate != null ? item.company_rate : (item.company_payout != null ? item.company_payout : (item.carrier_revenue || 0)));
+    }
+    if (whitenoiseOnly) {
+      item.payterm = 'Monthly';
+      item.is_whitenoise = true;
+      item.payout_schedule = 'monthly30_5';
+      item.cycle_days = 30;
+      item.hold_days = 5;
+      item.conversion_sent = Boolean(item.conversion_sent);
+      item.whitenoise_sms_id = item.whitenoise_sms_id ?? null;
+    }
+    return item;
+  });
+
+  const safeSummary = { ...summary };
+  if (isClient) {
+    delete safeSummary.profit;
+    delete safeSummary.agent_payout;
+  }
+
+  res.json({
+    data: sanitizedSliced,
+    total: list.length,
+    page,
+    limit: isAll ? list.length : limit,
+    total_pages: totalPages,
+    has_next: page < totalPages,
+    has_prev: page > 1,
+    grouped: false,
+    whitenoise_only: whitenoiseOnly,
+    summary: safeSummary
+  });
+}
+
+app.get('/api/sms/logs', (req, res) => handleSmsLogsQuery(req, res));
+app.get('/api/sms/export', (req, res) => handleSmsLogsQuery(req, res));
+
+// ── CDR 2 (Monthly Route Dedicated Logs, Export, Batch Sync & Single Fetch) ──
+app.get('/api/cdr2/logs', requireAuth, (req, res) => {
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  return handleSmsLogsQuery(req, res, { whitenoiseOnly: true });
+});
+
+app.get('/api/cdr2/export', requireAuth, (req, res) => {
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  return handleSmsLogsQuery(req, res, { whitenoiseOnly: true });
+});
+
+app.post('/api/cdr2/sync', requireAuth, async (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    if (!hasWhitenoiseAccess(sessionUser)) {
+      return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+    }
+
+    const sRole = normRole(sessionUser.role);
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    const conns = (readDb('whitenoise_connections') || []).filter(c => c && c.active !== false);
+    if (!conns.length) {
+      return res.json({
+        success: true,
+        checked: 0,
+        skipped_cooldown: 0,
+        total_scoped_numbers: 0,
+        new_sms: 0,
+        conversions: 0,
+        message: isOwner ? 'No active Whitenoise provider connection configured.' : 'No active Monthly Route provider configured.'
+      });
+    }
+
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    const allNumbers = readDb('numbers') || [];
+    let scoped = allNumbers.filter(n => n && isWhitenoiseRecord(n, wnRangesMap, wnTags));
+
+    if (isAgent) {
+      const myClients = (readDb('clients') || []).filter(c => Number(c.agent_id) === Number(sessionUser.id));
+      const myClientIds = new Set(myClients.map(c => Number(c.id)));
+      scoped = scoped.filter(n => Number(n.agent_id) === Number(sessionUser.id) || (n.client_id != null && myClientIds.has(Number(n.client_id))));
+    } else if (isClient) {
+      scoped = scoped.filter(n =>
+        Number(n.client_id) === Number(sessionUser.id) ||
+        (n.user && String(n.user).toLowerCase() === String(sessionUser.username).toLowerCase())
+      );
+    }
+
+    const { range, number, search, client_id, agent_id, max_numbers } = req.body || {};
+    const rawNumInput = String(number || '').trim() || (String(search || '').replace(/\D/g, '').length >= 6 ? String(search || '').trim() : '');
+    const numDigits = rawNumInput.replace(/\D/g, '');
+    const isTargetedFetch = numDigits.length >= 6;
+
+    if (isClient && !isTargetedFetch) {
+      return res.status(400).json({ error: 'Please enter your assigned phone number (with or without country code or +) to sync.' });
+    }
+
+    if (range && !isTargetedFetch) {
+      const rLow = String(range).trim().toLowerCase();
+      scoped = scoped.filter(n =>
+        String(n.range_id) === String(range) ||
+        String(n.range_name || n.country || '').toLowerCase().includes(rLow)
+      );
+    }
+
+    if (rawNumInput) {
+      scoped = scoped.filter(n => phoneDigitsVariantsMatch(n.number, rawNumInput) || String(n.number || '').includes(rawNumInput));
+      if (!isOwner && scoped.length === 0) {
+        return res.status(403).json({ error: 'Forbidden. Number does not belong to your assigned pool.' });
+      }
+    }
+    if (isOwner && agent_id && !isTargetedFetch) {
+      scoped = scoped.filter(n => Number(n.agent_id) === Number(agent_id));
+    }
+    if ((isOwner || isAgent) && client_id && !isTargetedFetch) {
+      scoped = scoped.filter(n => Number(n.client_id) === Number(client_id));
+    }
+
+    // Prioritize Client-assigned -> Agent pool -> Unassigned
+    scoped.sort((a, b) => {
+      const pa = a.client_id ? 3 : (a.agent_id ? 2 : 1);
+      const pb = b.client_id ? 3 : (b.agent_id ? 2 : 1);
+      return pb - pa;
+    });
+
+    const maxBatch = Math.min(60, Math.max(1, parseInt(max_numbers, 10) || 60));
+    let batch = scoped.slice(0, maxBatch);
+    if (isOwner && isTargetedFetch && batch.length === 0) {
+      batch = [{ number: formatWhitenoisePhone(rawNumInput) }];
+    }
+
+    const apiConn = conns.find(c => c.api_key) || null;
+    const hybridWebConn = conns.find(c => c.mode === 'hybrid' && c.web_cookie);
+
+    let checked = 0;
+    let skipped_cooldown = 0;
+    let new_sms = 0;
+    let conversions = 0;
+
+    if (hybridWebConn && !apiConn) {
+      const webRes = await pollWhitenoiseWebFeed(hybridWebConn);
+      new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
+      conversions += Number(webRes?.conversions || 0);
+    } else if (apiConn) {
+      if (hybridWebConn && hybridWebConn.web_cookie && !isTargetedFetch) {
+        const webRes = await pollWhitenoiseWebFeed(hybridWebConn).catch(() => ({ new_sms: 0, conversions: 0 }));
+        new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
+        conversions += Number(webRes?.conversions || 0);
+      }
+      const results = await runWithConcurrency(batch, Math.min(6, apiConn.concurrency || 6), async (n) => {
+        return fetchWhitenoiseSinglePhone(apiConn, n.number, {
+          bypassCooldown: isTargetedFetch,
+          onDemand: true,
+          includeCount: isTargetedFetch,
+          since: apiConn.since || 600,
+          service_name: apiConn.service_name || ''
+        });
+      });
+      for (const r of results) {
+        if (!r) continue;
+        if (r.cooldown_active || r.skipped_cooldown) skipped_cooldown++;
+        else if (r.checked !== false) checked++;
+        if (r.new_sms) new_sms += Number(r.new_sms) || 0;
+        if (r.conversions) conversions += Number(r.conversions) || 0;
+      }
+    }
+
+    res.json({
+      success: true,
+      checked,
+      skipped_cooldown,
+      total_scoped_numbers: scoped.length,
+      batch_size: batch.length,
+      new_sms,
+      conversions,
+      matched_numbers: batch.map(b => b.number)
+    });
+  } catch (err) {
+    console.error('POST /api/cdr2/sync error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/numbers/:id/whitenoise-fetch', requireAuth, async (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    if (!hasWhitenoiseAccess(sessionUser)) {
+      return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+    }
+
+    const sRole = normRole(sessionUser.role);
+    const isOwner = sRole === 'owner' || sRole === 'admin';
+    const isAgent = sRole === 'agent';
+    const isClient = sRole === 'client';
+
+    const rawId = String(req.params.id);
+    const numbers = readDb('numbers') || [];
+    const n = numbers.find(x => String(x.id) === rawId || String(x.number) === rawId);
+    if (!n) return res.status(404).json({ error: 'Number not found' });
+
+    if (!isOwner) {
+      if (isAgent && Number(n.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden. You do not own this number.' });
+      }
+      if (isClient && Number(n.client_id) !== Number(sessionUser.id) && String(n.user || '').toLowerCase() !== String(sessionUser.username).toLowerCase()) {
+        return res.status(403).json({ error: 'Forbidden. You do not own this number.' });
+      }
+    }
+
+    const wnRangesMap = buildRangesLookupMap();
+    const wnTags = getWhitenoiseProviderTags();
+    if (!isWhitenoiseRecord(n, wnRangesMap, wnTags)) {
+      return res.status(400).json({ error: isOwner ? 'This number does not belong to a Whitenoise range.' : 'This number does not belong to CDR 2 Monthly Route.' });
+    }
+
+    const conns = (readDb('whitenoise_connections') || []).filter(c => c && c.active !== false && c.api_key);
+    const provLow = String(n.provider || '').toLowerCase();
+    const conn = conns.find(c => provLow && provLow.includes(String(c.provider_tag || 'whitenoise').toLowerCase())) || conns[0];
+    if (!conn) {
+      return res.status(400).json({ error: isOwner ? 'No active Whitenoise API Key connection configured.' : 'Live fetch connection is not active.' });
+    }
+
+    const result = await fetchWhitenoiseSinglePhone(conn, n.number, {
+      bypassCooldown: true,
+      onDemand: true,
+      includeCount: true,
+      since: parseInt(req.body?.since, 10) || conn.since || 600,
+      service_name: req.body?.service_name || conn.service_name || ''
+    });
+
+    res.json({ success: true, number: n.number, ...result });
+  } catch (err) {
+    res.status(502).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/sms/stats', (req, res) => {
+  const sms = getScopedSmsList(req);
+  const delivered = sms.filter(s => s.status === 'delivered');
+  const failed = sms.filter(s => s.status === 'failed');
+
+  const sessionUser = getSessionUser(req);
+  const sRole = (sessionUser?.role || '').toLowerCase();
+
+  let total_profit = 0;
+  sms.forEach(s => {
+    if (sRole === 'owner' || sRole === 'admin') {
+      total_profit += (Number(s.owner_amount) || Number(s.profit) || 0);
+    } else if (sRole === 'agent') {
+      total_profit += (Number(s.agent_amount) || 0);
+    } else {
+      total_profit += (Number(s.client_amount) || Number(s.payout) || 0);
+    }
+  });
+  total_profit = Math.round(total_profit * 10000) / 10000;
+
+  const daily_profit = Array.from({ length: 30 }, () => 0);
+  const now = new Date();
+  sms.forEach(s => {
+    if (!s.timestamp) return;
+    const d = new Date(s.timestamp);
+    const diffDays = Math.floor((now - d) / (1000 * 60 * 60 * 24));
+    if (diffDays >= 0 && diffDays < 30) {
+      const idx = 29 - diffDays;
+      let amt = 0;
+      if (sRole === 'owner' || sRole === 'admin') amt = Number(s.owner_amount) || Number(s.profit) || 0;
+      else if (sRole === 'agent') amt = Number(s.agent_amount) || 0;
+      else amt = Number(s.client_amount) || Number(s.payout) || 0;
+      daily_profit[idx] = Math.round((daily_profit[idx] + amt) * 10000) / 10000;
+    }
+  });
+
+  const hourly_traffic = Array.from({ length: 24 }, () => 0);
+  sms.forEach(s => {
+    if (!s.timestamp) return;
+    const d = new Date(s.timestamp);
+    const hr = d.getHours();
+    if (hr >= 0 && hr < 24) {
+      hourly_traffic[hr]++;
+    }
+  });
+
+  const app_breakdown = {};
+  sms.forEach(s => {
+    const app = s.app || s.service || 'Other';
+    app_breakdown[app] = (app_breakdown[app] || 0) + 1;
+  });
+
+  res.json({
+    total: sms.length,
+    total_sms: sms.length,
+    delivered: delivered.length,
+    failed: failed.length,
+    success_rate: sms.length ? Math.round((delivered.length / sms.length) * 100) : 0,
+    total_profit,
+    daily_profit,
+    hourly_traffic,
+    app_breakdown: Object.keys(app_breakdown).length ? app_breakdown : { Direct: sms.length }
+  });
+});
+
+app.get('/api/sms/client-stats', (req, res) => {
+  const sms = getScopedSmsList(req);
+  res.json({
+    total: sms.length,
+    delivered: sms.filter(s => s.status === 'delivered').length,
+    failed: sms.filter(s => s.status === 'failed').length
+  });
+});
+
+// ── Settings & Permissions ────────────────────────────────────
+app.get('/api/settings', (req, res) => {
+  try {
+    let settings = readDb('settings');
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      settings = {};
+    }
+    const masterPayterms = getMasterPayterms();
+    const fxRate = getUsdToPkrRate();
+    const minPayoutPkr = getMinPayoutPkr();
+    const monthlyCycle = getMonthlyCycleConfig();
+    const themeCatalog = getThemeCatalog(settings);
+    const defaultThemeKey = (settings.default_theme_key && themeCatalog.some(t => t.key === settings.default_theme_key))
+      ? settings.default_theme_key
+      : 'daylight_cobalt';
+    settings.payterms = masterPayterms;
+    settings.usd_to_pkr_rate = fxRate;
+    settings.min_payout_pkr = minPayoutPkr;
+    settings.monthly_cycle = monthlyCycle;
+    settings.theme_catalog = themeCatalog;
+    settings.default_theme_key = defaultThemeKey;
+    const user = getSessionUser(req);
+    const isOwner = user && (String(user.role).toLowerCase() === 'owner' || String(user.role).toLowerCase() === 'admin');
+    if (isOwner) {
+      return res.json(settings);
+    }
+    const safeSettings = {
+      site_name: settings.site_name || 'HUMAX SMS',
+      site_title: settings.site_title || 'HUMAX SMS',
+      logo_url: settings.logo_url || '',
+      logo_data: settings.logo_data || '',
+      favicon_url: settings.favicon_url || '',
+      default_theme_key: defaultThemeKey,
+      theme_catalog: themeCatalog,
+      theme_mode: settings.theme_mode || 'light',
+      font_family: settings.font_family || 'system',
+      tagline: settings.tagline || '',
+      footer_text: settings.footer_text || '',
+      default_currency: settings.default_currency || 'USD',
+      currency: settings.currency || 'USD',
+      usd_to_pkr_rate: fxRate,
+      min_payout: Number(settings.min_payout || 0),
+      min_payout_pkr: minPayoutPkr,
+      payterms: masterPayterms,
+      monthly_cycle: monthlyCycle
+    };
+    res.json(safeSettings);
+  } catch (err) {
+    console.error('Error in /api/settings:', err);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+app.post('/api/settings', (req, res) => {
+  const sessionUser = req.sessionUser || getSessionUser(req);
+  const sRole = sessionUser ? (sessionUser.role || '').toLowerCase() : '';
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  if (!isOwner) {
+    return res.status(403).json({ error: 'Forbidden. Owner only.' });
+  }
+  const settings = readDb('settings') || {};
+  if (req.body.usd_to_pkr_rate !== undefined) {
+    const fx = Number(req.body.usd_to_pkr_rate);
+    if (!Number.isFinite(fx) || fx <= 0 || fx > 100000) {
+      return res.status(400).json({ error: 'usd_to_pkr_rate must be a valid positive number between 0 and 100000.' });
+    }
+    req.body.usd_to_pkr_rate = round2(fx);
+  }
+  if (req.body.min_payout_pkr !== undefined && req.body.min_payout_pkr !== '') {
+    const mpPkr = Number(req.body.min_payout_pkr);
+    if (!Number.isFinite(mpPkr) || mpPkr < 0) {
+      return res.status(400).json({ error: 'min_payout_pkr must be 0 or a positive number.' });
+    }
+    req.body.min_payout_pkr = round2(mpPkr);
+  }
+  if (req.body.payterms !== undefined) {
+    if (!Array.isArray(req.body.payterms) || req.body.payterms.length === 0) {
+      return res.status(400).json({ error: 'payterms must be a non-empty array of strings' });
+    }
+    const cleaned = Array.from(new Set(req.body.payterms.map(s => normalizePaytermKey(String(s).trim())).filter(Boolean)));
+    if (!cleaned.length) {
+      return res.status(400).json({ error: 'payterms cannot be empty' });
+    }
+    req.body.payterms = cleaned;
+  }
+  if (req.body.default_theme_key !== undefined) {
+    const candidateKey = String(req.body.default_theme_key || '').trim();
+    const catalog = getThemeCatalog(settings);
+    if (!catalog.some(t => t.key === candidateKey)) {
+      return res.status(400).json({ error: 'default_theme_key must match an existing theme in theme_catalog.' });
+    }
+    req.body.default_theme_key = candidateKey;
+  }
+  if (req.body.monthly_cycle !== undefined) {
+    const mcRaw = req.body.monthly_cycle;
+    if (!mcRaw || typeof mcRaw !== 'object') {
+      return res.status(400).json({ error: 'monthly_cycle must be an object with start_date, end_date, clear_date.' });
+    }
+    const sd = normalizeYmd(mcRaw.start_date);
+    const ed = normalizeYmd(mcRaw.end_date);
+    const cd = normalizeYmd(mcRaw.clear_date);
+    if (!sd || !ed || !cd) {
+      return res.status(400).json({ error: 'monthly_cycle dates must use YYYY-MM-DD format.' });
+    }
+    if (ed < sd) {
+      return res.status(400).json({ error: 'Monthly cycle end_date cannot be before start_date.' });
+    }
+    if (cd < ed) {
+      return res.status(400).json({ error: 'Monthly cycle clear_date cannot be before end_date.' });
+    }
+    req.body.monthly_cycle = {
+      start_date: sd,
+      end_date: ed,
+      clear_date: cd,
+      label: String(mcRaw.label || '').trim() || `${sd} to ${ed}`
+    };
+  }
+  const updated = { ...settings, ...req.body };
+  delete updated.theme_catalog;
+  writeDb('settings', updated);
+  syncSmppServerFromSettings(updated);
+  const responseSettings = {
+    ...updated,
+    theme_catalog: getThemeCatalog(updated),
+    default_theme_key: (updated.default_theme_key && getThemeCatalog(updated).some(t => t.key === updated.default_theme_key))
+      ? updated.default_theme_key
+      : 'daylight_cobalt'
+  };
+  broadcastWs({ type: 'brand_theme_updated', settings: responseSettings });
+  broadcastWs({ type: 'brand_updated', settings: responseSettings });
+  broadcastWs({ type: 'settings_updated', settings: responseSettings });
+  res.json(responseSettings);
+});
+
+app.get('/api/monthly-cycle', requireAuth, (req, res) => {
+  res.json({ success: true, monthly_cycle: getMonthlyCycleConfig() });
+});
+
+app.post('/api/monthly-cycle', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser?.role || '').toLowerCase();
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner only.' });
+  }
+  const body = req.body || {};
+  const sd = normalizeYmd(body.start_date);
+  const ed = normalizeYmd(body.end_date);
+  const cd = normalizeYmd(body.clear_date);
+  if (!sd || !ed || !cd) {
+    return res.status(400).json({ error: 'start_date, end_date, and clear_date are required (YYYY-MM-DD).' });
+  }
+  if (ed < sd) return res.status(400).json({ error: 'end_date cannot be before start_date.' });
+  if (cd < ed) return res.status(400).json({ error: 'clear_date cannot be before end_date.' });
+
+  const settings = readDb('settings') || {};
+  settings.monthly_cycle = {
+    start_date: sd,
+    end_date: ed,
+    clear_date: cd,
+    label: String(body.label || '').trim() || `${sd} to ${ed}`
+  };
+  writeDb('settings', settings);
+  broadcastWs({ type: 'settings_updated', settings });
+  res.json({ success: true, monthly_cycle: getMonthlyCycleConfig() });
+});
+
+// Dedicated Payterms Endpoints (R2)
+app.get('/api/payterms', (req, res) => {
+  res.json({ payterms: getMasterPayterms() });
+});
+
+app.post('/api/payterms', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser?.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  if (!isOwner) return res.status(403).json({ error: 'Forbidden. Owner only.' });
+
+  const rawList = Array.isArray(req.body) ? req.body : (req.body && req.body.payterms);
+  if (!Array.isArray(rawList) || rawList.length === 0) {
+    return res.status(400).json({ error: 'payterms must be a non-empty array of strings' });
+  }
+  const cleaned = Array.from(new Set(rawList.map(s => normalizePaytermKey(String(s).trim())).filter(Boolean)));
+  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty' });
+
+  const settings = readDb('settings') || {};
+  settings.payterms = cleaned;
+  writeDb('settings', settings);
+  res.json({ success: true, payterms: cleaned });
+});
+
+app.put('/api/payterms', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser?.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  if (!isOwner) return res.status(403).json({ error: 'Forbidden. Owner only.' });
+
+  const rawList = Array.isArray(req.body) ? req.body : (req.body && req.body.payterms);
+  if (!Array.isArray(rawList) || rawList.length === 0) {
+    return res.status(400).json({ error: 'payterms must be a non-empty array of strings' });
+  }
+  const cleaned = Array.from(new Set(rawList.map(s => normalizePaytermKey(String(s).trim())).filter(Boolean)));
+  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty' });
+
+  const settings = readDb('settings') || {};
+  settings.payterms = cleaned;
+  writeDb('settings', settings);
+  res.json({ success: true, payterms: cleaned });
+});
+
+// ── Role-Based Theme Catalog API (Create, Update, Delete - Owner Only) ──
+app.post('/api/settings/themes', (req, res) => {
+  try {
+    const sessionUser = req.sessionUser || getSessionUser(req);
+    const sRole = sessionUser ? (sessionUser.role || '').toLowerCase() : '';
+    if (sRole !== 'owner' && sRole !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden. Owner only.' });
+    }
+    const body = req.body || {};
+    const name = String(body.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ error: 'Theme name is required.' });
+    }
+    const hexRegex = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+    const reqColors = [
+      ['structure_bg', body.structure_bg],
+      ['primary_btn', body.primary_btn],
+      ['warning_btn', body.warning_btn]
+    ];
+    for (const [label, val] of reqColors) {
+      if (!val || !hexRegex.test(String(val).trim())) {
+        return res.status(400).json({ error: `Invalid hex color for ${label}.` });
+      }
+    }
+    if (body.danger_btn && !hexRegex.test(String(body.danger_btn).trim())) {
+      return res.status(400).json({ error: 'Invalid hex color for danger_btn.' });
+    }
+    if (body.structure_table_bg && !hexRegex.test(String(body.structure_table_bg).trim())) {
+      return res.status(400).json({ error: 'Invalid hex color for structure_table_bg.' });
+    }
+
+    const themeObj = buildCompleteRoleTheme(body, false);
+    if (DEFAULT_ROLE_THEMES.some(b => b.key === themeObj.key)) {
+      return res.status(400).json({ error: 'Built-in starter themes cannot be overwritten. Clone as a new custom theme.' });
+    }
+
+    const settings = readDb('settings') || {};
+    const customThemes = Array.isArray(settings.custom_themes) ? [...settings.custom_themes] : [];
+    const idx = customThemes.findIndex(t => t && t.key === themeObj.key);
+    if (idx >= 0) {
+      customThemes[idx] = themeObj;
+    } else {
+      customThemes.push(themeObj);
+    }
+    settings.custom_themes = customThemes;
+    if (body.set_as_default) {
+      settings.default_theme_key = themeObj.key;
+    }
+    writeDb('settings', settings);
+
+    const themeCatalog = getThemeCatalog(settings);
+    const defaultThemeKey = (settings.default_theme_key && themeCatalog.some(t => t.key === settings.default_theme_key))
+      ? settings.default_theme_key
+      : 'daylight_cobalt';
+    const responseSettings = { ...settings, theme_catalog: themeCatalog, default_theme_key: defaultThemeKey };
+    broadcastWs({ type: 'brand_theme_updated', settings: responseSettings });
+    res.json({ success: true, theme: themeObj, settings: responseSettings });
+  } catch (err) {
+    console.error('Error in /api/settings/themes POST:', err);
+    res.status(500).json({ error: 'Failed to save custom theme' });
+  }
+});
+
+app.delete('/api/settings/themes/:key', (req, res) => {
+  try {
+    const sessionUser = req.sessionUser || getSessionUser(req);
+    const sRole = sessionUser ? (sessionUser.role || '').toLowerCase() : '';
+    if (sRole !== 'owner' && sRole !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden. Owner only.' });
+    }
+    const key = String(req.params.key || '').trim();
+    if (!key) {
+      return res.status(400).json({ error: 'Theme key is required.' });
+    }
+    if (DEFAULT_ROLE_THEMES.some(b => b.key === key)) {
+      return res.status(400).json({ error: 'Built-in starter themes cannot be deleted.' });
+    }
+    const settings = readDb('settings') || {};
+    const activeDefault = settings.default_theme_key || 'daylight_cobalt';
+    if (activeDefault === key) {
+      return res.status(400).json({ error: 'Cannot delete the currently active default theme. Switch default first.' });
+    }
+    const existing = Array.isArray(settings.custom_themes) ? settings.custom_themes : [];
+    const filtered = existing.filter(t => t && t.key !== key);
+    if (filtered.length === existing.length) {
+      return res.status(404).json({ error: 'Custom theme not found.' });
+    }
+    settings.custom_themes = filtered;
+    writeDb('settings', settings);
+
+    const responseSettings = { ...settings, theme_catalog: getThemeCatalog(settings), default_theme_key: activeDefault };
+    broadcastWs({ type: 'brand_theme_updated', settings: responseSettings });
+    res.json({ success: true, key, settings: responseSettings });
+  } catch (err) {
+    console.error('Error in /api/settings/themes DELETE:', err);
+    res.status(500).json({ error: 'Failed to delete custom theme' });
+  }
+});
+
+// Legacy Preset Endpoints (Enforce Owner-only RBAC for backwards compatibility)
+app.post('/api/settings/presets', (req, res) => {
+  const sessionUser = req.sessionUser || getSessionUser(req);
+  const sRole = sessionUser ? (sessionUser.role || '').toLowerCase() : '';
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner only.' });
+  }
+  return res.status(410).json({ error: 'Legacy gradient presets replaced by /api/settings/themes.' });
+});
+
+app.delete('/api/settings/presets/:key', (req, res) => {
+  const sessionUser = req.sessionUser || getSessionUser(req);
+  const sRole = sessionUser ? (sessionUser.role || '').toLowerCase() : '';
+  if (sRole !== 'owner' && sRole !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden. Owner only.' });
+  }
+  return res.status(410).json({ error: 'Legacy gradient presets replaced by /api/settings/themes.' });
+});
+
+app.post('/api/settings/upload-logo', (req, res) => {
+  try {
+    const image = (req.body && (req.body.image || req.body.logo || req.body.data)) || '';
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ success: false, error: 'No image provided' });
+    }
+
+    let declaredExt = '';
+    let base64Payload = image.trim();
+    if (base64Payload.startsWith('data:')) {
+      const commaIdx = base64Payload.indexOf(',');
+      if (commaIdx === -1) {
+        return res.status(400).json({ success: false, error: 'Invalid image data URI' });
+      }
+      const header = base64Payload.slice(0, commaIdx).toLowerCase();
+      if (header.includes('svg')) {
+        return res.status(400).json({ success: false, error: 'SVG uploads are disabled for security. Upload PNG, JPG, WEBP, or GIF.' });
+      }
+      if (header.includes('image/png')) declaredExt = 'png';
+      else if (header.includes('image/jpeg') || header.includes('image/jpg')) declaredExt = 'jpg';
+      else if (header.includes('image/webp')) declaredExt = 'webp';
+      else if (header.includes('image/gif')) declaredExt = 'gif';
+      else {
+        return res.status(400).json({ success: false, error: 'Unsupported image MIME type. Use PNG, JPG, WEBP, or GIF.' });
+      }
+      base64Payload = base64Payload.slice(commaIdx + 1);
+    }
+
+    base64Payload = base64Payload.replace(/\s+/g, '');
+    const buffer = Buffer.from(base64Payload, 'base64');
+    if (!buffer || buffer.length < 8) {
+      return res.status(400).json({ success: false, error: 'Invalid image data' });
+    }
+    if (buffer.length > 2 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: 'Logo exceeds 2 MB limit' });
+    }
+
+    // Verify actual magic bytes (never trust data URI header or extension blindly)
+    let detectedExt = null;
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) detectedExt = 'png';
+    else if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) detectedExt = 'jpg';
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) detectedExt = 'gif';
+    else if (buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') detectedExt = 'webp';
+
+    if (!detectedExt || (declaredExt && declaredExt !== detectedExt)) {
+      return res.status(400).json({ success: false, error: 'Invalid or mismatched raster image file. Allowed formats: PNG, JPG, WEBP, GIF.' });
+    }
+
+    const ext = detectedExt;
+    const imgDir = path.join(STATIC_DIR, 'img');
+    if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+    const filename = `custom-logo.${ext}`;
+    fs.writeFileSync(path.join(imgDir, filename), buffer);
+    fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+    if (ext === 'png') {
+      try {
+        fs.writeFileSync(path.join(imgDir, 'humex-sms-logo.png'), buffer);
+      } catch (e) { console.warn('Logo sync fallback warning:', e.message); }
+    }
+
+    const mime = ext === 'jpg' ? 'jpeg' : ext;
+    const logoUrl = `/static/img/${filename}?v=${Date.now()}`;
+    const settings = readDb('settings') || {};
+    settings.logo_url = logoUrl;
+    settings.logo_data = `data:image/${mime};base64,${buffer.toString('base64')}`;
+    writeDb('settings', settings);
+
+    broadcastWs({ type: 'brand_theme_updated', settings });
+    broadcastWs({ type: 'brand_updated', settings });
+    broadcastWs({ type: 'settings_updated', settings });
+
+    return res.json({ success: true, logo_url: logoUrl, settings });
+  } catch (err) {
+    console.error('Error uploading logo:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to upload logo' });
+  }
+});
+
+app.get('/api/settings/min-payout', (req, res) => {
+  const settings = readDb('settings') || {};
+  res.json({
+    min_payout: Number(settings.min_payout || 0),
+    min_payout_pkr: getMinPayoutPkr(),
+    usd_to_pkr_rate: getUsdToPkrRate()
+  });
+});
+
+app.get('/api/permissions', (req, res) => {
+  res.json(readDb('permissions') || {});
+});
+
+app.post('/api/permissions', (req, res) => {
+  writeDb('permissions', req.body || {});
+  res.json({ success: true });
+});
+
+app.get('/api/webhook/config', (req, res) => {
+  res.json(readDb('webhook_config') || {});
+});
+
+app.post('/api/webhook/config', (req, res) => {
+  const current = readDb('webhook_config') || {};
+  const updated = { ...current, ...req.body };
+  writeDb('webhook_config', updated);
+  res.json({ success: true, data: updated });
+});
+
+app.post('/api/webhook/test', (req, res) => {
+  res.json({ success: true, message: 'Webhook test received' });
+});
+
+// ── System Backup & Restore ──────────────────────────────────
+app.get('/api/backup/export', (req, res) => {
+  try {
+    const settings = readDb('settings') || {};
+    const siteName = (settings.site_name || 'HUMAX SMS').trim();
+    const safePrefix = siteName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'humax_sms';
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `${safePrefix}_backup_${dateStr}.zip`;
+
+    const zip = new AdmZip();
+
+    if (fs.existsSync(DATA_DIR)) {
+      const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json') && !f.includes('.tmp.'));
+      for (const f of files) {
+        const fullPath = path.join(DATA_DIR, f);
+        try {
+          const content = fs.readFileSync(fullPath);
+          zip.addFile(`data/${f}`, content);
+        } catch (readErr) {
+          console.warn(`Could not read ${f} for backup:`, readErr.message);
+        }
+      }
+
+      const manifest = {
+        app: siteName,
+        exported_at: new Date().toISOString(),
+        files: files
+      };
+      zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
+    }
+
+    const zipBuffer = zip.toBuffer();
+
+    try {
+      const auditLogs = readDb('audit_logs') || [];
+      auditLogs.unshift({
+        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+        timestamp: new Date().toISOString(),
+        user: 'Admin',
+        action: 'Backup Exported',
+        detail: `Downloaded full system backup (${filename})`,
+        module: 'System',
+        ip: req.ip || '127.0.0.1'
+      });
+      writeDb('audit_logs', auditLogs.slice(0, 2000));
+    } catch (_) {}
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', zipBuffer.length);
+    return res.end(zipBuffer);
+  } catch (err) {
+    console.error('Error in /api/backup/export:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Export failed: ' + err.message });
+    }
+  }
+});
+
+// ── Direct Project Codebase Zip Download ───────────────────────
+app.get(['/api/download-project-zip', '/download-project', '/api/project/download-zip'], requireAuth, requireApiRole(['owner', 'admin']), (req, res) => {
+  try {
+    const settings = readDb('settings') || {};
+    const siteName = (settings.site_name || 'HUMAX SMS').trim();
+    const safePrefix = siteName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'humax_sms';
+    const downloadFilename = `humax-sms-complete-project.zip`;
+
+    const distDir = path.join(__dirname, 'dist');
+    let zipPath = null;
+    if (fs.existsSync(distDir)) {
+      const zips = fs.readdirSync(distDir).filter(f => f.startsWith('humex-sms-vps-') && f.endsWith('.zip')).sort().reverse();
+      if (zips.length > 0) zipPath = path.join(distDir, zips[0]);
+    }
+    if (!zipPath || !fs.existsSync(zipPath)) {
+      return res.status(404).json({ error: 'Production VPS package not found in dist/. Please run build script first.' });
+    }
+    const stat = fs.statSync(zipPath);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+    res.setHeader('Content-Length', stat.size);
+    const readStream = fs.createReadStream(zipPath);
+    return readStream.pipe(res);
+  } catch (err) {
+    console.error('Error downloading project zip:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Download failed: ' + err.message });
+    }
+  }
+});
+
+app.post('/api/backup/restore', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'Please upload a .zip backup file' });
+    }
+
+    let zip;
+    try {
+      zip = new AdmZip(req.file.buffer);
+    } catch (e) {
+      return res.status(400).json({ error: 'That file is not a valid zip archive' });
+    }
+
+    const zipEntries = zip.getEntries();
+    const jsonEntries = zipEntries.filter(entry => {
+      const name = entry.entryName;
+      return !entry.isDirectory && (name.startsWith('data/') || !name.includes('/')) && name.endsWith('.json') && !name.endsWith('manifest.json');
+    });
+
+    if (jsonEntries.length === 0) {
+      return res.status(400).json({ error: 'No valid data JSON files found inside this backup' });
+    }
+
+    const safetyDir = path.join(BACKUP_DIR, 'before_restore_' + new Date().toISOString().replace(/[:.]/g, '-'));
+    try {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      fs.cpSync(DATA_DIR, safetyDir, { recursive: true, filter: src => !src.includes(`${path.sep}archive`) });
+      const old = fs.readdirSync(BACKUP_DIR).filter(n => n.startsWith('before_restore_')).sort().reverse().slice(3);
+      for (const n of old) fs.rmSync(path.join(BACKUP_DIR, n), { recursive: true, force: true });
+    } catch (e) {
+      console.warn('Safety copy warning:', e.message);
+    }
+
+    const restored = [];
+    for (const entry of jsonEntries) {
+      const fileName = path.basename(entry.entryName);
+      if (!fileName.endsWith('.json')) continue;
+      try {
+        const rawContent = entry.getData().toString('utf8');
+        const parsed = JSON.parse(rawContent);
+        const targetPath = path.join(DATA_DIR, fileName);
+        atomicWriteFileSync(targetPath, rawContent);
+
+        const dbName = fileName.replace(/\.json$/, '');
+        DB_CACHE.set(dbName, parsed);
+        DB_MTIME.set(dbName, Date.now());
+        restored.push(fileName);
+      } catch (entryErr) {
+        console.warn(`Skipping invalid JSON file ${entry.entryName}:`, entryErr.message);
+      }
+    }
+
+    try {
+      const auditLogs = readDb('audit_logs') || [];
+      auditLogs.unshift({
+        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+        timestamp: new Date().toISOString(),
+        user: 'Admin',
+        action: 'Backup Restored',
+        detail: `Restored ${restored.length} file(s) from uploaded backup`,
+        module: 'System',
+        ip: req.ip || '127.0.0.1'
+      });
+      writeDb('audit_logs', auditLogs.slice(0, 2000));
+    } catch (_) {}
+
+    return res.json({ success: true, restored_files: restored.length, files: restored });
+  } catch (err) {
+    console.error('Error restoring backup:', err);
+    return res.status(500).json({ error: 'Failed to restore backup: ' + err.message });
+  }
+});
+
+// ── Search (Scoped by Role & Sanitized with safeUser) ───────────
+app.get('/api/search', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isAgent = sRole === 'agent';
+  const isClient = sRole === 'client';
+
+  const q = (req.query.q || '').trim().toLowerCase();
+  if (q.length < 2) {
+    return res.json({ numbers: [], clients: [], agents: [] });
+  }
+
+  let allNumbers = readDb('numbers') || [];
+  let allClients = readDb('clients') || [];
+  let allAgents = readDb('agents') || [];
+
+  if (isAgent) {
+    allAgents = allAgents.filter(a => String(a.username).toLowerCase() === String(sessionUser.username).toLowerCase() || Number(a.id) === Number(sessionUser.id));
+    allClients = allClients.filter(c => Number(c.agent_id) === Number(sessionUser.id) || String(c.agent_username || '').toLowerCase() === String(sessionUser.username).toLowerCase());
+    allNumbers = allNumbers.filter(n => Number(n.agent_id) === Number(sessionUser.id));
+  } else if (isClient) {
+    allAgents = [];
+    allClients = allClients.filter(c => String(c.username).toLowerCase() === String(sessionUser.username).toLowerCase() || Number(c.id) === Number(sessionUser.id));
+    allNumbers = allNumbers.filter(n => Number(n.client_id) === Number(sessionUser.id) || (n.user && String(n.user).toLowerCase() === String(sessionUser.username).toLowerCase()));
+  }
+
+  const isOwnerSearch = !isAgent && !isClient;
+  const numbers = allNumbers.filter(n => (n.number || '').toLowerCase().includes(q)).slice(0, 10);
+  const clients = allClients.filter(c => (c.username || '').toLowerCase().includes(q)).slice(0, 10).map(isOwnerSearch ? safeClientForOwner : safeUser);
+  const agents = allAgents.filter(a => (a.username || '').toLowerCase().includes(q)).slice(0, 10).map(safeUser);
+
+  res.json({ numbers, clients, agents });
+});
+
+app.get('/api/reports/business', (req, res) => {
+  let sms = readDb('sms_log') || [];
+  const { date_from, date_to } = req.query;
+
+  if (date_from) {
+    const df = String(date_from).trim().slice(0, 19);
+    sms = sms.filter(s => (s.timestamp || '').replace('T', ' ') >= df);
+  }
+  if (date_to) {
+    let dt = String(date_to).trim().slice(0, 19);
+    if (dt.length === 10) dt = dt + ' 23:59:59';
+    sms = sms.filter(s => (s.timestamp || '').replace('T', ' ') <= dt);
+  }
+
+  const delivered = sms.filter(s => s.status === 'delivered' || s.status === 'success');
+  const failed = sms.filter(s => s.status !== 'delivered' && s.status !== 'success');
+
+  const total_revenue = Math.round(sms.reduce((sum, s) => {
+    const rev = parseFloat(s.carrier_revenue ?? s.profit ?? s.payout ?? 0) || 0;
+    return sum + rev;
+  }, 0) * 100) / 100;
+
+  const clients = readDb('clients') || [];
+  const agents = readDb('agents') || [];
+
+  const clientToAgent = {};
+  clients.forEach(c => {
+    if (c && c.username) clientToAgent[String(c.username).toLowerCase()] = c.agent_id;
+  });
+
+  const agentNames = {};
+  agents.forEach(a => {
+    if (a && a.id) agentNames[a.id] = a.username || a.name || `Agent #${a.id}`;
+  });
+
+  const agentTotals = {};
+  for (const s of sms) {
+    let aid = s.agent_id;
+    if (!aid && s.user && clientToAgent[String(s.user).toLowerCase()]) {
+      aid = clientToAgent[String(s.user).toLowerCase()];
+    }
+    const agentName = aid ? (agentNames[aid] || `Agent #${aid}`) : (s.agent || s.user || 'Direct');
+    if (!agentTotals[agentName]) {
+      agentTotals[agentName] = { agent: agentName, sms_count: 0, revenue: 0 };
+    }
+    agentTotals[agentName].sms_count++;
+    const p = parseFloat(s.profit ?? s.payout ?? 0) || 0;
+    agentTotals[agentName].revenue = Math.round((agentTotals[agentName].revenue + p) * 100) / 100;
+  }
+
+  const top_agents = Object.values(agentTotals)
+    .sort((a, b) => b.revenue - a.revenue || b.sms_count - a.sms_count)
+    .slice(0, 10);
+
+  const numberTotals = {};
+  for (const s of sms) {
+    const num = s.number;
+    if (!num) continue;
+    numberTotals[num] = (numberTotals[num] || 0) + 1;
+  }
+
+  const top_numbers = Object.entries(numberTotals)
+    .map(([number, sms_count]) => ({ number, sms_count }))
+    .sort((a, b) => b.sms_count - a.sms_count)
+    .slice(0, 10);
+
+  const dailyMap = {};
+  for (const s of sms) {
+    const day = (s.timestamp || '').slice(0, 10);
+    if (!day) continue;
+    if (!dailyMap[day]) {
+      dailyMap[day] = { date: day, total: 0, delivered: 0, failed: 0, revenue: 0 };
+    }
+    dailyMap[day].total++;
+    if (s.status === 'delivered' || s.status === 'success') {
+      dailyMap[day].delivered++;
+    } else {
+      dailyMap[day].failed++;
+    }
+    const rev = parseFloat(s.carrier_revenue ?? s.profit ?? s.payout ?? 0) || 0;
+    dailyMap[day].revenue = Math.round((dailyMap[day].revenue + rev) * 100) / 100;
+  }
+  const daily_breakdown = Object.values(dailyMap).sort((a, b) => b.date.localeCompare(a.date));
+
+  res.json({
+    date_from: date_from || 'all-time',
+    date_to: date_to || 'now',
+    total_sms: sms.length,
+    delivered: delivered.length,
+    failed: failed.length,
+    success_rate: Math.round((delivered.length / Math.max(sms.length, 1)) * 1000) / 10,
+    total_revenue,
+    top_agents,
+    top_numbers,
+    daily_breakdown
+  });
+});
+
+app.get('/api/firewall/stats', (req, res) => {
+  const blocked = readDb('blocked_ips') || [];
+  const events = readDb('firewall_events') || [];
+  res.json({
+    blocked_count: blocked.length,
+    events_count: events.length,
+    active_threats: events.filter(e => e.severity === 'high').length
+  });
+});
+
+app.get('/api/smpp/server-info', (req, res) => {
+  const settings = readDb('settings') || {};
+  const sessions = readDb('smpp_sessions') || [];
+  const listening = Boolean(smppServerState.listening && smppServerInstance);
+  res.json({
+    host: smppServerState.host || settings.smpp_host || '0.0.0.0',
+    port: smppServerState.port || settings.smpp_port || 2775,
+    status: listening ? 'online' : (smppServerState.last_error ? 'error' : 'offline'),
+    listening,
+    started_at: smppServerState.started_at,
+    last_error: smppServerState.last_error,
+    bound_connections: sessions.length,
+    accounts_count: (readDb('smpp_accounts') || []).length,
+    active_sessions: sessions.length
+  });
+});
+
+app.get('/api/smpp/throughput', (req, res) => {
+  res.json(getSmppThroughputStats());
+});
+
+app.get('/api/smpp/dlr', (req, res) => {
+  const sms = readDb('sms_log') || [];
+  const delivered = sms.filter(s => (s.status || '').toLowerCase() === 'delivered').length;
+  const pending = sms.filter(s => (s.status || '').toLowerCase() === 'pending').length;
+  const failed = sms.filter(s => (s.status || '').toLowerCase() === 'failed').length;
+
+  const now = Date.now();
+  const hourlyData = [];
+  for (let i = 23; i >= 0; i--) {
+    const startHour = now - (i + 1) * 3600000;
+    const endHour = now - i * 3600000;
+    const inHour = sms.filter(s => {
+      const t = new Date(s.timestamp || s.date || 0).getTime();
+      return t >= startHour && t < endHour;
+    });
+    const delivInHour = inHour.filter(s => (s.status || '').toLowerCase() === 'delivered').length;
+    const rate = inHour.length > 0 ? Math.round((delivInHour / inHour.length) * 100) : 0;
+    hourlyData.push(rate);
+  }
+
+  res.json({
+    dlr_rate: sms.length ? Math.round((delivered / sms.length) * 100) : 0,
+    delivered,
+    pending,
+    failed,
+    data: hourlyData
+  });
+});
+
+// CSV Download for Numbers
+app.get('/api/numbers/download', (req, res) => {
+  const numbers = readDb('numbers') || [];
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="numbers.csv"');
+  let csv = 'ID,Number,Country,Provider,Service,Status,Agent,Client,Created\n';
+  numbers.forEach(n => {
+    csv += `"${n.id || ''}","${n.number || ''}","${n.country || ''}","${n.provider || ''}","${n.app || ''}","${n.status || ''}","${n.agent_id || ''}","${n.client_id || ''}","${n.created || ''}"\n`;
+  });
+  res.send(csv);
+});
+
+// Inbound Carrier / Webhook SMS API
+app.all(['/api/sms/inbound', '/api/inbound', '/api/sms/receive'], (req, res) => {
+  const p = { ...(req.query || {}), ...(req.body || {}) };
+
+  const sender = p.from || p.sender || p.cli || p.source || '';
+  const to_number = p.to || p.recipient || p.number || p.num || p.fnum || '';
+
+  let message = p.message || p.msg || p.text || p.body || '';
+  if (!message && p.msg64base) {
+    try {
+      message = Buffer.from(p.msg64base, 'base64').toString('utf-8');
+    } catch (e) {
+      message = p.msg64base;
+    }
+  }
+
+  const sms_id = p.sms_id || p.uuid || p.id || '';
+  const company = p.company || p.system_id || p.provider || '';
+  const inboundRate = extractCrApiRate(p);
+  const inboundCompanyRate = parseRateValue(p.company_rate ?? p.company_cost ?? p.cost ?? p.carrier_rate);
+
+  if (!to_number) {
+    return res.status(400).json({ status: 'error', error: 'Missing destination number (to)' });
+  }
+  if (!String(message || '').trim()) {
+    return res.status(400).json({ status: 'error', error: 'Missing message text' });
+  }
+
+  const result = ingestSms({
+    sender,
+    to_number,
+    message: String(message).slice(0, 2000),
+    sms_id,
+    company,
+    provider: p.provider || company || '',
+    range: p.range || p.range_name || p.range_label || '',
+    country: p.country || '',
+    currency: p.currency || '',
+    payout: Number.isFinite(inboundRate) ? inboundRate : undefined,
+    company_rate: Number.isFinite(inboundCompanyRate) ? inboundCompanyRate : undefined,
+    source: 'inbound_http'
+  });
+
+  res.json(result);
+});
+
+// ── WebSockets ────────────────────────────────────────────────
+
+function getReqIp(req) {
+  if (!req) return '127.0.0.1';
+  if (req.ip) return req.ip;
+  const xff = req.headers && req.headers['x-forwarded-for'];
+  if (xff && typeof xff === 'string') {
+    return xff.split(',')[0].trim();
+  }
+  return (req.socket && req.socket.remoteAddress) || '127.0.0.1';
+}
+
+server.prependListener('upgrade', (req, socket) => {
+  const ip = getReqIp(req);
+  if (isIpBlocked(ip)) {
+    logFirewallEvent(ip, 'WebSocket Handshake Blocked', req.url || '/ws');
+    try {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+    } catch (_) {}
+  }
+});
+
+const wsConnPerIp = new Map();
+function wsOriginAllowed(req) {
+  const origin = req && req.headers && req.headers.origin;
+  if (!origin) return true; // non-browser clients
+  try {
+    const parsedHost = new URL(origin).host.toLowerCase();
+    if (getEffectiveHosts(req).has(parsedHost)) return true;
+  } catch (e) { return false; }
+  return String(process.env.ALLOWED_ORIGINS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean).includes(origin.toLowerCase());
+}
+wss.on('connection', (ws, req) => {
+  const ip = getReqIp(req);
+  if (isIpBlocked(ip)) {
+    logFirewallEvent(ip, 'WebSocket Blocked IP Attempt', '/ws');
+    try { ws.close(1008, 'ip blocked'); } catch (e) { /* ignore */ }
+    return;
+  }
+  const user = req ? getSessionUser(req) : null;
+  if (!user || !wsOriginAllowed(req)) { try { ws.close(1008, 'unauthorized'); } catch (e) { /* ignore */ } return; }
+  const open = wsConnPerIp.get(ip) || 0;
+  if (open >= 10) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
+  wsConnPerIp.set(ip, open + 1);
+  // The live-feed routing in broadcastWs relies on this (Owner: all; others: only their own id)
+  ws.user = { id: user.id, role: user.role, username: user.username };
+  const now = new Date().toISOString();
+  ws.send(JSON.stringify({ type: 'connected', time: now, timestamp: now }));
+  ws.on('error', () => { /* ignore unhandled socket drops */ });
+  const interval = setInterval(() => {
+    if (ws.readyState === 1) {
+      const ts = new Date().toISOString();
+      const live = liveTrafficStats();
+      const cachedLog = DB_CACHE.get('sms_log');
+      const totalCount = Array.isArray(cachedLog) ? cachedLog.length : (readDb('sms_log') || []).length;
+      ws.send(JSON.stringify({
+        type: 'heartbeat',
+        time: ts,
+        timestamp: ts,
+        mps: live.mps,
+        total: totalCount,
+        success_rate: live.success_rate,
+        dlr: live.dlr
+      }));
+    }
+  }, 3000);
+  ws.on('close', () => { clearInterval(interval); wsConnPerIp.set(ip, Math.max(0, (wsConnPerIp.get(ip) || 1) - 1)); });
+});
+
+// ── Read-Only Owner Orphans Report (Fix 12) ───────────────────
+app.get('/api/reports/orphans', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = (sessionUser.role || '').toLowerCase();
+  const isOwner = sRole === 'owner' || sRole === 'admin';
+  if (!isOwner) {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+
+  const agents = readDb('agents') || [];
+  const clients = readDb('clients') || [];
+  const numbers = readDb('numbers') || [];
+
+  const agentIds = new Set(agents.map(a => Number(a.id)));
+  const clientIds = new Set(clients.map(c => Number(c.id)));
+
+  const orphanedClients = clients.filter(c => {
+    return c.agent_id && !agentIds.has(Number(c.agent_id));
+  });
+  const orphanedNumbers = numbers.filter(n => {
+    const hasMissingClient = n.client_id && !clientIds.has(Number(n.client_id));
+    const hasMissingAgent = n.agent_id && !agentIds.has(Number(n.agent_id));
+    return hasMissingClient || hasMissingAgent;
+  });
+
+  res.json({
+    success: true,
+    summary: {
+      orphaned_clients_count: orphanedClients.length,
+      orphaned_numbers_count: orphanedNumbers.length
+    },
+    orphaned_clients: orphanedClients.map(safeUser),
+    orphaned_numbers: orphanedNumbers
+  });
+});
+
+// ── CRITICAL: Safe API 404 handler (Must ALWAYS return JSON, never HTML) ─────
+app.all('/api/*', (req, res) => {
+  console.warn(`[404 NOT FOUND] ${req.method} ${req.originalUrl || req.url || req.path}`);
+  res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
+});
+
+// Fallback for HTML routing
+app.use((req, res) => {
+  if (req.accepts('html')) {
+    sendInjectedHtml(res, path.join(STATIC_DIR, 'index.html'), req);
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// ── Read-Only Orphaned Numbers Check (Fix 12: Do NOT delete automatically) ──
+function cleanupOrphanedNumbers() {
+  try {
+    const ranges = readDb('sms_ranges') || [];
+    if (!Array.isArray(ranges) || ranges.length === 0) return;
+    const validRangeIds = new Set(ranges.map(r => Number(r.id)));
+    const numbers = readDb('numbers') || [];
+    if (!Array.isArray(numbers) || numbers.length === 0) return;
+    const orphanCount = numbers.filter(n => n.range_id && !validRangeIds.has(Number(n.range_id))).length;
+    if (orphanCount > 0) {
+      console.log(`[Audit Check] Notice: ${orphanCount} number(s) reference non-existent ranges (read-only audit, preserved).`);
+    }
+  } catch (err) {
+    console.error('cleanupOrphanedNumbers error:', err);
+  }
+}
+
+const BIND_HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, BIND_HOST, () => {
+  initSmppEngine();
+  runPaytermMigration();
+  cleanupOrphanedNumbers();
+  console.log(`[HUMEX SMS] Server running on http://${BIND_HOST}:${PORT}`);
+  console.log(`  ➜  Local:   http://localhost:${PORT}/`);
+  console.log(`  ➜  Network: http://${BIND_HOST}:${PORT}/`);
+});

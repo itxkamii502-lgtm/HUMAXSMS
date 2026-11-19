@@ -1,0 +1,128 @@
+[
+  {
+    "id": 14,
+    "actor": "agent_ali",
+    "action": "Update payout_requests",
+    "details": "Updated item #5",
+    "module": "payout_requests",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T13:27:47.520Z"
+  },
+  {
+    "id": 13,
+    "actor": "agent_ali",
+    "action": "Login Success",
+    "details": "Logged in as Agent",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T13:27:47.500Z"
+  },
+  {
+    "id": 12,
+    "actor": "agent_ali",
+    "action": "Login Success",
+    "details": "Logged in as Agent",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T13:27:30.236Z"
+  },
+  {
+    "id": 11,
+    "actor": "agent_ali",
+    "action": "Login Success",
+    "details": "Logged in as Agent",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T13:27:10.056Z"
+  },
+  {
+    "id": 10,
+    "actor": "client_hamza",
+    "action": "Login Success",
+    "details": "Logged in as Client",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:46:03.392Z"
+  },
+  {
+    "id": 9,
+    "actor": "agent_ali",
+    "action": "Login Success",
+    "details": "Logged in as Agent",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:46:03.243Z"
+  },
+  {
+    "id": 8,
+    "actor": "client_hamza",
+    "action": "Login Success",
+    "details": "Logged in as Client",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:45:50.193Z"
+  },
+  {
+    "id": 7,
+    "actor": "agent_ali",
+    "action": "Login Success",
+    "details": "Logged in as Agent",
+    "module": "Auth",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:45:50.038Z"
+  },
+  {
+    "id": 1,
+    "actor": "Kamran_Bhatti",
+    "action": "Seed Test Ranges",
+    "details": "Created 15 test SMS ranges (11 Standard + 4 Whitenoise {W})",
+    "module": "Numbers",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:34:45.776Z"
+  },
+  {
+    "id": 2,
+    "actor": "Kamran_Bhatti",
+    "action": "Import Test Numbers",
+    "details": "Added 150 sequential test numbers (10 per range)",
+    "module": "Numbers",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-19T12:35:45.776Z"
+  },
+  {
+    "id": 3,
+    "actor": "agent_ali",
+    "action": "Agent Client Rate Set",
+    "details": "Published PKR rates for 15 ranges",
+    "module": "Rates",
+    "ip": "192.168.1.21",
+    "timestamp": "2026-11-17T12:44:45.776Z"
+  },
+  {
+    "id": 4,
+    "actor": "agent_bilal",
+    "action": "Agent Client Rate Set",
+    "details": "Published PKR rates for 15 ranges",
+    "module": "Rates",
+    "ip": "192.168.1.42",
+    "timestamp": "2026-11-17T12:44:45.776Z"
+  },
+  {
+    "id": 5,
+    "actor": "Kamran_Bhatti",
+    "action": "Record Payout",
+    "details": "Paid $42.00 USD to Agent agent_ali",
+    "module": "Payments",
+    "ip": "127.0.0.1",
+    "timestamp": "2026-11-14T12:44:45.776Z"
+  },
+  {
+    "id": 6,
+    "actor": "agent_ali",
+    "action": "Record Payout",
+    "details": "Paid Rs. 2,500 PKR to Client client_hamza",
+    "module": "Payments",
+    "ip": "192.168.1.21",
+    "timestamp": "2026-11-12T12:44:45.776Z"
+  }
+]

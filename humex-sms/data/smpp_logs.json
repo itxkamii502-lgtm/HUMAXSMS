@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "event": "bind_ok",
+    "system_id": "ROUTEX_BIND_01",
+    "ip": "10.10.0.12",
+    "message": "Bound as transceiver for RouteX Carrier Trunk",
+    "timestamp": "2026-11-19T12:32:45.776Z"
+  },
+  {
+    "id": 2,
+    "event": "deliver_sm",
+    "system_id": "ROUTEX_BIND_01",
+    "ip": "10.10.0.12",
+    "message": "Delivered OTP to +447700010001 (CLI: WhatsApp)",
+    "timestamp": "2026-11-19T12:26:45.776Z"
+  },
+  {
+    "id": 3,
+    "event": "deliver_sm",
+    "system_id": "DIRECT_SMPP_02",
+    "ip": "10.10.0.18",
+    "message": "Delivered OTP to +923001030001 (CLI: Google)",
+    "timestamp": "2026-11-19T12:10:45.776Z"
+  },
+  {
+    "id": 4,
+    "event": "enquire_link",
+    "system_id": "ROUTEX_BIND_01",
+    "ip": "10.10.0.12",
+    "message": "Keep-alive heartbeat acknowledged (14ms)",
+    "timestamp": "2026-11-19T11:56:45.776Z"
+  },
+  {
+    "id": 5,
+    "event": "bind_ok",
+    "system_id": "DIRECT_SMPP_02",
+    "ip": "10.10.0.18",
+    "message": "Bound as receiver for DirectCarrier SMPP Link",
+    "timestamp": "2026-11-19T10:44:45.776Z"
+  },
+  {
+    "id": 6,
+    "event": "dlr_failed",
+    "system_id": "ROUTEX_BIND_01",
+    "ip": "10.10.0.12",
+    "message": "DLR UNDELIV received for +491512040001",
+    "timestamp": "2026-11-19T09:44:45.776Z"
+  }
+]

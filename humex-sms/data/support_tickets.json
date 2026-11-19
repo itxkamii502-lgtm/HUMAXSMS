@@ -1,0 +1,49 @@
+[
+  {
+    "id": 1,
+    "user_id": 1,
+    "username": "agent_ali",
+    "role": "Agent",
+    "subject": "Need higher daily quota on UK Orange 01",
+    "message": "Traffic is growing well on UK Orange 01. Please increase our allocation quota.",
+    "priority": "high",
+    "status": "open",
+    "created": "2026-11-19T06:44:45.776Z",
+    "updated_at": "2026-11-19T06:44:45.776Z",
+    "replies": []
+  },
+  {
+    "id": 2,
+    "user_id": 1,
+    "username": "client_hamza",
+    "role": "Client",
+    "agent_id": 1,
+    "subject": "Confirm PKR JazzCash Payout #5",
+    "message": "Submitted Rs. 1,500 payout request, kindly verify.",
+    "priority": "normal",
+    "status": "open",
+    "created": "2026-11-19T12:14:45.776Z",
+    "updated_at": "2026-11-19T12:14:45.776Z",
+    "replies": []
+  },
+  {
+    "id": 3,
+    "user_id": 2,
+    "username": "agent_bilal",
+    "role": "Agent",
+    "subject": "Whitenoise CDR 2 Sync Verified",
+    "message": "Checked Special Number Sync on UK Whitenoise 12 {W}, working smoothly.",
+    "priority": "low",
+    "status": "resolved",
+    "created": "2026-11-15T12:44:45.776Z",
+    "updated_at": "2026-11-16T12:44:45.776Z",
+    "replies": [
+      {
+        "by": "Kamran_Bhatti",
+        "role": "Owner",
+        "message": "Confirmed and marked resolved.",
+        "timestamp": "2026-11-16T12:44:45.776Z"
+      }
+    ]
+  }
+]

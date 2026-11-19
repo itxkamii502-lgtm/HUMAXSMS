@@ -1,0 +1,822 @@
+[
+  {
+    "id": 1,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 1,
+    "range_name": "UK Orange 01",
+    "client_rate_pkr": 4,
+    "client_rate_usd_eq": 0.014286,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 2,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 2,
+    "range_name": "USA T-Mobile 02",
+    "client_rate_pkr": 3.4,
+    "client_rate_usd_eq": 0.012143,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 3,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 3,
+    "range_name": "Pakistan Jazz 03",
+    "client_rate_pkr": 2.8,
+    "client_rate_usd_eq": 0.01,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 4,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 4,
+    "range_name": "Germany Vodafone 04",
+    "client_rate_pkr": 4.4,
+    "client_rate_usd_eq": 0.015714,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 5,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 5,
+    "range_name": "France Orange 05",
+    "client_rate_pkr": 4.2,
+    "client_rate_usd_eq": 0.015,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 6,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 6,
+    "range_name": "Netherlands KPN 06",
+    "client_rate_pkr": 3.8,
+    "client_rate_usd_eq": 0.013571,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 7,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 7,
+    "range_name": "Canada Rogers 07",
+    "client_rate_pkr": 3.6,
+    "client_rate_usd_eq": 0.012857,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 8,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 8,
+    "range_name": "Spain Movistar 08",
+    "client_rate_pkr": 3.8,
+    "client_rate_usd_eq": 0.013571,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 9,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 9,
+    "range_name": "Italy TIM 09",
+    "client_rate_pkr": 4,
+    "client_rate_usd_eq": 0.014286,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 10,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 10,
+    "range_name": "UAE Etisalat 10",
+    "client_rate_pkr": 4.8,
+    "client_rate_usd_eq": 0.017143,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 11,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 11,
+    "range_name": "Turkey Turkcell 11",
+    "client_rate_pkr": 3.2,
+    "client_rate_usd_eq": 0.011429,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 12,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 12,
+    "range_name": "UK Whitenoise 12 {W}",
+    "client_rate_pkr": 5.2,
+    "client_rate_usd_eq": 0.018571,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 13,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 13,
+    "range_name": "USA Whitenoise 13 {W}",
+    "client_rate_pkr": 5,
+    "client_rate_usd_eq": 0.017857,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 14,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 14,
+    "range_name": "Germany Whitenoise 14 {W}",
+    "client_rate_pkr": 5.6,
+    "client_rate_usd_eq": 0.02,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 15,
+    "agent_id": 1,
+    "agent_username": "agent_ali",
+    "range_id": 15,
+    "range_name": "Poland Whitenoise 15 {W}",
+    "client_rate_pkr": 4.6,
+    "client_rate_usd_eq": 0.016429,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 16,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 1,
+    "range_name": "UK Orange 01",
+    "client_rate_pkr": 3.8,
+    "client_rate_usd_eq": 0.013571,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 17,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 2,
+    "range_name": "USA T-Mobile 02",
+    "client_rate_pkr": 3.2,
+    "client_rate_usd_eq": 0.011429,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 18,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 3,
+    "range_name": "Pakistan Jazz 03",
+    "client_rate_pkr": 2.6,
+    "client_rate_usd_eq": 0.009286,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 19,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 4,
+    "range_name": "Germany Vodafone 04",
+    "client_rate_pkr": 4.2,
+    "client_rate_usd_eq": 0.015,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 20,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 5,
+    "range_name": "France Orange 05",
+    "client_rate_pkr": 4,
+    "client_rate_usd_eq": 0.014286,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 21,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 6,
+    "range_name": "Netherlands KPN 06",
+    "client_rate_pkr": 3.6,
+    "client_rate_usd_eq": 0.012857,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 22,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 7,
+    "range_name": "Canada Rogers 07",
+    "client_rate_pkr": 3.4,
+    "client_rate_usd_eq": 0.012143,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 23,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 8,
+    "range_name": "Spain Movistar 08",
+    "client_rate_pkr": 3.6,
+    "client_rate_usd_eq": 0.012857,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 24,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 9,
+    "range_name": "Italy TIM 09",
+    "client_rate_pkr": 3.8,
+    "client_rate_usd_eq": 0.013571,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 25,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 10,
+    "range_name": "UAE Etisalat 10",
+    "client_rate_pkr": 4.6,
+    "client_rate_usd_eq": 0.016429,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 26,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 11,
+    "range_name": "Turkey Turkcell 11",
+    "client_rate_pkr": 3,
+    "client_rate_usd_eq": 0.010714,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 27,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 12,
+    "range_name": "UK Whitenoise 12 {W}",
+    "client_rate_pkr": 5,
+    "client_rate_usd_eq": 0.017857,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 28,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 13,
+    "range_name": "USA Whitenoise 13 {W}",
+    "client_rate_pkr": 4.8,
+    "client_rate_usd_eq": 0.017143,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 29,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 14,
+    "range_name": "Germany Whitenoise 14 {W}",
+    "client_rate_pkr": 5.4,
+    "client_rate_usd_eq": 0.019286,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 30,
+    "agent_id": 2,
+    "agent_username": "agent_bilal",
+    "range_id": 15,
+    "range_name": "Poland Whitenoise 15 {W}",
+    "client_rate_pkr": 4.4,
+    "client_rate_usd_eq": 0.015714,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 31,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 1,
+    "range_name": "UK Orange 01",
+    "client_rate_pkr": 3.9,
+    "client_rate_usd_eq": 0.013929,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 32,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 2,
+    "range_name": "USA T-Mobile 02",
+    "client_rate_pkr": 3.3,
+    "client_rate_usd_eq": 0.011786,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 33,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 3,
+    "range_name": "Pakistan Jazz 03",
+    "client_rate_pkr": 2.7,
+    "client_rate_usd_eq": 0.009643,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 34,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 4,
+    "range_name": "Germany Vodafone 04",
+    "client_rate_pkr": 4.3,
+    "client_rate_usd_eq": 0.015357,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 35,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 5,
+    "range_name": "France Orange 05",
+    "client_rate_pkr": 4.1,
+    "client_rate_usd_eq": 0.014643,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 36,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 6,
+    "range_name": "Netherlands KPN 06",
+    "client_rate_pkr": 3.7,
+    "client_rate_usd_eq": 0.013214,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 37,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 7,
+    "range_name": "Canada Rogers 07",
+    "client_rate_pkr": 3.5,
+    "client_rate_usd_eq": 0.0125,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 38,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 8,
+    "range_name": "Spain Movistar 08",
+    "client_rate_pkr": 3.7,
+    "client_rate_usd_eq": 0.013214,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 39,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 9,
+    "range_name": "Italy TIM 09",
+    "client_rate_pkr": 3.9,
+    "client_rate_usd_eq": 0.013929,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 40,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 10,
+    "range_name": "UAE Etisalat 10",
+    "client_rate_pkr": 4.7,
+    "client_rate_usd_eq": 0.016786,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  },
+  {
+    "id": 41,
+    "agent_id": 3,
+    "agent_username": "agent_usman",
+    "range_id": 11,
+    "range_name": "Turkey Turkcell 11",
+    "client_rate_pkr": 3.1,
+    "client_rate_usd_eq": 0.011071,
+    "allowed_quantities": [
+      5,
+      10,
+      25,
+      50
+    ],
+    "daily_request_limit": 5,
+    "published": true,
+    "fx_usd_to_pkr_at_save": 280,
+    "updated_at": "2026-11-17T12:44:45.776Z",
+    "created": "2026-11-04T12:44:45.776Z"
+  }
+]

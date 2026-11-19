@@ -1,0 +1,24 @@
+{
+  "owner_to_agent": {
+    "default_rate": 0.03,
+    "description": "Owner pays agent per OTP delivered",
+    "currency": "USD"
+  },
+  "service_rates": {
+    "WhatsApp": { "owner_to_agent": 0.03 },
+    "Telegram": { "owner_to_agent": 0.025 },
+    "Google": { "owner_to_agent": 0.035 },
+    "Facebook": { "owner_to_agent": 0.028 },
+    "Amazon": { "owner_to_agent": 0.032 },
+    "Aadhaar": { "owner_to_agent": 0.05 },
+    "TikTok": { "owner_to_agent": 0.025 },
+    "Twitter": { "owner_to_agent": 0.022 },
+    "Instagram": { "owner_to_agent": 0.025 },
+    "Netflix": { "owner_to_agent": 0.03 },
+    "Discord": { "owner_to_agent": 0.018 },
+    "Snapchat": { "owner_to_agent": 0.022 },
+    "LinkedIn": { "owner_to_agent": 0.03 },
+    "Microsoft": { "owner_to_agent": 0.033 },
+    "Uber": { "owner_to_agent": 0.022 }
+  }
+}

@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HUMAX SMS | Login</title>
+<link rel="icon" type="image/png" href="/static/img/humex-sms-logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script>
+(function(){
+  try {
+    var s = window.__BRAND_SETTINGS__;
+    if (!s) {
+      var c = localStorage.getItem('app_brand_settings');
+      if (c) s = JSON.parse(c);
+    }
+    if (s && s.site_name) {
+      document.title = s.site_name + ' | Login';
+    }
+    var cat = (s && Array.isArray(s.theme_catalog)) ? s.theme_catalog : [];
+    var defKey = (s && s.default_theme_key) || 'daylight_cobalt';
+    var th = null;
+    for (var i = 0; i < cat.length; i++) {
+      if (cat[i] && cat[i].key === defKey) { th = cat[i]; break; }
+    }
+    if (th && document.documentElement) {
+      var r = document.documentElement;
+      r.style.setProperty('--theme-btn-primary', th.primary_btn || '#2563eb');
+      r.style.setProperty('--theme-btn-primary-hover', th.primary_btn_hover || '#1d4ed8');
+      r.style.setProperty('--brand-primary', th.primary_btn || '#2563eb');
+      r.style.setProperty('--brand-hover', th.primary_btn_hover || '#1d4ed8');
+    }
+  } catch(e) {}
+})();
+</script>
+<script src="/static/js/shared-brand-theme.js"></script>
+<script src="/static/js/shared-auth-guard.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  height: 100%;
+}
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f8fafc;
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(37, 99, 235, 0.06) 0%, transparent 55%),
+    radial-gradient(circle at 100% 100%, rgba(16, 185, 129, 0.04) 0%, transparent 50%),
+    linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
+  color: #0f172a;
+  padding: 16px;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── Clean White Card ── */
+.login-card {
+  width: 290.478px;
+  height: 485.863px;
+  max-width: 460px;
+  background: #ffffff;
+  border-radius: 18px;
+  border: 1px solid #e2e8f0;
+  box-shadow:
+    0 20px 40px -15px rgba(15, 23, 42, 0.1),
+    0 4px 12px -2px rgba(15, 23, 42, 0.04);
+  padding: 28px 23px 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  animation: cardFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  position: relative;
+  box-sizing: border-box;
+}
+@keyframes cardFadeIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Brand Logo Wrap ── */
+.brand-logo-wrap {
+  width: 100%;
+  max-width: 240px;
+  height: 84px;
+  max-height: 88px;
+  margin: 0 auto 14px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.brand-logo-img {
+  max-width: 220px !important;
+  max-height: 84px !important;
+  width: auto !important;
+  height: 84px !important;
+  object-fit: contain !important;
+  transition: transform 0.2s ease;
+}
+.brand-logo-img:hover {
+  transform: scale(1.03);
+}
+
+/* ── Header Typography ── */
+.login-title {
+  font-size: 17px;
+  font-weight: 800;
+  color: #0f172a;
+  text-align: center;
+  letter-spacing: -0.3px;
+  margin-bottom: 2px;
+}
+.login-sub {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #64748b;
+  text-align: center;
+  margin-top: 0;
+  margin-bottom: 18px;
+}
+
+/* ── Error Notification ── */
+.login-err {
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  text-align: center;
+}
+
+/* ── Input Group & Fields ── */
+.pill-input-wrap, .input-wrap {
+  position: relative;
+  height: 42px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  margin-bottom: 12px;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.pill-input-wrap:focus-within, .input-wrap:focus-within {
+  background: #ffffff;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+.pill-icon, .input-icon {
+  color: #94a3b8;
+  font-size: 14px;
+  margin-right: 10px;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+.pill-input-wrap:focus-within .pill-icon, .input-wrap:focus-within .input-icon {
+  color: #2563eb;
+}
+.pill-input-wrap input, .input-wrap input {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #0f172a;
+  outline: none;
+}
+.pill-input-wrap input::placeholder, .input-wrap input::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+.eye-toggle {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px;
+  margin-left: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+.eye-toggle:hover {
+  color: #475569;
+}
+
+/* ── Inline Clean Captcha ── */
+.captcha-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  user-select: none;
+}
+.captcha-label-wrap {
+  display: flex;
+  align-items: center;
+}
+.captcha-question {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e293b;
+  font-family: 'Consolas', 'SFMono-Regular', 'Roboto Mono', monospace;
+  letter-spacing: 0.3px;
+}
+.captcha-box-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.captcha-input {
+  width: 80px;
+  height: 32px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-family: 'Consolas', 'SFMono-Regular', 'Roboto Mono', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  text-align: center;
+  outline: none;
+  transition: all 0.2s ease;
+}
+.captcha-input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2.5px rgba(37, 99, 235, 0.16);
+}
+.captcha-reload {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+.captcha-reload:hover {
+  color: #2563eb;
+  transform: rotate(45deg);
+}
+
+/* ── Form Layout & Alignment ── */
+#loginForm {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+#loginForm .pill-input-wrap,
+#loginForm #twoFaWrap,
+#loginForm .captcha-container {
+  width: 100%;
+  max-width: 243.258px;
+}
+
+/* ── Primary Action Button ── */
+.login-btn-green, .login-btn-primary {
+  width: 100%;
+  height: 42px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+  color: #ffffff !important;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+  transition: all 0.18s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+#submitBtn {
+  width: 243.258px;
+  height: 52.9902px;
+  margin: 4px auto 0;
+  align-self: center;
+  font-size: 14px;
+}
+.login-btn-green:hover, .login-btn-primary:hover {
+  background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+}
+.login-btn-green:active, .login-btn-primary:active {
+  transform: translateY(0);
+}
+.login-btn-green:disabled, .login-btn-primary:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Mobile 100vh / 100dvh Zero-Scroll Fit ── */
+@media (max-width: 480px) {
+  body {
+    padding: 8px 10px;
+  }
+  .login-card {
+    padding: 26px 22px 22px;
+    border-radius: 16px;
+    max-width: 390px;
+  }
+  .brand-logo-wrap {
+    height: 68px;
+    max-height: 72px;
+    max-width: 200px;
+    margin-bottom: 10px;
+  }
+  .brand-logo-img {
+    height: 68px !important;
+    max-height: 68px !important;
+    max-width: 190px !important;
+  }
+  .login-title {
+    font-size: 15px;
+  }
+  .login-sub {
+    font-size: 11.5px;
+    margin-bottom: 14px;
+  }
+  .pill-input-wrap, .input-wrap {
+    height: 38px;
+    padding: 0 10px;
+    margin-bottom: 10px;
+  }
+  .pill-input-wrap input, .input-wrap input {
+    font-size: 16px;
+  }
+  .captcha-container {
+    padding: 6px 10px;
+    margin-bottom: 12px;
+  }
+  .captcha-question {
+    font-size: 12px;
+  }
+  .captcha-input {
+    width: 72px;
+    height: 28px;
+    font-size: 12px;
+  }
+  .login-btn-green, .login-btn-primary {
+    height: 38px;
+    font-size: 12.5px;
+  }
+}
+@media (max-width: 360px) {
+  .login-card {
+    padding: 22px 18px 18px;
+    border-radius: 14px;
+  }
+  .brand-logo-wrap {
+    height: 58px;
+    max-height: 62px;
+    max-width: 175px;
+    margin-bottom: 8px;
+  }
+  .brand-logo-img {
+    height: 58px !important;
+    max-height: 58px !important;
+    max-width: 165px !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<main class="login-card">
+  <!-- Brand Logo -->
+  <div class="brand-logo-wrap">
+    <img id="login-logo-img" class="brand-logo-img" src="/static/img/humex-sms-logo.png" style="height:84px;max-height:84px;max-width:220px;width:auto;object-fit:contain;display:block;" onerror="this.onerror=null;this.src='/static/img/humex-sms-logo.svg';" alt="HUMAX SMS">
+  </div>
+
+  <!-- Title & Subtitle -->
+  <div class="login-title">HUMAX SMS</div>
+  <div class="login-sub">Sign in to your account</div>
+
+
+  <!-- Error Notification -->
+  <div id="errorMsg" class="login-err" style="display:none;"></div>
+
+  <!-- Login Form -->
+  <form id="loginForm" novalidate>
+    <!-- Username -->
+    <div class="pill-input-wrap">
+      <i class="fas fa-user pill-icon"></i>
+      <input type="text" id="username" name="username" placeholder="Username" autocomplete="username" required>
+    </div>
+
+    <!-- Password -->
+    <div class="pill-input-wrap">
+      <i class="fas fa-lock pill-icon"></i>
+      <input type="password" id="password" name="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="button" class="eye-toggle" id="togglePassword" aria-label="Toggle password visibility">
+        <i class="far fa-eye" id="eyeIcon"></i>
+      </button>
+    </div>
+
+    <!-- 2FA Code Input (Revealed if account has 2FA enabled) -->
+    <div id="twoFaWrap" style="display:none; margin-bottom: 12px;">
+      <div class="pill-input-wrap" style="border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);">
+        <i class="fas fa-shield-alt pill-icon" style="color: #2563eb;"></i>
+        <input type="text" id="twoFaCode" name="two_fa_code" placeholder="Enter 6-digit 2FA code" autocomplete="one-time-code" maxlength="8">
+      </div>
+      <div id="twoFaHint" style="font-size: 11.5px; color: #dc2626; font-weight: 600; margin-top: 4px; padding-left: 8px;">Enter your 2FA verification code.</div>
+    </div>
+
+    <!-- Inline Math Captcha -->
+    <div class="captcha-container">
+      <div class="captcha-label-wrap">
+        <i class="fas fa-calculator" style="color:#2563eb;margin-right:6px;font-size:12px;"></i>
+        <span class="captcha-question" id="captchaQuestion">Loading...</span>
+      </div>
+      <div class="captcha-box-wrap">
+        <input type="number" id="captchaInput" class="captcha-input" placeholder="?" autocomplete="off" required>
+        <button type="button" class="captcha-reload" id="reloadCaptcha" title="New Question" aria-label="New Captcha">
+          <i class="fas fa-sync-alt"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Primary LOGIN Button -->
+    <button type="submit" class="login-btn-green login-btn-primary" id="submitBtn">
+      <span>SIGN IN</span>
+      <i class="fas fa-arrow-right" style="font-size:12px;"></i>
+    </button>
+
+  </form>
+</main>
+
+<script>
+// Synchronous instant brand load (zero lag / zero flash)
+function applyBrandUI(s) {
+  if (!s) return;
+  const name = s.site_name || 'HUMAX SMS';
+  document.title = name + ' | Login';
+  const titleEl = document.querySelector('.login-title');
+  if (titleEl && s.site_name) titleEl.textContent = s.site_name;
+  if (s.logo_url) {
+    const logoEl = document.getElementById('login-logo-img');
+    if (logoEl) {
+      logoEl.src = s.logo_url;
+      logoEl.alt = name;
+    }
+  }
+}
+
+// 1. Apply immediately from window.__BRAND_SETTINGS__ or localStorage (0ms delay)
+try {
+  const instant = window.__BRAND_SETTINGS__ || JSON.parse(localStorage.getItem('app_brand_settings') || '{}');
+  if (instant && Object.keys(instant).length) applyBrandUI(instant);
+} catch (e) {}
+
+// 2. Sync brand settings silently in background
+(async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings', { cache: 'no-store' });
+    if (res.ok) {
+      const s = await res.json();
+      if (s) applyBrandUI(s);
+    }
+  } catch (_) {}
+})();
+
+// Math Captcha Logic with Automatic Fresh Challenge
+let currentCaptchaId = '';
+let currentCaptchaAnswer = null;
+let captchaFetchPromise = null;
+
+async function generateCaptcha() {
+  if (captchaFetchPromise) return captchaFetchPromise;
+  captchaFetchPromise = (async () => {
+    const qEl = document.getElementById('captchaQuestion');
+    const inp = document.getElementById('captchaInput');
+    if (inp) {
+      inp.value = '';
+      inp.placeholder = '?';
+    }
+    try {
+      const res = await fetch('/api/auth/captcha?_=' + Date.now(), { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        currentCaptchaId = data.id || '';
+        if (qEl) qEl.textContent = data.question || '';
+        const match = String(data.question || '').match(/(\d+)\s*\+\s*(\d+)/);
+        currentCaptchaAnswer = match ? (parseInt(match[1], 10) + parseInt(match[2], 10)) : null;
+        return;
+      }
+    } catch (_) {}
+
+    // Local fallback challenge if offline
+    const n1 = Math.floor(Math.random() * 12) + 1;
+    const n2 = Math.floor(Math.random() * 12) + 1;
+    currentCaptchaAnswer = n1 + n2;
+    currentCaptchaId = 'local_' + Date.now();
+    if (qEl) qEl.textContent = 'What is ' + n1 + ' + ' + n2 + ' =';
+  })();
+
+  try {
+    await captchaFetchPromise;
+  } finally {
+    captchaFetchPromise = null;
+  }
+}
+
+const reloadBtn = document.getElementById('reloadCaptcha');
+if (reloadBtn) reloadBtn.addEventListener('click', () => generateCaptcha());
+generateCaptcha();
+window.addEventListener('pageshow', (e) => { if (e.persisted) generateCaptcha(); });
+setInterval(() => {
+  if (document.visibilityState !== 'hidden') generateCaptcha();
+}, 8 * 60 * 1000);
+
+const loginForm = document.getElementById('loginForm');
+const username = document.getElementById('username');
+const password = document.getElementById('password');
+const errorMsg = document.getElementById('errorMsg');
+const submitBtn = document.getElementById('submitBtn');
+const defaultBtnHtml = '<span>SIGN IN</span><i class="fas fa-arrow-right" style="font-size:12px;"></i>';
+const togglePassword = document.getElementById('togglePassword');
+const eyeIcon = document.getElementById('eyeIcon');
+
+togglePassword.addEventListener('click', () => {
+  const hidden = password.type === 'password';
+  password.type = hidden ? 'text' : 'password';
+  if (eyeIcon) {
+    eyeIcon.className = hidden ? 'far fa-eye-slash' : 'far fa-eye';
+  }
+});
+
+function showError(msg) {
+  errorMsg.textContent = msg;
+  errorMsg.style.display = 'block';
+}
+function hideError() {
+  errorMsg.textContent = '';
+  errorMsg.style.display = 'none';
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  hideError();
+
+  const u = username.value.trim();
+  const p = password.value.trim();
+
+  if (!u) {
+    showError('Please enter your username');
+    username.focus();
+    return;
+  }
+  if (!p) {
+    showError('Please enter your password');
+    password.focus();
+    return;
+  }
+
+  // Ensure captcha is loaded before validating
+  if (!currentCaptchaId) {
+    await generateCaptcha();
+  }
+
+  // Strict math captcha validation
+  const captchaInp = document.getElementById('captchaInput');
+  const userAnsRaw = (captchaInp ? captchaInp.value : '').trim();
+  if (!userAnsRaw) {
+    showError('Please enter the answer to the math captcha.');
+    if (captchaInp) captchaInp.focus();
+    return;
+  }
+  const userAns = parseInt(userAnsRaw, 10);
+  if (isNaN(userAns) || (currentCaptchaAnswer !== null && userAns !== currentCaptchaAnswer)) {
+    showError('Incorrect captcha answer. A new question has been loaded.');
+    await generateCaptcha();
+    if (captchaInp) captchaInp.focus();
+    return;
+  }
+
+  const twoFaInp = document.getElementById('twoFaCode');
+  const twoFaCode = (twoFaInp ? twoFaInp.value : '').trim();
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'SIGNING IN...';
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: u,
+        password: p,
+        two_fa_code: twoFaCode,
+        captcha_id: currentCaptchaId,
+        captcha_answer: userAns
+      })
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    // Server consumes captcha on every POST /api/auth/login, so ALWAYS load a fresh challenge on 2FA or any failure
+    if (data.require_2fa) {
+      const wrap = document.getElementById('twoFaWrap');
+      if (wrap) wrap.style.display = 'block';
+      if (data.error) {
+        showError(data.error);
+      } else {
+        hideError();
+      }
+      await generateCaptcha();
+      if (twoFaInp) twoFaInp.focus();
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = defaultBtnHtml;
+      return;
+    }
+
+    if (!res.ok || !data.success) {
+      showError(data.error || data.detail || 'Invalid username or password');
+      await generateCaptcha();
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = defaultBtnHtml;
+      return;
+    }
+
+    const userObj = data.user || {
+      id: data.id || 1,
+      username: data.username || u,
+      role: data.role || 'Owner'
+    };
+    const role = (userObj.role || data.role || 'Owner').trim();
+    userObj.role = role;
+
+    if (window.HumexAuth) {
+      window.HumexAuth.setSession(userObj);
+    } else {
+      sessionStorage.setItem('admin_logged_in', '1');
+      sessionStorage.setItem('admin_user', JSON.stringify(userObj));
+      sessionStorage.setItem('session_role', role);
+
+      localStorage.setItem('admin_logged_in', '1');
+      localStorage.setItem('admin_user', JSON.stringify(userObj));
+      localStorage.setItem('active_session_active', '1');
+      localStorage.setItem('active_session_role', role);
+      localStorage.setItem('active_session_user', JSON.stringify(userObj));
+    }
+
+    const nr = (role || '').toLowerCase();
+    let targetUrl = '/ints/owner/SMSDashboard';
+    if (nr === 'agent') {
+      targetUrl = '/ints/agent/SMSDashboard';
+    } else if (nr === 'client') {
+      targetUrl = '/ints/client/SMSDashboard';
+    }
+
+    window.location.replace(targetUrl);
+  } catch (err) {
+    showError('Network error. Please try again.');
+    await generateCaptcha();
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = defaultBtnHtml;
+  }
+});
+</script>
+
+</body>
+</html>

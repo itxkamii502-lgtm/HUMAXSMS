@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Panel — HUMAX SMS</title>
+<link rel="icon" type="image/png" href="/static/img/humex-sms-logo.png">
+<script>
+(function(){
+  try {
+    var s = window.__BRAND_SETTINGS__;
+    if (!s) {
+      var c = localStorage.getItem('app_brand_settings');
+      if (c) s = JSON.parse(c);
+    }
+    var ut = window.__USER_THEME__ || {};
+    var savedMode = localStorage.getItem('theme') || ut.theme_mode || (s && s.theme_mode) || 'light';
+    var effectiveMode = savedMode === 'system'
+      ? ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')
+      : (savedMode === 'dark' ? 'dark' : 'light');
+    var r = document.documentElement;
+    r.setAttribute('data-theme', effectiveMode);
+    var cat = (s && Array.isArray(s.theme_catalog)) ? s.theme_catalog : [];
+    var pickKey = (ut.theme_key && cat.some(function(t){ return t.key === ut.theme_key; }))
+      ? ut.theme_key
+      : ((s && s.default_theme_key) || 'daylight_cobalt');
+    var th = null;
+    for (var i = 0; i < cat.length; i++) {
+      if (cat[i] && cat[i].key === pickKey) { th = cat[i]; break; }
+    }
+    if (!th && cat.length) th = cat[0];
+    if (th) {
+      r.setAttribute('data-chrome-tone', th.structure_tone || 'light');
+      r.setAttribute('data-role-theme', th.key || 'daylight_cobalt');
+    }
+  } catch(e) {}
+})();
+</script>
+<script src="/static/js/shared-brand-theme.js"></script>
+<script src="/static/js/shared-profile-security.js"></script>
+<script src="/static/js/shared-auth-guard.js"></script>
+<script>
+  if (window.HumexAuth) {
+    if (!window.HumexAuth.enforce(['Agent'])) {
+      window.__AUTH_BLOCKED__ = true;
+    }
+    window.HumexAuth.initCrossTabWatcher(['Agent']);
+  }
+</script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/css/humex-global.css">
+<link rel="stylesheet" href="/static/css/humex-panel.css">
+<link rel="stylesheet" href="/static/css/humex-admin-skin.css">
+<link rel="stylesheet" href="/static/css/humex-telecom.css">
+</head>
+<body class="light rmsui adminui">
+
+<aside class="zy-side" id="sidebar">
+  <div class="zy-side-head">
+    <button class="zy-side-close" onclick="zyCloseSidebar()" aria-label="Close" type="button"><i class="fas fa-times"></i></button>
+    <div class="zy-avatar-lg" style="background-color: #ffffff;"><img src="/static/img/humex-sms-logo.png" alt="HUMAX SMS" class="zy-ava-dp-img" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;background-color:#ffffff;"></div>
+    <div class="zy-welcome">Welcome <span id="panel-username-side">Agent</span></div>
+    <div class="zy-role" id="agent-name-sub">Agent Panel</div>
+    <div class="zy-clock" id="zy-clock">—</div>
+  </div>
+  <nav class="zy-sidenav" id="zy-sidenav"></nav>
+  <div class="zy-side-foot"></div>
+</aside>
+<div class="zy-side-backdrop" id="zy-side-backdrop" onclick="zyCloseSidebar()"></div>
+
+<div class="zy-main" id="main-wrapper">
+  <header class="zy-header">
+    <div class="zy-header-row">
+      <div class="zy-head-left">
+        <button class="zy-side-toggle" onclick="zyToggleSidebar()" title="Toggle Sidebar" aria-label="Toggle Sidebar"><i class="fas fa-bars"></i></button>
+        <div class="zy-head-title" id="zy-logo" style="display:none;"><span class="zy-panel-badge"><img class="zy-badge-logo" src="/static/img/humex-sms-logo.png" alt="HUMAX SMS" onerror="this.style.display='none';"> <span class="zy-badge-name">HUMAX SMS</span></span></div>
+        <div class="zy-crumb">
+          <div class="zy-crumb-left"><a onclick="loadPage('dashboard')">Home</a><span class="zy-sep">&raquo;</span><span id="breadcrumb">Dashboard</span></div>
+          <div class="zy-crumb-clock" style="display:none;"><i class="far fa-clock"></i> <span id="zy-utc-time">—</span> UTC</div>
+        </div>
+      </div>
+      <div class="zy-head-right">
+        <button class="zy-bell-btn" onclick="window.HumexNotifications && window.HumexNotifications.toggleDropdown(event)" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false">
+          <i class="fas fa-bell"></i>
+          <span class="zy-bell-badge" style="display:none;">0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div class="zy-body">
+    <main class="page-content" id="page-content"></main>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal()">
+  <div class="modal" id="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="modal-title">Modal</h3>
+      <button onclick="closeModal()"><i class="fas fa-times"></i></button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+<span id="live-stat" style="display:none"></span>
+
+<script src="/static/js/agent-engine.js"></script>
+<script src="/static/js/agent-shell.js"></script>
+<script src="/static/js/shared-ui-kit.js"></script>
+<script src="/static/js/shared-notifications.js"></script>
+<script src="/static/js/agent-pages.js"></script>
+<script src="/static/js/shared-url-router.js"></script>
+<script src="/static/js/shared-flash.js"></script>
+</body>
+</html>

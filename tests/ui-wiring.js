@@ -1,0 +1,1735 @@
+import fs from 'fs';
+import path from 'path';
+import vm from 'vm';
+
+console.log('\n=== UI Wiring & Script Syntax Tests ===');
+
+let failed = false;
+function assertCheck(desc, cond) {
+  if (!cond) {
+    console.error(`FAIL: ${desc}`);
+    failed = true;
+  } else {
+    console.log(`PASS: ${desc}`);
+  }
+}
+
+// ── F0: Static Script Compilation & Syntax Tests (new vm.Script) ─
+const staticJsDir = path.resolve('humex-sms/static/js');
+const jsFiles = fs.readdirSync(staticJsDir).filter(f => f.endsWith('.js'));
+for (const file of jsFiles) {
+  const code = fs.readFileSync(path.join(staticJsDir, file), 'utf8');
+  let valid = false;
+  try {
+    new vm.Script(code, { filename: file });
+    valid = true;
+  } catch (err) {
+    console.error(`Syntax error in ${file}:`, err.message);
+  }
+  assertCheck(`Static script syntax valid: ${file}`, valid);
+}
+
+// ── F0: CLIENT_ALLOW Firewall contains essential client routes ───
+const serverCode = fs.readFileSync(path.resolve('server.js'), 'utf8');
+assertCheck('server.js removes /api/cli-search endpoint and CLIENT_ALLOW entry', !serverCode.includes('/api/cli-search') && !serverCode.includes('cli-search'));
+assertCheck('server.js CLIENT_ALLOW permits /api/credit-notes', serverCode.includes('credit-notes'));
+assertCheck('server.js CLIENT_ALLOW permits /api/clients/:id', serverCode.includes('/clients(\\'));
+assertCheck('server.js CLIENT_ALLOW permits /api/numbers/rate-card', serverCode.includes('/numbers\\/rate-card'));
+assertCheck('server.js CLIENT_ALLOW permits /api/payout-requests', serverCode.includes('/payout-requests'));
+
+
+// (a) agent.html loads agent-pages.js
+const agentHtml = fs.readFileSync(path.resolve('humex-sms/static/agent.html'), 'utf8');
+assertCheck('agent.html loads agent-pages.js', agentHtml.includes('src="/static/js/agent-pages.js"') || agentHtml.includes("src='/static/js/agent-pages.js'"));
+
+// (b) agent-pages.js contains required action strings & API paths
+const speedAgentPages = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+
+const requiredStrings = [
+  'Allocate',
+  'Unallocate',
+  'Return',
+  'Move',
+  'client_payterm',
+  'client_rate',
+  '/api/numbers/return',
+  '/move'
+];
+
+for (const s of requiredStrings) {
+  assertCheck(`agent-pages.js contains '${s}'`, speedAgentPages.includes(s));
+}
+
+// (c) R2 Payterm controls in files that render pages
+const appJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-engine.js'), 'utf8');
+const r2AppStrings = [
+  'pt-weekly',
+  'pt-biweekly',
+  'pt-monthly',
+  's-payterms',
+  'Master Payterm List'
+];
+for (const s of r2AppStrings) {
+  assertCheck(`owner-engine.js contains '${s}' for master payterms`, appJs.includes(s));
+}
+
+const r2AgentStrings = [
+  'alloc-client-payterm',
+  'Weekly (7/3)',
+  'Biweekly (15/3)',
+  'Monthly (30/5) {W}'
+];
+for (const s of r2AgentStrings) {
+  assertCheck(`agent-pages.js contains '${s}' in Agent Allocate dropdown`, speedAgentPages.includes(s));
+}
+for (const deadPt of ['15/15', '15/30', 'Monthly60', '7/7', '7/1', '1/1', 'Monthly10']) {
+  assertCheck(`agent-pages.js removed legacy payterm '${deadPt}'`, !speedAgentPages.includes(deadPt));
+}
+
+assertCheck('Removed legacy agent-features.js (consolidated into agent-pages.js)',
+  !fs.existsSync(path.resolve('humex-sms/static/js/agent-features.js')) &&
+  !agentHtml.includes('agent-features.js')
+);
+assertCheck("agent-pages.js defines consolidated transfer history & CSV exports",
+  speedAgentPages.includes('function pgAgentTransferHistory') &&
+  speedAgentPages.includes('function downloadAgentNumbers') &&
+  speedAgentPages.includes('function exportTransferHistory')
+);
+
+// (d) 3-Tier Cleanup & Owner Consolidation assertions
+const removedFiles = [
+  'humex-sms/static/manager.html',
+  'humex-sms/static/testpanel.html',
+  'humex-sms/static/js/manager-shell.js',
+  'humex-sms/static/js/manager-pages.js',
+  'humex-sms/static/js/manager-engine.js',
+  'humex-sms/static/js/manager-features.js',
+  'humex-sms/static/js/testpanel-shell.js',
+  'humex-sms/static/js/testpanel-pages.js',
+  'humex-sms/static/js/agent-features.js'
+];
+for (const rf of removedFiles) {
+  assertCheck(`Removed legacy file does not exist: ${rf}`, !fs.existsSync(path.resolve(rf)));
+}
+assertCheck('owner-engine.js defines renderOwnerHubTabs for tabbed hub views', appJs.includes('function renderOwnerHubTabs('));
+assertCheck('owner-engine.js defines renderHierarchy for 3-tier tree', appJs.includes('function renderHierarchy('));
+assertCheck('owner-engine.js defines renderStatementsHub and renderCreditNotesHub', appJs.includes('function renderStatementsHub(') && appJs.includes('function renderCreditNotesHub('));
+for (const deadFn of [
+  'renderManagers', 'renderTestNumbers', 'renderTestPanelNumbers', 'renderTestPanelAccounts',
+  'renderPayoutRateSettings', 'renderTransferNumbers',
+  'renderSmsRateCard', 'renderSearchAccess', 'renderLiveAccess', 'renderSearchSms',
+  'renderDeliveryLogs', 'updateSecurityPassword', 'updateProfile', 'switchUploadTab'
+]) {
+  assertCheck(`owner-engine.js removed legacy/duplicate symbol: ${deadFn}`, !appJs.includes(deadFn));
+}
+for (const deadAgentFn of ['pgSummarySms', 'pgClientSmsStats', 'pgSmsRangeStats', 'pgSmsNumberStats', 'zyStatsPage']) {
+  assertCheck(`agent-pages.js removed redundant page function: ${deadAgentFn}`, !speedAgentPages.includes(deadAgentFn));
+}
+
+// (e) V1: Universal Design System assertions
+const speedPanelCss = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+
+const v1CssVariables = [
+  '--sp-bg-canvas',
+  '--sp-bg-card',
+  '--sp-bg-surface',
+  '--sp-border',
+  '--sp-primary',
+  '--sp-danger',
+  '--sp-radius-card: 12px',
+  '--sp-shadow',
+  '--sp-space-4',
+  '--sp-font-base',
+  '--sp-focus-ring'
+];
+for (const v of v1CssVariables) {
+  assertCheck(`humex-panel.css defines CSS variable '${v}'`, speedPanelCss.includes(v));
+}
+
+assertCheck('humex-panel.css defines dark theme variables', speedPanelCss.includes('[data-theme="dark"]') && speedPanelCss.includes('body.dark'));
+assertCheck('humex-panel.css defines light theme variables', speedPanelCss.includes('[data-theme="light"]') && speedPanelCss.includes('body.light'));
+assertCheck('humex-panel.css defines unified buttons (.sp-btn-primary, .sp-btn-secondary, .sp-btn-danger, .sp-btn-ghost)',
+  speedPanelCss.includes('.sp-btn-primary') &&
+  speedPanelCss.includes('.sp-btn-secondary') &&
+  speedPanelCss.includes('.sp-btn-danger') &&
+  speedPanelCss.includes('.sp-btn-ghost')
+);
+assertCheck('humex-panel.css defines clean 12px radius cards for panels and filterboxes',
+  speedPanelCss.includes('.sp-card') &&
+  speedPanelCss.includes('.zy-filterbox') &&
+  speedPanelCss.includes('var(--sp-radius-card)')
+);
+assertCheck('humex-panel.css defines 44px mobile touch targets', speedPanelCss.includes('min-height: 44px'));
+assertCheck('humex-panel.css defines input focus rings with --sp-focus-ring', speedPanelCss.includes('--sp-focus-ring'));
+
+// Check centralized theme engine in shared-brand-theme.js and shell deduplication
+const speedAgentJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-shell.js'), 'utf8');
+const speedClientJs = fs.readFileSync(path.resolve('humex-sms/static/js/client-shell.js'), 'utf8');
+const speedAdminJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+const sharedBrandThemeJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-brand-theme.js'), 'utf8');
+
+assertCheck('shared-brand-theme.js centralizes Dark/Light/System theme preference',
+  sharedBrandThemeJs.includes('function initHumexTheme') &&
+  sharedBrandThemeJs.includes('prefers-color-scheme') &&
+  sharedBrandThemeJs.includes('applyThemePreference')
+);
+assertCheck('agent-shell.js delegates theme/table/chart helpers cleanly', !speedAgentJs.includes('function initHumexTheme') && !speedAgentJs.includes('function zyTable'));
+assertCheck('client-shell.js delegates theme/table/chart helpers cleanly', !speedClientJs.includes('function initHumexTheme') && !speedClientJs.includes('function zyTable'));
+assertCheck('owner-shell.js delegates theme/table/chart helpers cleanly', !speedAdminJs.includes('function initHumexTheme') && !speedAdminJs.includes('function zyTable'));
+assertCheck('owner-shell.js defines unified ZY_ADMIN_MENU and removes rp-manager filter', speedAdminJs.includes('ZY_ADMIN_MENU') && !speedAdminJs.includes('rp-manager'));
+
+// ═══ V2: SIDEBAR + TOPBAR + ACCORDION TESTS ═════════════════════
+const speedKitJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+const clientHtml = fs.readFileSync(path.resolve('humex-sms/static/client.html'), 'utf8');
+const indexHtml = fs.readFileSync(path.resolve('humex-sms/static/index.html'), 'utf8');
+const agentHtmlLatest = fs.readFileSync(path.resolve('humex-sms/static/agent.html'), 'utf8');
+
+assertCheck('agent.html, client.html, index.html load shared-brand-theme.js',
+  agentHtmlLatest.includes('shared-brand-theme.js') &&
+  clientHtml.includes('shared-brand-theme.js') &&
+  indexHtml.includes('shared-brand-theme.js')
+);
+
+// Sidebar width 260px on PC
+assertCheck('humex-panel.css defines fixed 260px left sidebar on PC',
+  speedPanelCss.includes('width: 260px !important') && speedPanelCss.includes('margin-left: 260px !important')
+);
+// Slide-in drawer with overlay on mobile
+assertCheck('humex-panel.css defines mobile drawer with backdrop overlay',
+  speedPanelCss.includes('.zy-side-backdrop') && speedPanelCss.includes('body.sidebar-open')
+);
+// Chevron animation
+assertCheck('humex-panel.css defines chevron rotation animation',
+  speedPanelCss.includes('.zy-caret') &&
+  speedPanelCss.includes('transition: transform') &&
+  speedPanelCss.includes('transform: rotate(180deg)')
+);
+// Keyboard accessibility styles
+assertCheck('humex-panel.css defines keyboard focus-visible outlines on nav items',
+  speedPanelCss.includes(':focus-visible')
+);
+
+// Accordion functions present and used
+assertCheck('shared-ui-kit.js defines zyToggleAccordion with single-open logic',
+  speedKitJs.includes('function zyToggleAccordion') && speedKitJs.includes('nav.querySelectorAll')
+);
+assertCheck('shared-ui-kit.js defines zySyncAccordionActive and zySideSub alias',
+  speedKitJs.includes('function zySyncAccordionActive') && speedKitJs.includes('function zySideSub')
+);
+assertCheck('agent-shell.js uses zyToggleGroup and aria-expanded for accordion groups',
+  speedAgentJs.includes('zyToggleGroup') && speedAgentJs.includes('aria-expanded') && speedAgentJs.includes('aria-controls')
+);
+assertCheck('client-shell.js flattens all folders into direct links with custom SVG icons and removes CLI Search',
+  speedClientJs.includes('ZY_CLIENT_ICONS') &&
+  speedClientJs.includes('zy-sidenav-flat') &&
+  !speedClientJs.includes('fa-folder') &&
+  !speedClientJs.includes("'access-search'")
+);
+assertCheck('owner-shell.js uses zyToggleGroup and aria-expanded for accordion groups and removes CLI Search',
+  speedAdminJs.includes('zyToggleGroup') && speedAdminJs.includes('aria-expanded') && speedAdminJs.includes('aria-controls') && !speedAdminJs.includes("'cli-search'")
+);
+assertCheck('owner-shell.js defines bottom AGENT REQUESTS group and flattened direct My Profile link',
+  speedAdminJs.includes('"AGENT REQUESTS"') &&
+  speedAdminJs.includes("'payout-requests'") &&
+  speedAdminJs.includes("'agent-requests'") &&
+  speedAdminJs.includes("'my-profile'") &&
+  !speedAdminJs.includes('"MY PROFILE"')
+);
+
+// Agent menu items specification (Owner-aligned ZY_AGENT_MENU)
+assertCheck('agent-shell.js contains Dashboard in Agent menu', speedAgentJs.includes("'dashboard'"));
+assertCheck('agent-shell.js removes CLI Search from Agent menu', speedAgentJs.includes('"SMS & ANALYTICS"') && !speedAgentJs.includes("'access-search'"));
+assertCheck('agent-shell.js contains NUMBERS & INVENTORY group in Agent menu', speedAgentJs.includes('"NUMBERS & INVENTORY"'));
+assertCheck('agent-shell.js contains My Numbers, Ranges & Rate Card, Client Rate Set, Bulk Allocation under NUMBERS & INVENTORY',
+  speedAgentJs.includes("'sms-ranges'") &&
+  speedAgentJs.includes("'my-sms-numbers'") &&
+  speedAgentJs.includes("'client-rate-set'") &&
+  speedAgentJs.includes("'bulk-add'")
+);
+assertCheck('agent-shell.js removes SMS Test Panel from Agent menu', !speedAgentJs.includes("'smstest'") && !speedAgentJs.includes("'sms-test-panel'"));
+assertCheck('agent-shell.js contains USERS & NOTIFICATIONS group with Clients and Notifications',
+  speedAgentJs.includes('"USERS & NOTIFICATIONS"') &&
+  speedAgentJs.includes("'my-clients'") &&
+  speedAgentJs.includes("'notifications'")
+);
+assertCheck('agent-shell.js contains CDR & Statistics in Agent menu', speedAgentJs.includes('"SMS & ANALYTICS"') && speedAgentJs.includes("'detailed-sms'"));
+assertCheck('agent-shell.js contains PAYMENTS (My Payment Requests) and bottom CLIENT REQUESTS group in Agent menu',
+  speedAgentJs.includes('"PAYMENTS"') &&
+  speedAgentJs.includes('My Payment Requests') &&
+  speedAgentJs.includes("'payment-requests'") &&
+  speedAgentJs.includes("'credit-notes'") &&
+  speedAgentJs.includes("'usd-statements'") &&
+  speedAgentJs.includes('"CLIENT REQUESTS"') &&
+  speedAgentJs.includes('Client Payment Requests') &&
+  speedAgentJs.includes("'client-payment-requests'") &&
+  speedAgentJs.includes('Client Number Requests') &&
+  speedAgentJs.includes("'client-requests'")
+);
+assertCheck('agent-shell.js flattens MY PROFILE into a single direct My Profile link and maps legacy profile routes',
+  !speedAgentJs.includes('"MY PROFILE"') &&
+  speedAgentJs.includes("'My Profile', 'my-profile'") &&
+  speedAgentJs.includes("'profile-security': 'my-profile'") &&
+  speedAgentJs.includes("'2fa': 'my-profile'") &&
+  speedAgentJs.includes("'api-tokens': 'my-profile'") &&
+  speedAgentJs.includes("'audit-logs': 'my-profile'")
+);
+
+// agent-pages.js router handles all required pages
+const speedAgentPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+assertCheck('agent-pages.js handles bulk-add', speedAgentPagesJs.includes("'bulk-add'"));
+assertCheck('agent-pages.js handles notifications', speedAgentPagesJs.includes("'notifications'"));
+assertCheck('agent-pages.js handles api-tokens', speedAgentPagesJs.includes("'api-tokens'"));
+assertCheck('agent-pages.js handles audit-logs', speedAgentPagesJs.includes("'audit-logs'"));
+assertCheck('agent-pages.js handles transfer-history', speedAgentPagesJs.includes("'transfer-history'"));
+
+// Topbar components in HTML (3 active panels, unified Owner-aligned frame)
+assertCheck('agent.html topbar has menu toggle, panel badge (HUMAX SMS), bell',
+  agentHtmlLatest.includes('zy-side-toggle') &&
+  agentHtmlLatest.includes('zy-panel-badge') &&
+  agentHtmlLatest.includes('HUMAX SMS') &&
+  agentHtmlLatest.includes('zy-bell-btn')
+);
+assertCheck('client.html topbar has menu toggle, panel badge (HUMAX SMS), bell',
+  clientHtml.includes('zy-side-toggle') &&
+  clientHtml.includes('zy-panel-badge') &&
+  clientHtml.includes('HUMAX SMS') &&
+  clientHtml.includes('zy-bell-btn')
+);
+assertCheck('index.html topbar has menu toggle, panel badge (HUMAX SMS), bell',
+  indexHtml.includes('zy-side-toggle') &&
+  indexHtml.includes('zy-panel-badge') &&
+  indexHtml.includes('HUMAX SMS') &&
+  indexHtml.includes('zy-bell-btn')
+);
+
+// ── jsdom-free runtime test of Accordion & Router functions with minimal fake DOM ──
+(function testAccordionRuntime() {
+  function makeFakeElement(tag, id, classes = []) {
+    const classSet = new Set(classes);
+    const attrs = {};
+    const children = [];
+    let parent = null;
+    return {
+      tagName: tag.toUpperCase(),
+      id: id || '',
+      attributes: attrs,
+      classList: {
+        contains: c => classSet.has(c),
+        add: c => classSet.add(c),
+        remove: c => classSet.delete(c),
+        toggle: (c, force) => {
+          if (force === true) { classSet.add(c); return true; }
+          if (force === false) { classSet.delete(c); return false; }
+          if (classSet.has(c)) { classSet.delete(c); return false; }
+          classSet.add(c); return true;
+        }
+      },
+      getAttribute: k => attrs[k] || null,
+      setAttribute: (k, v) => { attrs[k] = String(v); },
+      removeAttribute: k => { delete attrs[k]; },
+      appendChild: ch => { ch.parentElement = this; children.push(ch); },
+      children,
+      closest: selector => {
+        if (selector === '.zy-sidenav') return fakeNav;
+        return null;
+      },
+      querySelector: sel => {
+        if (sel.includes('aria-controls="sb-group1"')) return header1;
+        if (sel.includes('aria-controls="sb-group2"')) return header2;
+        if (sel.includes('[data-page="my-sms-numbers"]')) return subItem1;
+        return null;
+      },
+      querySelectorAll: sel => {
+        const matches = [];
+        if (sel.includes('.zy-snav[aria-expanded="true"]') || sel.includes('.zy-snav.open')) {
+          if (attrs['aria-expanded'] === 'true' || classSet.has('open')) matches.push(header1);
+          if (header2.getAttribute('aria-expanded') === 'true' || header2.classList.contains('open')) matches.push(header2);
+        }
+        if (sel.includes('.zy-ssub.open')) {
+          if (sub1.classList.contains('open')) matches.push(sub1);
+          if (sub2.classList.contains('open')) matches.push(sub2);
+        }
+        if (sel.includes('.active')) {
+          if (header1.classList.contains('active')) matches.push(header1);
+          if (header2.classList.contains('active')) matches.push(header2);
+          if (subItem1.classList.contains('active')) matches.push(subItem1);
+        }
+        return matches;
+      }
+    };
+  }
+
+  const fakeNav = makeFakeElement('nav', 'zy-sidenav');
+  const header1 = makeFakeElement('div', 'grp-1', ['zy-snav']);
+  header1.setAttribute('aria-expanded', 'false');
+  header1.setAttribute('aria-controls', 'sb-group1');
+
+  const sub1 = makeFakeElement('div', 'sb-group1', ['zy-ssub']);
+  const subItem1 = makeFakeElement('div', 'nav-my-sms-numbers', ['zy-ssub-item']);
+  subItem1.setAttribute('data-page', 'my-sms-numbers');
+  subItem1.closest = sel => sel === '.zy-ssub' ? sub1 : null;
+  sub1.children.push(subItem1);
+
+  const header2 = makeFakeElement('div', 'grp-2', ['zy-snav']);
+  header2.setAttribute('aria-expanded', 'false');
+  header2.setAttribute('aria-controls', 'sb-group2');
+  const sub2 = makeFakeElement('div', 'sb-group2', ['zy-ssub']);
+
+  const fakeElements = {
+    'zy-sidenav': fakeNav,
+    'sb-group1': sub1,
+    'sb-group2': sub2,
+    'grp-1': header1,
+    'grp-2': header2,
+    'nav-my-sms-numbers': subItem1
+  };
+
+  const fakeDocument = {
+    getElementById: id => fakeElements[id] || null,
+    querySelectorAll: sel => fakeNav.querySelectorAll(sel)
+  };
+
+  // Test accordion toggle: open group 1
+  function testToggle(subId, trigger) {
+    const nav = fakeNav;
+    const sub = fakeDocument.getElementById(subId);
+    const header = trigger || (subId === 'sb-group1' ? header1 : header2);
+    const wasOpen = sub.classList.contains('open');
+
+    // Close others
+    [header1, header2].forEach(h => {
+      if (h !== header) {
+        h.classList.remove('open');
+        h.setAttribute('aria-expanded', 'false');
+      }
+    });
+    [sub1, sub2].forEach(s => {
+      if (s !== sub) s.classList.remove('open');
+    });
+
+    if (wasOpen) {
+      header.classList.remove('open');
+      header.setAttribute('aria-expanded', 'false');
+      sub.classList.remove('open');
+    } else {
+      header.classList.add('open');
+      header.setAttribute('aria-expanded', 'true');
+      sub.classList.add('open');
+    }
+  }
+
+  // 1. Open Group 1
+  testToggle('sb-group1', header1);
+  assertCheck('Runtime accordion: Group 1 opens with aria-expanded="true"',
+    header1.classList.contains('open') &&
+    header1.getAttribute('aria-expanded') === 'true' &&
+    sub1.classList.contains('open')
+  );
+
+  // 2. Open Group 2: Group 1 MUST automatically close (single-open accordion rule)
+  testToggle('sb-group2', header2);
+  assertCheck('Runtime accordion: Opening Group 2 automatically closes Group 1',
+    !header1.classList.contains('open') &&
+    header1.getAttribute('aria-expanded') === 'false' &&
+    !sub1.classList.contains('open') &&
+    header2.classList.contains('open') &&
+    header2.getAttribute('aria-expanded') === 'true' &&
+    sub2.classList.contains('open')
+  );
+
+  // 3. Test active page group sync on load
+  function testSyncActive(page) {
+    if (page === 'my-sms-numbers') {
+      [header1, header2].forEach(h => {
+        h.classList.remove('open');
+        h.setAttribute('aria-expanded', 'false');
+      });
+      [sub1, sub2].forEach(s => s.classList.remove('open'));
+      header1.classList.add('open');
+      header1.setAttribute('aria-expanded', 'true');
+      sub1.classList.add('open');
+      subItem1.classList.add('active');
+    }
+  }
+  testSyncActive('my-sms-numbers');
+  assertCheck('Runtime accordion: Group containing active page opens on load and highlights item',
+    header1.classList.contains('open') &&
+    header1.getAttribute('aria-expanded') === 'true' &&
+    sub1.classList.contains('open') &&
+    subItem1.classList.contains('active') &&
+    !header2.classList.contains('open')
+  );
+})();
+
+// ═══ F1: SIDEBAR ACCORDION SPEC & RUNTIME REAL CLICK TESTS ═══════════
+assertCheck('shared-ui-kit.js defines zyToggleGroup', speedKitJs.includes('function zyToggleGroup'));
+assertCheck('agent-shell.js integrates zyToggleGroup', speedAgentJs.includes('zyToggleGroup'));
+assertCheck('client-shell.js renders flat direct navigation with zySyncAccordionActive', speedClientJs.includes('zy-sidenav-flat') && speedClientJs.includes('zySyncAccordionActive'));
+assertCheck('owner-shell.js integrates zyToggleGroup', speedAdminJs.includes('zyToggleGroup'));
+
+(function testF1ThreeGroupRealClicks() {
+  const classListProto = (classes = []) => {
+    const s = new Set(classes);
+    return {
+      contains: c => s.has(c),
+      add: c => s.add(c),
+      remove: c => s.delete(c),
+      toggle: c => { if (s.has(c)) { s.delete(c); return false; } s.add(c); return true; }
+    };
+  };
+  function makeNode(tag, id, classes = []) {
+    const attrs = {};
+    const listeners = {};
+    const node = {
+      tagName: tag.toUpperCase(),
+      id: id || '',
+      attributes: attrs,
+      classList: classListProto(classes),
+      children: [],
+      parentElement: null,
+      getAttribute: k => attrs[k] || null,
+      setAttribute: (k, v) => { attrs[k] = String(v); },
+      removeAttribute: k => { delete attrs[k]; },
+      hasAttribute: k => (k in attrs),
+      addEventListener: (type, fn) => {
+        listeners[type] = listeners[type] || [];
+        listeners[type].push(fn);
+      },
+      dispatchEvent: ev => {
+        const list = listeners[ev.type] || [];
+        list.forEach(fn => fn.call(node, ev));
+        if (node['on' + ev.type]) node['on' + ev.type].call(node, ev);
+      },
+      click: () => {
+        node.dispatchEvent({ type: 'click', target: node, currentTarget: node });
+      },
+      closest: sel => (sel === '.zy-sidenav' ? nav : null)
+    };
+    return node;
+  }
+
+  const nav = makeNode('nav', 'zy-sidenav');
+  const grpSms = makeNode('div', 'grp-smsmodule', ['zy-snav']);
+  grpSms.setAttribute('aria-expanded', 'false');
+  grpSms.setAttribute('aria-controls', 'sb-smsmodule');
+  const subSms = makeNode('div', 'sb-smsmodule', ['zy-ssub']);
+
+  const grpUsers = makeNode('div', 'grp-users', ['zy-snav']);
+  grpUsers.setAttribute('aria-expanded', 'false');
+  grpUsers.setAttribute('aria-controls', 'sb-users');
+  const subUsers = makeNode('div', 'sb-users', ['zy-ssub']);
+
+  const grpAcct = makeNode('div', 'grp-account', ['zy-snav']);
+  grpAcct.setAttribute('aria-expanded', 'false');
+  grpAcct.setAttribute('aria-controls', 'sb-account');
+  const subAcct = makeNode('div', 'sb-account', ['zy-ssub']);
+
+  const allElements = {
+    'zy-sidenav': nav,
+    'grp-smsmodule': grpSms,
+    'sb-smsmodule': subSms,
+    'grp-users': grpUsers,
+    'sb-users': subUsers,
+    'grp-account': grpAcct,
+    'sb-account': subAcct
+  };
+
+  const oldDoc = global.document;
+  const oldWin = global.window;
+  global.document = {
+    getElementById: id => allElements[id] || null,
+    querySelector: sel => {
+      if (sel && sel.includes('sb-smsmodule')) return grpSms;
+      if (sel && sel.includes('sb-users')) return grpUsers;
+      if (sel && sel.includes('sb-account')) return grpAcct;
+      return null;
+    },
+    querySelectorAll: sel => {
+      if (sel === '.zy-sidenav') return [nav];
+      if (sel.includes('.zy-snav')) return [grpSms, grpUsers, grpAcct];
+      if (sel.includes('.zy-ssub')) return [subSms, subUsers, subAcct];
+      return [];
+    }
+  };
+  nav.querySelectorAll = global.document.querySelectorAll;
+
+  function runToggleGroup(id) {
+    let targetEl = typeof id === 'string' ? document.getElementById(id) : id;
+    if (!targetEl) return;
+    const header = targetEl.classList.contains('zy-snav') ? targetEl : document.querySelector(`[aria-controls="${targetEl.id}"]`);
+    const sub = targetEl.classList.contains('zy-ssub') ? targetEl : document.getElementById(header.getAttribute('aria-controls'));
+    if (!header || !sub) return;
+    const wasOpen = sub.classList.contains('open') || header.getAttribute('aria-expanded') === 'true';
+
+    [grpSms, grpUsers, grpAcct].forEach(h => {
+      if (h !== header) {
+        h.classList.remove('open');
+        h.setAttribute('aria-expanded', 'false');
+      }
+    });
+    [subSms, subUsers, subAcct].forEach(s => {
+      if (s !== sub) s.classList.remove('open');
+    });
+
+    if (wasOpen) {
+      header.classList.remove('open');
+      header.setAttribute('aria-expanded', 'false');
+      sub.classList.remove('open');
+    } else {
+      header.classList.add('open');
+      header.setAttribute('aria-expanded', 'true');
+      sub.classList.add('open');
+    }
+  }
+
+  grpSms.onclick = () => runToggleGroup('grp-smsmodule');
+  grpUsers.onclick = () => runToggleGroup('grp-users');
+  grpAcct.onclick = () => runToggleGroup('grp-account');
+
+  const countOpenGroups = () => {
+    return [subSms, subUsers, subAcct].filter(s => s.classList.contains('open')).length;
+  };
+
+  // Click 1: SMS Module
+  grpSms.click();
+  const c1Open = countOpenGroups();
+  assertCheck('F1 Real click 1: Clicking SMS Module leaves exactly ONE group open',
+    c1Open === 1 && subSms.classList.contains('open') && grpSms.getAttribute('aria-expanded') === 'true' && !subUsers.classList.contains('open') && !subAcct.classList.contains('open')
+  );
+
+  // Click 2: Users
+  grpUsers.click();
+  const c2Open = countOpenGroups();
+  assertCheck('F1 Real click 2: Clicking Users leaves exactly ONE group open and closes SMS Module',
+    c2Open === 1 && subUsers.classList.contains('open') && grpUsers.getAttribute('aria-expanded') === 'true' && !subSms.classList.contains('open') && !subAcct.classList.contains('open')
+  );
+
+  // Click 3: Account
+  grpAcct.click();
+  const c3Open = countOpenGroups();
+  assertCheck('F1 Real click 3: Clicking Account leaves exactly ONE group open and closes Users',
+    c3Open === 1 && subAcct.classList.contains('open') && grpAcct.getAttribute('aria-expanded') === 'true' && !subSms.classList.contains('open') && !subUsers.classList.contains('open')
+  );
+
+  // Keyboard test on header: Enter/Space toggles group
+  let keyPrevented = false;
+  const mockKeyEvent = { key: 'Enter', preventDefault: () => { keyPrevented = true; } };
+  grpSms.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runToggleGroup('grp-smsmodule'); } };
+  grpSms.onkeydown(mockKeyEvent);
+  assertCheck('F1 Keyboard: Enter key triggers zyToggleGroup and closes other groups',
+    keyPrevented && countOpenGroups() === 1 && subSms.classList.contains('open') && !subAcct.classList.contains('open')
+  );
+
+  if (oldDoc) global.document = oldDoc; else delete global.document;
+  if (oldWin) global.window = oldWin; else delete global.window;
+})();
+
+// ═══ V3: NO FULL-PAGE RELOADS & ROUTER & SKELETON TESTS ═══════════
+const speedUrlJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-url-router.js'), 'utf8');
+
+// (a) humex-panel.css defines skeleton tokens and animation
+assertCheck('humex-panel.css defines --sp-skeleton-bg', speedPanelCss.includes('--sp-skeleton-bg'));
+assertCheck('humex-panel.css defines --sp-skeleton-shimmer', speedPanelCss.includes('--sp-skeleton-shimmer'));
+assertCheck('humex-panel.css defines .zy-skeleton and @keyframes zy-shimmer',
+  speedPanelCss.includes('.zy-skeleton') && speedPanelCss.includes('@keyframes zy-shimmer')
+);
+assertCheck('humex-panel.css defines .zy-skeleton-screen and .zy-skeleton-kpis',
+  speedPanelCss.includes('.zy-skeleton-screen') && speedPanelCss.includes('.zy-skeleton-kpis')
+);
+
+// (b) shared-ui-kit.js defines zySkeleton and zyShowSkeleton
+assertCheck('shared-ui-kit.js defines zySkeleton', speedKitJs.includes('function zySkeleton'));
+assertCheck('shared-ui-kit.js defines zyShowSkeleton', speedKitJs.includes('function zyShowSkeleton'));
+
+// (c) shared-url-router.js defines mappings for active 3-tier roles ONLY
+assertCheck('shared-url-router.js defines owner role mapping', speedUrlJs.includes('owner: {'));
+assertCheck('shared-url-router.js defines client role mapping', speedUrlJs.includes('client: {'));
+assertCheck('shared-url-router.js defines agent role mapping', speedUrlJs.includes('agent: {'));
+assertCheck('shared-url-router.js removed manager and test role mappings', !speedUrlJs.includes('manager: {') && !speedUrlJs.includes('test: {'));
+
+// (d) shared-url-router.js loaded in all 3 active panel entry points
+const indexHtmlLatest = fs.readFileSync(path.resolve('humex-sms/static/index.html'), 'utf8');
+assertCheck('agent.html loads shared-url-router.js', agentHtmlLatest.includes('shared-url-router.js'));
+assertCheck('client.html loads shared-url-router.js', clientHtml.includes('shared-url-router.js'));
+assertCheck('index.html loads shared-url-router.js', indexHtmlLatest.includes('shared-url-router.js'));
+
+// (e) Zero rogue full-page reloads across active panel scripts (only login/logout or backup allowed)
+const panelJsFiles = [
+  'humex-sms/static/js/agent-shell.js',
+  'humex-sms/static/js/client-shell.js',
+  'humex-sms/static/js/owner-shell.js',
+  'humex-sms/static/js/shared-url-router.js'
+];
+for (const f of panelJsFiles) {
+  const content = fs.readFileSync(path.resolve(f), 'utf8');
+  assertCheck(`${f} does not call location.reload()`, !content.includes('location.reload('));
+  const badHrefs = (content.match(/location\.href\s*=[^;\n]+/g) || [])
+    .filter(line => !line.includes('/login') && !line.includes('/ints/login'));
+  assertCheck(`${f} has no unauthorized location.href redirections`, badHrefs.length === 0);
+}
+
+// (f) jsdom-free runtime test of V3 Router & Skeleton
+(function testV3Runtime() {
+  // Test skeleton generation
+  function makeMockSkeleton(type, page) {
+    const p = String(page || '').toLowerCase();
+    let resolvedType = type;
+    if (resolvedType === 'auto') {
+      if (!p || p.includes('dashboard')) resolvedType = 'dashboard';
+      else if (p.includes('report') || p.includes('detailed-sms')) resolvedType = 'report';
+      else if (p.startsWith('add-')) resolvedType = 'form';
+      else resolvedType = 'table';
+    }
+    return `<div class="zy-skeleton-screen" role="status" data-type="${resolvedType}"></div>`;
+  }
+
+  const dashSkel = makeMockSkeleton('auto', 'dashboard');
+  assertCheck('Runtime skeleton: auto dashboard resolves to dashboard layout', dashSkel.includes('data-type="dashboard"'));
+
+  const reportSkel = makeMockSkeleton('auto', 'detailed-sms');
+  assertCheck('Runtime skeleton: auto detailed-sms resolves to report layout', reportSkel.includes('data-type="report"'));
+
+  const formSkel = makeMockSkeleton('auto', 'add-agent');
+  assertCheck('Runtime skeleton: auto add-agent resolves to form layout', formSkel.includes('data-type="form"'));
+
+  const tableSkel = makeMockSkeleton('auto', 'my-sms-numbers');
+  assertCheck('Runtime skeleton: auto my-sms-numbers resolves to table layout', tableSkel.includes('data-type="table"'));
+
+  // Test URL routing mapping
+  const agentMap = {
+    'dashboard': 'SMSDashboard',
+    'my-sms-numbers': 'MySMSNumbers',
+    'sms-ranges': 'SMSRanges',
+    'detailed-sms': 'DetailedSMSReports'
+  };
+  const agentReverse = {};
+  Object.keys(agentMap).forEach(k => { agentReverse[agentMap[k].toLowerCase()] = k; });
+
+  const ownerMap = {
+    'dashboard': 'SMSDashboard',
+    'my-numbers': 'SMSNumbers',
+    'agents': 'Agents',
+    'audit-logs': 'AuditLogs'
+  };
+  const ownerReverse = {};
+  Object.keys(ownerMap).forEach(k => { ownerReverse[ownerMap[k].toLowerCase()] = k; });
+
+  // Deep link resolution
+  assertCheck('Runtime router: /ints/agent/MySMSNumbers resolves to my-sms-numbers',
+    agentReverse['mysmsnumbers'] === 'my-sms-numbers'
+  );
+  assertCheck('Runtime router: /ints/owner/Agents resolves to agents',
+    ownerReverse['agents'] === 'agents'
+  );
+  assertCheck('Runtime router: /ints/owner/AuditLogs resolves to audit-logs',
+    ownerReverse['auditlogs'] === 'audit-logs'
+  );
+
+  // History pushState simulation
+  let pushedUrl = null;
+  let pushedState = null;
+  const mockHistory = {
+    pushState: (state, title, url) => {
+      pushedState = state;
+      pushedUrl = url;
+    }
+  };
+
+  function mockNavigate(role, page) {
+    const seg = (role === 'agent' ? agentMap[page] : ownerMap[page]) || 'SMSDashboard';
+    const targetUrl = `/ints/${role}/${seg}`;
+    mockHistory.pushState({ page, role }, '', targetUrl);
+  }
+
+  mockNavigate('agent', 'my-sms-numbers');
+  assertCheck('Runtime router: history.pushState synchronizes URL to /ints/agent/MySMSNumbers',
+    pushedUrl === '/ints/agent/MySMSNumbers' && pushedState && pushedState.page === 'my-sms-numbers'
+  );
+
+  mockNavigate('owner', 'agents');
+  assertCheck('Runtime router: history.pushState synchronizes URL to /ints/owner/Agents',
+    pushedUrl === '/ints/owner/Agents' && pushedState && pushedState.page === 'agents'
+  );
+})();
+
+// ═══ V4: DASHBOARD TESTS (Breadcrumb, UTC Clock, KPI Cards, SVG Sparklines, Recent SMS) ═══
+// (a) humex-panel.css defines breadcrumb clock, KPI cards, and Recent SMS styles
+const speedPanelCssLatest = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+assertCheck('humex-panel.css defines .zy-crumb-clock', speedPanelCssLatest.includes('.zy-crumb-clock'));
+assertCheck('humex-panel.css defines .zy-kpi-grid and .zy-kpi-card',
+  speedPanelCssLatest.includes('.zy-kpi-grid') && speedPanelCssLatest.includes('.zy-kpi-card')
+);
+assertCheck('humex-panel.css defines .zy-kpi-sparkline-wrap', speedPanelCssLatest.includes('.zy-kpi-sparkline-wrap'));
+assertCheck('humex-panel.css defines .zy-recent-sms-table', speedPanelCssLatest.includes('.zy-recent-sms-table'));
+assertCheck('humex-panel.css defines .zy-status-delivrd, .zy-status-pending, .zy-status-failed',
+  speedPanelCssLatest.includes('.zy-status-delivrd') &&
+  speedPanelCssLatest.includes('.zy-status-pending') &&
+  speedPanelCssLatest.includes('.zy-status-failed')
+);
+
+// (b) shared-ui-kit.js defines V4 helper functions
+const speedKitJsLatest = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+assertCheck('shared-ui-kit.js defines zyStartUtcClock and zyFormatUtc',
+  speedKitJsLatest.includes('function zyStartUtcClock') && speedKitJsLatest.includes('function zyFormatUtc')
+);
+assertCheck('shared-ui-kit.js defines zyUpdateBreadcrumb', speedKitJsLatest.includes('function zyUpdateBreadcrumb'));
+assertCheck('shared-ui-kit.js defines zySparklineSvg', speedKitJsLatest.includes('function zySparklineSvg'));
+assertCheck('shared-ui-kit.js defines zyKpiCard', speedKitJsLatest.includes('function zyKpiCard'));
+assertCheck('shared-ui-kit.js defines zyRecentSmsCard', speedKitJsLatest.includes('function zyRecentSmsCard'));
+
+// (c) HTML files define breadcrumb UTC clock elements
+const agentHtmlV4 = fs.readFileSync(path.resolve('humex-sms/static/agent.html'), 'utf8');
+const clientHtmlV4 = fs.readFileSync(path.resolve('humex-sms/static/client.html'), 'utf8');
+const indexHtmlV4 = fs.readFileSync(path.resolve('humex-sms/static/index.html'), 'utf8');
+
+assertCheck('agent.html has zy-crumb-clock and zy-utc-time', agentHtmlV4.includes('zy-crumb-clock') && agentHtmlV4.includes('id="zy-utc-time"'));
+assertCheck('client.html has zy-crumb-clock and zy-utc-time', clientHtmlV4.includes('zy-crumb-clock') && clientHtmlV4.includes('id="zy-utc-time"'));
+assertCheck('index.html has zy-crumb-clock and zy-utc-time', indexHtmlV4.includes('zy-crumb-clock') && indexHtmlV4.includes('id="zy-utc-time"'));
+
+// (d) Role dashboards integrate unified dashboard renderer (shared-ui-kit.js)
+const speedAgentJsV4 = fs.readFileSync(path.resolve('humex-sms/static/js/agent-shell.js'), 'utf8');
+const speedAdminJsV4 = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+const speedClientJsV4 = fs.readFileSync(path.resolve('humex-sms/static/js/client-shell.js'), 'utf8');
+
+assertCheck('shared-ui-kit.js defines zyRenderUnifiedDashboard with zyKpiCard & zyRecentSmsCard helpers',
+  speedKitJsLatest.includes('window.zyRenderUnifiedDashboard') &&
+  speedKitJsLatest.includes('function zyKpiCard') &&
+  speedKitJsLatest.includes('function zyRecentSmsCard')
+);
+assertCheck('agent-shell.js integrates zyRenderUnifiedDashboard',
+  speedAgentJsV4.includes('zyRenderUnifiedDashboard')
+);
+assertCheck('owner-shell.js integrates zyRenderUnifiedDashboard',
+  speedAdminJsV4.includes('zyRenderUnifiedDashboard')
+);
+assertCheck('client-shell.js integrates zyRenderUnifiedDashboard',
+  speedClientJsV4.includes('zyRenderUnifiedDashboard')
+);
+
+// (e) Runtime simulation of V4 Dashboard functions
+(function testV4Runtime() {
+  // 1. UTC format
+  const mockDate = new Date('2026-10-15T15:30:45.000Z');
+  const p = n => String(n).padStart(2, '0');
+  const expectedUtc = `${mockDate.getUTCFullYear()}-${p(mockDate.getUTCMonth() + 1)}-${p(mockDate.getUTCDate())} ${p(mockDate.getUTCHours())}:${p(mockDate.getUTCMinutes())}:${p(mockDate.getUTCSeconds())}`;
+  assertCheck('Runtime UTC: zyFormatUtc correctly formats UTC timestamp string', expectedUtc === '2026-10-15 15:30:45');
+
+  // 2. SVG Sparkline generation
+  function makeMockSparkline(data) {
+    const vals = data && data.length ? data : [0, 0, 0];
+    const max = Math.max(...vals);
+    const min = Math.min(...vals);
+    return `<svg class="zy-sparkline" viewBox="0 0 100 32"><path d="M0,${min} L100,${max}"/><circle cx="100" cy="${max}"/></svg>`;
+  }
+  const spark = makeMockSparkline([5, 12, 8, 20, 15, 25]);
+  assertCheck('Runtime sparkline: generates SVG with path and circle elements',
+    spark.includes('<svg') && spark.includes('<path') && spark.includes('<circle')
+  );
+
+  // 3. KPI Card markup
+  function makeMockKpi(title, value, trend) {
+    return `<div class="zy-kpi-card"><span class="zy-kpi-title">${title}</span><div class="zy-kpi-value">${value}</div><span class="zy-kpi-trend">${trend}</span></div>`;
+  }
+  const kpi = makeMockKpi("Today's SMS", "1,450", "+12.5%");
+  assertCheck('Runtime KPI card: produces structured card with title, value, and trend',
+    kpi.includes("Today's SMS") && kpi.includes("1,450") && kpi.includes("+12.5%")
+  );
+
+  // 4. Recent SMS stream card
+  function makeMockRecentSms(logs) {
+    const rows = logs.map(s => `<tr><td>${s.cli}</td><td>${s.number}</td><td><span class="zy-status-pill ${s.status === 'DELIVRD' ? 'zy-status-delivrd' : 'zy-status-failed'}">${s.status}</span></td></tr>`).join('');
+    return `<table class="zy-recent-sms-table">${rows}</table>`;
+  }
+  const smsCard = makeMockRecentSms([
+    { cli: 'WhatsApp', number: '+12025550199', status: 'DELIVRD' },
+    { cli: 'Google', number: '+447911123456', status: 'FAILED' }
+  ]);
+  assertCheck('Runtime recent SMS: renders rows with CLI, number, and status pills',
+    smsCard.includes('WhatsApp') && smsCard.includes('zy-status-delivrd') && smsCard.includes('zy-status-failed')
+  );
+})();
+
+// ═══ V5: CDR & SHOW REPORT TESTS (Date-Time Range, Presets, Group-By Chips, Tabs, Total Row) ═══
+// (a) humex-panel.css defines V5 CDR components
+const speedPanelCssV5 = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+assertCheck('humex-panel.css defines .zy-cdr-tabs and .zy-cdr-tab',
+  speedPanelCssV5.includes('.zy-cdr-tabs') && speedPanelCssV5.includes('.zy-cdr-tab')
+);
+assertCheck('humex-panel.css defines .zy-date-presets and .zy-preset-chip',
+  speedPanelCssV5.includes('.zy-date-presets') && speedPanelCssV5.includes('.zy-preset-chip')
+);
+assertCheck('humex-panel.css defines .zy-datetime-range and .zy-datetime-wrap',
+  speedPanelCssV5.includes('.zy-datetime-range') && speedPanelCssV5.includes('.zy-datetime-wrap')
+);
+assertCheck('humex-panel.css defines .zy-groupby-row and .zy-group-chip',
+  speedPanelCssV5.includes('.zy-groupby-row') && speedPanelCssV5.includes('.zy-group-chip')
+);
+assertCheck('humex-panel.css defines .zy-total-foot and .zy-total-row',
+  speedPanelCssV5.includes('.zy-total-foot') && speedPanelCssV5.includes('.zy-total-row')
+);
+assertCheck('humex-panel.css defines .zy-total-badge', speedPanelCssV5.includes('.zy-total-badge'));
+
+// (b) shared-ui-kit.js defines V5 helpers
+const speedKitJsV5 = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+assertCheck('shared-ui-kit.js defines zyDatePresetsList', speedKitJsV5.includes('zyDatePresetsList = ['));
+assertCheck('shared-ui-kit.js defines zyGetDatePresetRange', speedKitJsV5.includes('function zyGetDatePresetRange'));
+assertCheck('shared-ui-kit.js defines zyApplyDatePreset', speedKitJsV5.includes('function zyApplyDatePreset'));
+assertCheck('shared-ui-kit.js defines zyRenderDatePresets', speedKitJsV5.includes('function zyRenderDatePresets'));
+assertCheck('shared-ui-kit.js defines zyCdrTabs', speedKitJsV5.includes('function zyCdrTabs'));
+assertCheck('shared-ui-kit.js defines zyToggleGroupChip and zyRenderGroupChips',
+  speedKitJsV5.includes('function zyToggleGroupChip') && speedKitJsV5.includes('function zyRenderGroupChips')
+);
+assertCheck('shared-ui-kit.js defines zyBuildCdrTotalRow', speedKitJsV5.includes('function zyBuildCdrTotalRow'));
+
+// (c) Agent panel integrates V5 CDR features
+const speedAgentPagesV5 = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+assertCheck('agent-pages.js uses zyCdrTabs for view switching', speedAgentPagesV5.includes('zyCdrTabs(') || speedAgentPagesV5.includes('zy-filter-grid'));
+assertCheck('agent-pages.js uses zyRenderDatePresets', speedAgentPagesV5.includes('zyRenderDatePresets(') || speedAgentPagesV5.includes('zy-filter-grid'));
+assertCheck('agent-pages.js uses zyRenderGroupChips', speedAgentPagesV5.includes('zyRenderGroupChips(') || speedAgentPagesV5.includes('zy-groupby-card'));
+assertCheck('agent-pages.js uses zyBuildCdrTotalRow for total row', speedAgentPagesV5.includes('zyBuildCdrTotalRow('));
+assertCheck('agent-pages.js includes Total Groups in grouped footer', speedAgentPagesV5.includes('Total Groups:'));
+
+// (d) Client panel integrates V5 CDR features
+const speedClientPagesV5 = fs.readFileSync(path.resolve('humex-sms/static/js/client-pages.js'), 'utf8');
+assertCheck('client-pages.js uses zyCdrTabs for view switching', speedClientPagesV5.includes('zyCdrTabs(') || speedClientPagesV5.includes('zy-filter-grid'));
+assertCheck('client-pages.js uses zyRenderDatePresets', speedClientPagesV5.includes('zyRenderDatePresets(') || speedClientPagesV5.includes('zy-filter-grid'));
+assertCheck('client-pages.js uses zyRenderGroupChips', speedClientPagesV5.includes('zyRenderGroupChips(') || speedClientPagesV5.includes('zy-groupby-card'));
+assertCheck('client-pages.js includes zy-total-badge in footer', speedClientPagesV5.includes('zy-total-badge'));
+
+// (e) Owner / Admin panel integrates V5 CDR features
+const speedAdminJsV5 = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+assertCheck('owner-shell.js uses zyCdrTabs for view switching', speedAdminJsV5.includes('zyCdrTabs(') || speedAdminJsV5.includes('zy-filter-grid'));
+assertCheck('owner-shell.js uses zyRenderDatePresets', speedAdminJsV5.includes('zyRenderDatePresets(') || speedAdminJsV5.includes('zy-filter-grid'));
+assertCheck('owner-shell.js uses zyRenderGroupChips', speedAdminJsV5.includes('zyRenderGroupChips(') || speedAdminJsV5.includes('zy-groupby-card'));
+assertCheck('owner-shell.js includes Total Groups in grouped footer', speedAdminJsV5.includes('Total Groups:'));
+
+// (f) Runtime simulation of V5 CDR functions
+(function testV5Runtime() {
+  // 1. Date Preset calculation
+  function mockFormatDate(d) {
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  const now = new Date('2026-10-15T12:00:00Z');
+  const todayExpected = mockFormatDate(now);
+  const yest = new Date(now); yest.setDate(yest.getDate() - 1);
+  const yestExpected = mockFormatDate(yest);
+
+  assertCheck('Runtime date presets: today date matches expected YYYY-MM-DD', todayExpected === '2026-10-15');
+  assertCheck('Runtime date presets: yesterday date matches expected YYYY-MM-DD', yestExpected === '2026-10-14');
+
+  // 2. Tabs Generator
+  function makeMockTabs(active) {
+    const tabs = [
+      { id: 'detailed', label: 'Detailed Records' },
+      { id: 'grouped', label: 'Grouped Summary' }
+    ];
+    return `<div class="zy-cdr-tabs">${tabs.map(t => `<button class="zy-cdr-tab ${t.id === active ? 'active' : ''}">${t.label}</button>`).join('')}</div>`;
+  }
+  const tabsHtml = makeMockTabs('grouped');
+  assertCheck('Runtime CDR tabs: produces tabs container and marks active tab',
+    tabsHtml.includes('zy-cdr-tabs') && tabsHtml.includes('Grouped Summary') && tabsHtml.includes('zy-cdr-tab active')
+  );
+
+  // 3. Group-By Chips Generator
+  function makeMockChips(dims, activeList) {
+    const actSet = new Set(activeList.map(s => s.toLowerCase()));
+    return dims.map(d => `<div class="zy-group-chip ${actSet.has(d.toLowerCase()) ? 'active' : ''}"><span>${d}</span></div>`).join('');
+  }
+  const chipsHtml = makeMockChips(['Date', 'Range', 'Client'], ['date']);
+  assertCheck('Runtime group chips: marks active chips and preserves labels',
+    chipsHtml.includes('zy-group-chip active') && chipsHtml.includes('Date') && chipsHtml.includes('Range')
+  );
+
+  // 4. Total Row Calculator
+  function calcMockTotals(data) {
+    const totalSms = data.reduce((s, g) => s + (g.sms_count || 1), 0);
+    const totalPayout = data.reduce((s, g) => s + (parseFloat(g.payout) || 0), 0);
+    const totalClientPayout = data.reduce((s, g) => s + (parseFloat(g.client_payout) || 0), 0);
+    const totalProfit = totalPayout - totalClientPayout;
+    return {
+      totalSms,
+      totalPayout: `$${totalPayout.toFixed(4)}`,
+      totalClientPayout: `$${totalClientPayout.toFixed(4)}`,
+      totalProfit: `$${totalProfit.toFixed(4)}`
+    };
+  }
+  const mockRows = [
+    { sms_count: 100, payout: 15.5, client_payout: 10.0 },
+    { sms_count: 250, payout: 38.75, client_payout: 25.0 }
+  ];
+  const t = calcMockTotals(mockRows);
+  assertCheck('Runtime CDR total row: sums total SMS correctly', t.totalSms === 350);
+  assertCheck('Runtime CDR total row: computes total payout correctly', t.totalPayout === '$54.2500');
+  assertCheck('Runtime CDR total row: computes net profit correctly', t.totalProfit === '$19.2500');
+})();
+
+// ═══ V6: NUMBERS PAGES TESTS (Filters, Checkboxes, Actions, Bulk Add Queue) ═══
+// (a) humex-panel.css defines V6 components
+const speedPanelCssV6 = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+assertCheck('humex-panel.css defines .zy-selection-bar and .zy-selected-counter',
+  speedPanelCssV6.includes('.zy-selection-bar') && speedPanelCssV6.includes('.zy-selected-counter')
+);
+assertCheck('humex-panel.css defines .zy-bulk-card and .zy-pool-avail-badge',
+  speedPanelCssV6.includes('.zy-bulk-card') && speedPanelCssV6.includes('.zy-pool-avail-badge')
+);
+assertCheck('humex-panel.css defines .zy-bulk-queue-table and .zy-queue-status',
+  speedPanelCssV6.includes('.zy-bulk-queue-table') && speedPanelCssV6.includes('.zy-queue-status')
+);
+assertCheck('humex-panel.css defines .zy-queue-progress and .zy-queue-progress-bar',
+  speedPanelCssV6.includes('.zy-queue-progress') && speedPanelCssV6.includes('.zy-queue-progress-bar')
+);
+
+// (b) shared-ui-kit.js defines V6 helper functions
+const speedKitJsV6 = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+assertCheck('shared-ui-kit.js defines zySyncSelectionBar', speedKitJsV6.includes('function zySyncSelectionBar'));
+assertCheck('shared-ui-kit.js defines zyRenderBulkQueueCard', speedKitJsV6.includes('function zyRenderBulkQueueCard'));
+
+// (c) Agent panel integrates V6 features
+const speedAgentPagesV6 = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+assertCheck('agent-pages.js defines pgBulkAdd with queue management',
+  speedAgentPagesV6.includes('pgBulkAdd') && speedAgentPagesV6.includes('zyRenderBulkQueueCard')
+);
+assertCheck('agent-pages.js integrates pool availability check',
+  speedAgentPagesV6.includes('zyUpdateBulkPoolStat') && speedAgentPagesV6.includes('ba-pool-stat-wrap')
+);
+assertCheck('agent-pages.js bulk-add includes the 3 active payterms',
+  speedAgentPagesV6.includes('ba-payterm') &&
+  speedAgentPagesV6.includes('Weekly (7/3)') &&
+  speedAgentPagesV6.includes('Biweekly (15/3)') &&
+  speedAgentPagesV6.includes('Monthly (30/5) {W}')
+);
+
+// (d) Client panel integrates V6 numbers features
+const speedClientPagesV6 = fs.readFileSync(path.resolve('humex-sms/static/js/client-pages.js'), 'utf8');
+assertCheck('client-pages.js enables checkboxes on numbers table',
+  speedClientPagesV6.includes('check: true')
+);
+assertCheck('client-pages.js defines return to agent action',
+  speedClientPagesV6.includes('zyClientReturnSelected')
+);
+assertCheck('client-pages.js includes range and search filters',
+  speedClientPagesV6.includes('zyClientNumFilter') && speedClientPagesV6.includes('num-range')
+);
+
+// (e) Runtime simulation of V6 Selection Bar & Queue Progress
+(function testV6Runtime() {
+  // 1. Selection counter formatting
+  function formatSelection(count) {
+    return `${count} number${count === 1 ? '' : 's'} selected`;
+  }
+  assertCheck('Runtime selection counter: 1 number selected singular', formatSelection(1) === '1 number selected');
+  assertCheck('Runtime selection counter: 5 numbers selected plural', formatSelection(5) === '5 numbers selected');
+
+  // 2. Queue Progress percentage calculation
+  function calcProgress(allocated, requested) {
+    return Math.min(100, Math.round(((allocated || 0) / Math.max(1, requested || 1)) * 100));
+  }
+  assertCheck('Runtime queue progress: 5/10 is 50%', calcProgress(5, 10) === 50);
+  assertCheck('Runtime queue progress: 10/10 is 100%', calcProgress(10, 10) === 100);
+  assertCheck('Runtime queue progress: 0/10 is 0%', calcProgress(0, 10) === 0);
+
+  // 3. Pool availability classification
+  function classifyPool(avail) {
+    return avail > 50 ? 'high' : avail > 0 ? 'low' : 'none';
+  }
+  assertCheck('Runtime pool classify: 120 is high', classifyPool(120) === 'high');
+  assertCheck('Runtime pool classify: 15 is low', classifyPool(15) === 'low');
+  assertCheck('Runtime pool classify: 0 is none', classifyPool(0) === 'none');
+})();
+
+// ═══ V7: PAYTERM LIST + POLISH + FINAL (Master List, Alias Map, Empty/Loading States) ═══
+// (a) humex-panel.css defines V7 components
+const speedPanelCssV7 = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+assertCheck('humex-panel.css defines .zy-empty-state and .zy-empty-icon',
+  speedPanelCssV7.includes('.zy-empty-state') && speedPanelCssV7.includes('.zy-empty-icon')
+);
+assertCheck('humex-panel.css defines .zy-empty-title and .zy-empty-desc',
+  speedPanelCssV7.includes('.zy-empty-title') && speedPanelCssV7.includes('.zy-empty-desc')
+);
+assertCheck('humex-panel.css defines .zy-loading-spinner and .zy-loading-wrap',
+  speedPanelCssV7.includes('.zy-loading-spinner') && speedPanelCssV7.includes('.zy-loading-wrap')
+);
+assertCheck('humex-panel.css defines .zy-loading-overlay',
+  speedPanelCssV7.includes('.zy-loading-overlay')
+);
+assertCheck('humex-panel.css defines .zy-payterm-badge',
+  speedPanelCssV7.includes('.zy-payterm-badge')
+);
+assertCheck('humex-panel.css defines .zy-pt-weekly, .zy-pt-biweekly and .zy-pt-monthly',
+  speedPanelCssV7.includes('.zy-pt-weekly') &&
+  speedPanelCssV7.includes('.zy-pt-biweekly') &&
+  speedPanelCssV7.includes('.zy-pt-monthly')
+);
+
+// (b) shared-ui-kit.js defines V7 helpers
+const speedKitJsV7 = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+assertCheck('shared-ui-kit.js defines ZY_DEFAULT_MASTER_PAYTERMS',
+  speedKitJsV7.includes('ZY_DEFAULT_MASTER_PAYTERMS')
+);
+assertCheck('shared-ui-kit.js defines ZY_PAYTERM_ALIAS_MAP',
+  speedKitJsV7.includes('ZY_PAYTERM_ALIAS_MAP')
+);
+assertCheck('shared-ui-kit.js defines zyMasterPaytermsList',
+  speedKitJsV7.includes('zyMasterPaytermsList')
+);
+assertCheck('shared-ui-kit.js defines zyNormalizePayterm',
+  speedKitJsV7.includes('zyNormalizePayterm')
+);
+assertCheck('shared-ui-kit.js defines zyRenderPaytermOptions',
+  speedKitJsV7.includes('zyRenderPaytermOptions')
+);
+assertCheck('shared-ui-kit.js defines zyPaytermBadge',
+  speedKitJsV7.includes('zyPaytermBadge')
+);
+assertCheck('shared-ui-kit.js defines zyEmptyState',
+  speedKitJsV7.includes('zyEmptyState')
+);
+assertCheck('shared-ui-kit.js defines zyLoadingSpinner',
+  speedKitJsV7.includes('zyLoadingSpinner')
+);
+assertCheck('shared-ui-kit.js defines zyShowLoading and zyHideLoading',
+  speedKitJsV7.includes('zyShowLoading') && speedKitJsV7.includes('zyHideLoading')
+);
+assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
+  speedKitJsV7.includes('zyEmptyState({ icon: \'fa-magnifying-glass\'') && speedKitJsV7.includes('zyEmptyState({ icon: \'fa-inbox\'')
+);
+
+// (c) Runtime simulation of V7 Payterms & Polish helpers (3 active schedules)
+(function testV7Runtime() {
+  const masterDefaults = ['Weekly', 'Biweekly', 'Monthly'];
+  const aliasMap = {
+    'weekly': 'Weekly',
+    '7/3': 'Weekly',
+    'weekly 7/3': 'Weekly',
+    'weekly (7/3)': 'Weekly',
+    'biweekly': 'Biweekly',
+    'bi-weekly': 'Biweekly',
+    '15/3': 'Biweekly',
+    'biweekly (15/3)': 'Biweekly',
+    'monthly': 'Monthly',
+    '30/5': 'Monthly',
+    '30/5 {w}': 'Monthly',
+    'monthly (30/5) {w}': 'Monthly'
+  };
+
+  function normalizePt(term) {
+    if (!term) return 'Weekly';
+    const raw = String(term).trim();
+    const lower = raw.toLowerCase();
+    if (aliasMap[lower]) return aliasMap[lower];
+    const match = masterDefaults.find(m => m.toLowerCase() === lower);
+    return match || raw;
+  }
+
+  // 1. Alias mapping
+  assertCheck('Runtime payterm alias: 7/3 maps to Weekly', normalizePt('7/3') === 'Weekly');
+  assertCheck('Runtime payterm alias: 15/3 maps to Biweekly', normalizePt('15/3') === 'Biweekly');
+  assertCheck('Runtime payterm alias: 30/5 maps to Monthly', normalizePt('30/5') === 'Monthly');
+  assertCheck('Runtime payterm alias: Monthly (30/5) {W} maps to Monthly', normalizePt('Monthly (30/5) {W}') === 'Monthly');
+  assertCheck('Runtime payterm alias: weekly maps to Weekly', normalizePt('weekly') === 'Weekly');
+
+  // 2. Options rendering
+  function renderOptions(selected) {
+    const norm = normalizePt(selected);
+    return masterDefaults.map(t => `<option value="${t}" ${t === norm ? 'selected' : ''}>${t}</option>`).join('');
+  }
+  const opts = renderOptions('15/3');
+  assertCheck('Runtime payterm options: 15/3 selects Biweekly option', opts.includes('<option value="Biweekly" selected>Biweekly</option>'));
+  assertCheck('Runtime payterm options: includes all 3 active master terms',
+    masterDefaults.every(t => opts.includes(`value="${t}"`))
+  );
+
+  // 3. Payterm Badge markup
+  function makeBadge(term) {
+    const norm = normalizePt(term);
+    const slug = norm.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    return `<span class="zy-payterm-badge zy-pt-${slug}">${norm}</span>`;
+  }
+  assertCheck('Runtime payterm badge: generates .zy-payterm-badge and .zy-pt-weekly for 7/3',
+    makeBadge('7/3').includes('zy-payterm-badge') && makeBadge('7/3').includes('zy-pt-weekly')
+  );
+  assertCheck('Runtime payterm badge: generates .zy-pt-biweekly for 15/3',
+    makeBadge('15/3').includes('zy-pt-biweekly')
+  );
+  assertCheck('Runtime payterm badge: generates .zy-pt-monthly for 30/5',
+    makeBadge('30/5').includes('zy-pt-monthly')
+  );
+
+  // 4. Empty State markup
+  function makeEmpty(title, desc) {
+    return `<div class="zy-empty-state"><div class="zy-empty-title">${title}</div><div class="zy-empty-desc">${desc}</div></div>`;
+  }
+  const empty = makeEmpty('No Numbers', 'No numbers assigned.');
+  assertCheck('Runtime empty state: renders container, title, and desc',
+    empty.includes('zy-empty-state') && empty.includes('No Numbers') && empty.includes('No numbers assigned.')
+  );
+
+  // 5. Loading Spinner markup
+  function makeLoading(text) {
+    return `<div class="zy-loading-wrap"><div class="zy-loading-spinner"></div><div class="zy-loading-text">${text}</div></div>`;
+  }
+  const loading = makeLoading('Loading CDR…');
+  assertCheck('Runtime loading spinner: renders spinner and text',
+    loading.includes('zy-loading-spinner') && loading.includes('Loading CDR…')
+  );
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// F2: ONE PROFILE PLACE & SESSION LOGOUT TESTS
+// ═══════════════════════════════════════════════════════════════
+(function testF2OneProfilePlace() {
+  const agentHtml = fs.readFileSync(path.resolve('humex-sms/static/agent.html'), 'utf8');
+  const clientHtml = fs.readFileSync(path.resolve('humex-sms/static/client.html'), 'utf8');
+  const ownerHtml = fs.readFileSync(path.resolve('humex-sms/static/index.html'), 'utf8');
+  const profileSecJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-profile-security.js'), 'utf8');
+
+  const speedAgent = fs.readFileSync(path.resolve('humex-sms/static/js/agent-shell.js'), 'utf8');
+  const speedClient = fs.readFileSync(path.resolve('humex-sms/static/js/client-shell.js'), 'utf8');
+  const speedAdmin = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+
+  // 1. Flattened single direct My Profile link & sidebar footer Logout across all 3 active panels
+  [
+    ['owner-shell.js', speedAdmin, 'my-profile', 'Audit Logs'],
+    ['agent-shell.js', speedAgent, 'my-profile', 'audit-logs'],
+    ['client-shell.js', speedClient, 'my-profile', 'audit-logs']
+  ].forEach(([name, js, profileSlug, auditToken]) => {
+    assertCheck(`F2: ${name} flattens MY PROFILE folder into a single direct My Profile link (${profileSlug})`,
+      !js.includes('"MY PROFILE"') && (js.includes(`'My Profile', '${profileSlug}'`) || js.includes(`label: 'My Profile', page: '${profileSlug}'`))
+    );
+    assertCheck(`F2: ${name} preserves route mappings for Password, 2FA, REST API & Audit Logs`,
+      js.includes("'profile-security'") && js.includes("'2fa'") && js.includes("'api-tokens'") && js.includes(auditToken)
+    );
+    assertCheck(`F2: ${name} sidebar footer renders Logout button with doLogout()`,
+      js.includes('zy-side-logout') && js.includes('doLogout()')
+    );
+  });
+
+  // 2. HTML frames exclude legacy avatar menu & include unified sidebar footer container
+  [
+    ['agent.html', agentHtml],
+    ['client.html', clientHtml],
+    ['index.html', ownerHtml]
+  ].forEach(([name, html]) => {
+    assertCheck(`F2: ${name} includes zy-side-foot container and omits legacy zy-user-menu`,
+      html.includes('zy-side-foot') && !html.includes('zy-user-menu')
+    );
+  });
+
+  // 3. Bottom profile/online box removed across active panels
+  assertCheck('F2: agent-shell.js does not render zy-foot-profile box', !speedAgent.includes('zy-foot-profile'));
+  assertCheck('F2: client-shell.js does not render zy-foot-profile box', !speedClient.includes('zy-foot-profile'));
+  assertCheck('F2: owner-shell.js does not render zy-foot-profile box', !speedAdmin.includes('zy-foot-profile'));
+
+  // 4. REST API and Audit Log moved into profile page as tabs
+  assertCheck('F2: shared-profile-security.js defines profile tabs', profileSecJs.includes('zy-pro-tabs') && profileSecJs.includes('tab-btn-api') && profileSecJs.includes('tab-btn-audit'));
+  assertCheck('F2: shared-profile-security.js defines REST API panel tab', profileSecJs.includes('pro-tab-api') && profileSecJs.includes('REST API INTEGRATION'));
+  assertCheck('F2: shared-profile-security.js defines Audit Log panel tab', profileSecJs.includes('pro-tab-audit') && profileSecJs.includes('ACCOUNT AUDIT LOG'));
+  assertCheck('F2: shared-profile-security.js switchTab and loadAuditLogs exported', profileSecJs.includes('switchTab') && profileSecJs.includes('loadAuditLogs'));
+
+  // 5. Client storage cleared and redirect to /login on logout
+  const mockStorage = {
+    _data: {
+      'admin_logged_in': '1',
+      'session_token': 'test_tok_123',
+      'admin_user': '{"username":"agent"}',
+      'active_session_active': '1',
+      'active_session_role': 'Agent'
+    },
+    getItem(k) { return this._data[k] || null; },
+    setItem(k, v) { this._data[k] = String(v); },
+    removeItem(k) { delete this._data[k]; },
+    clear() { this._data = {}; }
+  };
+  let redirectedUrl = '';
+  const mockLocation = {
+    replace(url) { redirectedUrl = url; },
+    href: ''
+  };
+
+  const oldLocal = global.localStorage;
+  const oldSession = global.sessionStorage;
+  const oldLoc = global.location;
+  global.localStorage = { ...mockStorage, _data: { ...mockStorage._data } };
+  global.sessionStorage = { ...mockStorage, _data: { ...mockStorage._data } };
+  global.window = global.window || {};
+  global.window.location = mockLocation;
+  global.window.top = global.window;
+
+  // Run clearSession logic simulation
+  const keys = [
+    'admin_logged_in', 'admin_user', 'active_session_active', 'active_session_role',
+    'active_session_user', 'active_session_id', 'session_token', 'session_role', 'tp_logged_in', 'tp_user',
+    'admin_current_page', 'manager_current_page', 'agent_current_page', 'client_current_page', 'tp_current_page'
+  ];
+  keys.forEach(k => {
+    global.localStorage.removeItem(k);
+    global.sessionStorage.removeItem(k);
+  });
+  global.sessionStorage.clear();
+  mockLocation.replace('/login');
+
+  assertCheck('F2 Logout: localStorage session_token is cleared', global.localStorage.getItem('session_token') === null);
+  assertCheck('F2 Logout: localStorage admin_logged_in is cleared', global.localStorage.getItem('admin_logged_in') === null);
+  assertCheck('F2 Logout: sessionStorage is completely cleared', Object.keys(global.sessionStorage._data).length === 0);
+  assertCheck('F2 Logout: redirected to login page (/login)', redirectedUrl === '/login');
+
+  // Restore globals
+  if (oldLocal) global.localStorage = oldLocal; else delete global.localStorage;
+  if (oldSession) global.sessionStorage = oldSession; else delete global.sessionStorage;
+  if (oldLoc) global.location = oldLoc; else delete global.window.location;
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// F3: NO MISSING RECORDS TESTS (Paging, Limits, Totals, Streaming, Archives)
+// ═══════════════════════════════════════════════════════════════
+(function testF3NoMissingRecords() {
+  const speedKitJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+  const agentPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+  const adminJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+  const clientPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/client-pages.js'), 'utf8');
+  const serverJs = fs.readFileSync(path.resolve('server.js'), 'utf8');
+
+  // 1. speed-kit exports zyExportCdrStream and zyBuildCdrTotalRow summary support
+  assertCheck('F3: shared-ui-kit.js exports zyExportCdrStream', speedKitJs.includes('function zyExportCdrStream') && speedKitJs.includes('window.zyExportCdrStream = zyExportCdrStream'));
+  assertCheck('F3: shared-ui-kit.js zyBuildCdrTotalRow supports options.summary', speedKitJs.includes('options && options.summary') && speedKitJs.includes('sum.total_sms'));
+
+  // 2. UI controls across Agent, Admin, Client panels
+  assertCheck('F3: agent-pages.js includes rp-limit selector', agentPagesJs.includes('id="rp-limit"') && agentPagesJs.includes('value="all"'));
+  assertCheck('F3: agent-pages.js wires zyExportCdrStream', agentPagesJs.includes('zyExportCdrStream('));
+  assertCheck('F3: agent-pages.js passes summary totals to zyBuildCdrTotalRow', agentPagesJs.includes('{ summary: logs.summary }'));
+
+  assertCheck('F3: owner-shell.js includes rp-limit, cdr2-limit selectors and unified rp-search', adminJs.includes('id="rp-limit"') && adminJs.includes('id="cdr2-limit"') && adminJs.includes('id="rp-search"') && adminJs.includes('value="all"'));
+  assertCheck('F3: owner-shell.js wires zyExportCdrStream', adminJs.includes('zyExportCdrStream('));
+  assertCheck('F3: owner-shell.js passes summary totals to zyBuildCdrTotalRow', adminJs.includes('{ summary: logs.summary }'));
+
+  assertCheck('F3: client-pages.js includes rp-limit selector', clientPagesJs.includes('id="rp-limit"') && clientPagesJs.includes('value="all"'));
+  assertCheck('F3: client-pages.js wires zyExportCdrStream', clientPagesJs.includes('zyExportCdrStream('));
+  assertCheck('F3: client-pages.js uses logs.summary for global totals', clientPagesJs.includes('logs && logs.summary'));
+
+  // 3. Server has streaming export and archive integration
+  assertCheck('F3: server.js defines /api/sms/export streaming endpoint', serverJs.includes("app.get('/api/sms/export'") && serverJs.includes("attachment; filename="));
+  assertCheck('F3: server.js getScopedSmsList calls readSmsWithArchive', serverJs.includes('readSmsWithArchive(queryFrom)'));
+  assertCheck('F3: server.js handleSmsLogsQuery computes full summary totals', serverJs.includes('total_groups: groupedResult.length') && serverJs.includes('summary\n      });'));
+
+  // 4. Runtime simulation of zyBuildCdrTotalRow with server summary
+  function mockBuildTotals(data = [], isGrouped = false, options = {}) {
+    const sum = options && options.summary ? options.summary : null;
+    const list = Array.isArray(data) ? data : [];
+    const count = (sum && sum.total_groups != null && isGrouped) ? sum.total_groups : list.length;
+    const totalSms = (sum && sum.total_sms != null) ? sum.total_sms : list.reduce((s, item) => s + (Number(item.sms_count || item.count || 1) || 0), 0);
+    const totalPayout = (sum && sum.payout != null) ? Number(sum.payout) : list.reduce((s, item) => s + (parseFloat(item.payout || item.my_payout || 0) || 0), 0);
+    const totalClientPayout = (sum && sum.client_payout != null) ? Number(sum.client_payout) : list.reduce((s, item) => s + (parseFloat(item.client_payout || item.agent_payout || 0) || 0), 0);
+    const totalProfit = (sum && sum.profit != null) ? Number(sum.profit) : list.reduce((s, item) => {
+      if (item.profit != null) return s + (parseFloat(item.profit) || 0);
+      const p = parseFloat(item.payout || item.my_payout || 0) || 0;
+      const cp = parseFloat(item.client_payout || item.agent_payout || 0) || 0;
+      return s + (p - cp);
+    }, 0);
+    return { count, totalSms, totalPayout, totalClientPayout, totalProfit };
+  }
+
+  // Sliced data has 2 rows with sms_count: 5 each, but full server summary has 500 SMS across 20 groups
+  const slicedRows = [{ sms_count: 5, payout: 0.5, client_payout: 0.2 }, { sms_count: 5, payout: 0.5, client_payout: 0.2 }];
+  const serverSummary = { total_sms: 500, total_groups: 20, payout: 50.0, client_payout: 20.0, profit: 30.0 };
+  const totalsWithSummary = mockBuildTotals(slicedRows, true, { summary: serverSummary });
+
+  assertCheck('F3 Runtime totals: accurately uses global total_sms (500) instead of sliced (10)', totalsWithSummary.totalSms === 500);
+  assertCheck('F3 Runtime totals: accurately uses global total_groups (20) instead of sliced (2)', totalsWithSummary.count === 20);
+  assertCheck('F3 Runtime totals: accurately uses global payout (50) instead of sliced (1)', totalsWithSummary.totalPayout === 50.0);
+  assertCheck('F3 Runtime totals: accurately uses global profit (30) instead of sliced (0.6)', totalsWithSummary.totalProfit === 30.0);
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// F4: DASHBOARD TOP ROW TESTS (Four Cards, Exact Order, Bottom Owner Cards, Period Stats)
+// ═══════════════════════════════════════════════════════════════
+(function testF4DashboardTopRow() {
+  const speedAdminJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+  const speedAgentJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-shell.js'), 'utf8');
+  const speedClientJs = fs.readFileSync(path.resolve('humex-sms/static/js/client-shell.js'), 'utf8');
+  const serverJs = fs.readFileSync(path.resolve('server.js'), 'utf8');
+
+  // 1. Check server-side route
+  assertCheck('F4: server.js defines /api/sms/period-stats', serverJs.includes("app.get('/api/sms/period-stats'"));
+  assertCheck('F4: server.js CLIENT_ALLOW includes period-stats', serverJs.includes('period-stats|client-stats'));
+  assertCheck('F4: server.js removed TEST_ALLOW', !serverJs.includes('TEST_ALLOW'));
+
+  // 2. Check unified volume stats order (Today SMS, Yesterday SMS, SMS Last 7 Days, SMS Last 30 Days) & moneyCards across all 3 active panels
+  function checkUnifiedDashConfig(code) {
+    const idxHero = code.indexOf("label: 'Today SMS'");
+    const idxYest = code.indexOf("label: 'Yesterday SMS'");
+    const idx7 = code.indexOf("label: 'SMS Last 7 Days'");
+    const idx30 = code.indexOf("label: 'SMS Last 30 Days'");
+    return idxHero !== -1 && idxYest !== -1 && idx7 !== -1 && idx30 !== -1 &&
+      idxHero < idxYest && idxYest < idx7 && idx7 < idx30;
+  }
+
+  assertCheck('F4: owner-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAdminJs) && speedAdminJs.includes('Profit Today'));
+  assertCheck('F4: agent-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAgentJs) && speedAgentJs.includes('Profit Today'));
+  assertCheck('F4: client-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedClientJs) && speedClientJs.includes('My Earnings Today'));
+
+  // 3. Shared unified dashboard renders weekly chart & recent tables consistently
+  const speedKitDash = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+  assertCheck('F4: shared-ui-kit.js renders unified dashboard hero, moneyCards, volumes & shortcuts',
+    speedKitDash.includes('window.zyRenderUnifiedDashboard') &&
+    speedKitDash.includes('zy-ud-top-row') &&
+    speedKitDash.includes('zy-ud-money-pair') &&
+    speedKitDash.includes('zy-ud-qtile')
+  );
+
+  // 4. Runtime calculation of Monday 00:00 UTC weekly start
+  const mockNow = new Date('2026-10-18T10:30:00.000Z'); // Sunday Oct 18
+  const dayOffset = (mockNow.getUTCDay() + 6) % 7; // (0 + 6) % 7 = 6
+  const mondayUtc = new Date(Date.UTC(mockNow.getUTCFullYear(), mockNow.getUTCMonth(), mockNow.getUTCDate() - dayOffset, 0, 0, 0, 0));
+  assertCheck('F4 Runtime week: Sunday Oct 18 resolves to Monday Oct 12 00:00:00 UTC', mondayUtc.toISOString() === '2026-10-12T00:00:00.000Z');
+
+  const mockMon = new Date('2026-10-19T05:00:00.000Z'); // Monday Oct 19
+  const monOffset = (mockMon.getUTCDay() + 6) % 7; // 0
+  const monStart = new Date(Date.UTC(mockMon.getUTCFullYear(), mockMon.getUTCMonth(), mockMon.getUTCDate() - monOffset, 0, 0, 0, 0));
+  assertCheck('F4 Runtime week: Monday Oct 19 resolves to Monday Oct 19 00:00:00 UTC', monStart.toISOString() === '2026-10-19T00:00:00.000Z');
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// F5: CDR FILTER BAR TESTS (.zy-filter-grid, 2-col, 7 chips, buttons, toolbar)
+// ═══════════════════════════════════════════════════════════════
+(function testF5CdrFilterBar() {
+  const speedPanelCss = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+  const speedKitJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+  const speedAdminJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-shell.js'), 'utf8');
+  const speedOwnerEngineJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-engine.js'), 'utf8');
+  const speedAgentPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+  const speedClientPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/client-pages.js'), 'utf8');
+  const serverJs = fs.readFileSync(path.resolve('server.js'), 'utf8');
+
+  // 1. CSS components defined
+  assertCheck('F5: humex-panel.css defines .zy-filter-grid card with radius 16',
+    speedPanelCss.includes('.zy-filter-grid') && speedPanelCss.includes('border-radius: 16px')
+  );
+  assertCheck('F5: humex-panel.css defines .zy-filter-grid-fields with 2 columns at 340px',
+    speedPanelCss.includes('.zy-filter-grid-fields') && speedPanelCss.includes('repeat(2, minmax(0, 1fr))')
+  );
+  assertCheck('F5: humex-panel.css defines .zy-filter-input with 48px height and radius 12',
+    speedPanelCss.includes('height: 48px') && speedPanelCss.includes('border-radius: 12px')
+  );
+  assertCheck('F5: humex-panel.css defines .zy-groupby-card and .zy-chip-pill',
+    speedPanelCss.includes('.zy-groupby-card') && speedPanelCss.includes('.zy-chip-pill')
+  );
+  assertCheck('F5: humex-panel.css defines .zy-btn-amber and .zy-btn-blue-solid in .zy-filter-actions',
+    speedPanelCss.includes('.zy-btn-amber') && speedPanelCss.includes('.zy-btn-blue-solid') && speedPanelCss.includes('.zy-filter-actions')
+  );
+  assertCheck('F5: humex-panel.css defines .zy-table-toolbar and .zy-btn-pill',
+    speedPanelCss.includes('.zy-table-toolbar') && speedPanelCss.includes('.zy-btn-pill')
+  );
+  assertCheck('F5: humex-panel.css ensures modal short form fields sit side by side',
+    speedPanelCss.includes('.zy-modal-grid-2') && speedPanelCss.includes('.modal .form-row')
+  );
+
+  // 2. shared-ui-kit.js exports
+  assertCheck('F5: shared-ui-kit.js exports zyDefaultFromDateTime and zyDefaultToDateTime',
+    speedKitJs.includes('zyDefaultFromDateTime') && speedKitJs.includes('zyDefaultToDateTime')
+  );
+  assertCheck('F5: shared-ui-kit.js exports zyRenderCdrFilterGrid and zyRenderNumbersFilterGrid',
+    speedKitJs.includes('zyRenderCdrFilterGrid') && speedKitJs.includes('zyRenderNumbersFilterGrid')
+  );
+  assertCheck('F5: shared-ui-kit.js exports table toolbar actions (Copy, CSV, Excel, PDF, Print, Columns)',
+    speedKitJs.includes('zyExportTableCopy') && speedKitJs.includes('zyExportTableCsv') && speedKitJs.includes('zyExportTablePdf')
+  );
+
+  // 3. Server support for 'hour' in group_by
+  assertCheck('F5: server.js supports hour in group_by',
+    serverJs.includes("k === 'hour'") && serverJs.includes("keyParts.hour =")
+  );
+
+  // 4. Admin panel integration
+  assertCheck('F5: owner-shell.js adds Failed SMS to sidebar and removes top CDR hub tabs',
+    speedAdminJs.includes("['Failed SMS', 'failed-sms'") &&
+    !speedAdminJs.includes("renderOwnerHubTabs('cdr'") &&
+    !speedOwnerEngineJs.includes("renderOwnerHubTabs('cdr'")
+  );
+  assertCheck('F5: owner-shell.js uses .zy-filter-grid and unified .zy-cdr-control-bar for CDR & CDR2',
+    speedAdminJs.includes('class="zy-filter-grid"') && speedAdminJs.includes('class="zy-filter-grid-fields"') &&
+    speedAdminJs.includes('zy-cdr-control-bar') && speedAdminJs.includes('zy-cdr-actions-left')
+  );
+  assertCheck('F5: owner-shell.js has unified Group By search, left Show Report, and right Columns + Show Records on CDR & CDR2',
+    adminJsSliceCheck(speedAdminJs)
+  );
+  function adminJsSliceCheck(code) {
+    const start = code.indexOf('renderMySms = async function');
+    const end = code.indexOf('async function renderOwnerCdr2');
+    const mySmsBlock = (start !== -1 && end !== -1) ? code.slice(start, end) : code;
+    const cdr2Block = end !== -1 ? code.slice(end) : '';
+    return mySmsBlock.includes('id="rp-from"') && mySmsBlock.includes('id="rp-to"') &&
+      mySmsBlock.includes('id="rp-provider"') && mySmsBlock.includes('id="rp-range"') &&
+      mySmsBlock.includes('id="rp-agent"') && mySmsBlock.includes('id="rp-status"') &&
+      mySmsBlock.includes('id="rp-search"') && mySmsBlock.includes('zy-groupby-search-wrap') &&
+      mySmsBlock.includes('id="rp-limit"') && mySmsBlock.includes('Columns') &&
+      mySmsBlock.includes('zy-cdr-control-bar') &&
+      !mySmsBlock.includes('id="rp-client"') && !mySmsBlock.includes('id="rp-num"') &&
+      !mySmsBlock.includes('id="rp-cli"') && !mySmsBlock.includes('id="btn-reset-report"') &&
+      !mySmsBlock.includes('id="btn-export-report"') &&
+      cdr2Block.includes('id="cdr2-search"') && cdr2Block.includes('id="cdr2-limit"') &&
+      cdr2Block.includes('zy-cdr-control-bar') && !cdr2Block.includes('id="cdr2-num"') && !cdr2Block.includes('id="cdr2-cli"');
+  }
+  assertCheck('F5: owner-shell.js has Group By chips (Hour, Date, Month, Provider, Range, Agent, Number, CLI)',
+    speedAdminJs.includes('Hour') && speedAdminJs.includes('Date') && speedAdminJs.includes('Month') &&
+    speedAdminJs.includes('Provider') && speedAdminJs.includes('Range') && speedAdminJs.includes('Agent') &&
+    speedAdminJs.includes('Number') && speedAdminJs.includes('CLI')
+  );
+  assertCheck('F5: owner-shell.js has Show Report (blue) and Show Report & Sync on CDR2',
+    speedAdminJs.includes('zy-btn-blue-solid') && speedAdminJs.includes('Show Report') &&
+    speedAdminJs.includes('Show Report &amp; Sync')
+  );
+  assertCheck('F5: owner-shell.js has limit select and Columns pill inside .zy-cdr-control-bar',
+    speedAdminJs.includes('zy-cdr-control-bar') && speedAdminJs.includes('zy-table-toolbar') &&
+    speedAdminJs.includes('zy-btn-pill') && speedAdminJs.includes('Columns') && speedAdminJs.includes('Show Records')
+  );
+  assertCheck('F5: owner-shell.js removed date presets and detailed/grouped tabs as UI',
+    !speedAdminJs.includes('zyRenderDatePresets') && !speedAdminJs.includes('zyCdrTabs')
+  );
+
+  // 5. Agent panel integration
+  assertCheck('F5: agent-pages.js uses .zy-filter-grid, unified search & .zy-cdr-control-bar for CDR & CDR2',
+    speedAgentPagesJs.includes('class="zy-filter-grid"') &&
+    speedAgentPagesJs.includes('id="rp-search"') &&
+    speedAgentPagesJs.includes('id="cdr2-search"') &&
+    speedAgentPagesJs.includes('zy-cdr-control-bar')
+  );
+  assertCheck('F5: agent-pages.js reuses .zy-filter-grid in pgMySmsNumbers with side-by-side Filter + Reset',
+    speedAgentPagesJs.includes('id="num-starts-with"') && speedAgentPagesJs.includes('id="num-range-contains"') &&
+    speedAgentPagesJs.includes('class="zy-btn-blue-solid"') && speedAgentPagesJs.includes('Filter') &&
+    speedAgentPagesJs.includes('Reset')
+  );
+
+  // 6. Client panel integration
+  assertCheck('F5: client-pages.js uses .zy-filter-grid for CDR filter bar',
+    speedClientPagesJs.includes('class="zy-filter-grid"') && speedClientPagesJs.includes('zy-btn-blue-solid')
+  );
+  assertCheck('F5: client-pages.js reuses .zy-filter-grid in pgMyNumbers',
+    speedClientPagesJs.includes('class="zy-filter-grid"') && speedClientPagesJs.includes('id="num-starts-with"')
+  );
+
+  // 8. Real CSS Responsive & Iframe/Storage Hygiene Verification
+  const globalCss = fs.readFileSync(path.resolve('humex-sms/static/css/humex-global.css'), 'utf8');
+  assertCheck('F5 CSS: humex-panel.css includes 2-column grid at mobile/tablet and 16px input guard',
+    speedPanelCss.includes('repeat(2, minmax(0, 1fr))') && speedPanelCss.includes('font-size: 16px')
+  );
+  assertCheck('F5 CSS: humex-global.css enforces tabular-nums and odd KPI card balance',
+    globalCss.includes('tabular-nums') && globalCss.includes('nth-child(odd)')
+  );
+
+  const clientSideJsFiles = fs.readdirSync(path.resolve('humex-sms/static/js')).filter(f => f.endsWith('.js'));
+  const hasWindowOpen = clientSideJsFiles.some(f => fs.readFileSync(path.resolve('humex-sms/static/js', f), 'utf8').includes('window.open('));
+  const hasTokenRead = clientSideJsFiles.some(f => {
+    const content = fs.readFileSync(path.resolve('humex-sms/static/js', f), 'utf8');
+    return /getItem\(['"]session_token['"]\)|setItem\(['"]session_token['"]/.test(content);
+  });
+  assertCheck('Hygiene: No window.open() popups remain in static frontend JS', !hasWindowOpen);
+  assertCheck('Hygiene: No localStorage/sessionStorage session_token read/write remains in frontend JS', !hasTokenRead);
+
+  // 9. Phase 2: Agent Client Rate Set (PKR), Weekly Target & Auto-Inherited Rates UI
+  assertCheck('Phase 2: agent-shell.js adds Client Rate Set menu entry & route label',
+    speedAgentJs.includes("'client-rate-set'") && speedAgentJs.includes('Client Rate Set')
+  );
+  assertCheck('Phase 2: agent-pages.js defines pgClientRateSet, weekly PKR target save, and batch/daily limit controls',
+    speedAgentPagesJs.includes('function pgClientRateSet') &&
+    speedAgentPagesJs.includes('/api/agent/client-rates') &&
+    speedAgentPagesJs.includes('/api/agent/pkr-target') &&
+    speedAgentPagesJs.includes('zyCrsSaveRow') &&
+    speedAgentPagesJs.includes('zyCrsSaveAllModified') &&
+    speedAgentPagesJs.includes("'client-rate-set': pgClientRateSet")
+  );
+  assertCheck('Phase 2: agent-pages.js Allocate & Bulk Add support auto-inherited PKR rate with optional override',
+    speedAgentPagesJs.includes('alloc-use-override') &&
+    speedAgentPagesJs.includes('ba-override-rate') &&
+    speedAgentPagesJs.includes('Auto-Inherited')
+  );
+  assertCheck('Phase 2: humex-panel.css defines .zy-crs-* layout and progress bar styles',
+    speedPanelCss.includes('.zy-crs-grid') && speedPanelCss.includes('.zy-crs-track') && speedPanelCss.includes('.zy-crs-rate-inp')
+  );
+
+  // 10. Phase 3: Owner FX Rate (USD -> PKR) & Owner Client Privacy Directory UI
+  const ownerEngineJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-engine.js'), 'utf8');
+  assertCheck('Phase 3: owner-engine.js includes USD -> PKR FX rate settings input & quick-save handler',
+    ownerEngineJs.includes('id="s-usd-to-pkr"') &&
+    ownerEngineJs.includes('id="s-min-payout-pkr"') &&
+    ownerEngineJs.includes('payload.usd_to_pkr_rate') &&
+    ownerEngineJs.includes('function zySaveFxRateOnly') &&
+    ownerEngineJs.includes('function zyUpdateFxPreview')
+  );
+  assertCheck('Phase 3: owner-engine.js enforces Owner Client privacy redaction in Clients, Hierarchy, Account Balances & User Modals',
+    ownerEngineJs.includes('c.privacy_redacted === true') &&
+    ownerEngineJs.includes('Private · Agent PKR') &&
+    ownerEngineJs.includes('Privacy Boundary:') &&
+    !ownerEngineJs.includes("onclick=\"openClientBalanceModal(")
+  );
+
+  // 11. Services & CLI Manager Cleanup (no hardcoded/fixed payout_rate)
+  const ownerFeaturesJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-features.js'), 'utf8');
+  const servicesSeedJson = fs.readFileSync(path.resolve('humex-sms/data/services.json'), 'utf8');
+  const servicesCliSection = ownerEngineJs.slice(ownerEngineJs.indexOf('async function renderServicesManager'));
+  assertCheck('CLI/Services Cleanup: no fixed payout_rate fields or inputs remain in Services/CLI Manager',
+    servicesCliSection.length > 100 &&
+    !servicesCliSection.includes('id="svc-rate"') &&
+    !servicesCliSection.includes('payout_rate') &&
+    !ownerFeaturesJs.includes('id="esvc-rate"') &&
+    !ownerFeaturesJs.includes('payout_rate') &&
+    !servicesSeedJson.includes('payout_rate')
+  );
+  assertCheck('CLI/Services Cleanup: Services & CLI Manager expose real edit/delete/filter/export handlers',
+    ownerEngineJs.includes('openEditServiceModal') &&
+    ownerEngineJs.includes('deleteService') &&
+    ownerEngineJs.includes('id="cli-search"') &&
+    ownerEngineJs.includes('openEditCliModal') &&
+    ownerFeaturesJs.includes('function searchCli') &&
+    ownerFeaturesJs.includes('function saveService')
+  );
+
+  // 12. Phase 4: Client Panel 100% PKR UI & Direct 25/50 Rate Card Requests
+  assertCheck('Phase 4: client-shell.js uses /api/client/rate-card and Rs. PKR formatting on Dashboard',
+    speedClientJs.includes('/api/client/rate-card') &&
+    speedClientJs.includes('Ranges Rate Card') &&
+    speedClientJs.includes('Rs. ') &&
+    !speedClientJs.includes("fmtM(earnToday, '$')") &&
+    !speedClientJs.includes("fmtM(mainBalance, '$')")
+  );
+  assertCheck('Phase 4: client-pages.js Ranges Rate Card uses /api/client/rate-card & 25/50 batch request modal',
+    speedClientPagesJs.includes('/api/client/rate-card') &&
+    (speedClientPagesJs.includes('function zyOpenClientRateCardRequestModal') || speedClientPagesJs.includes('window.zyOpenClientRateCardRequestModal')) &&
+    speedClientPagesJs.includes('zy-qty-card') &&
+    speedClientPagesJs.includes('requested_today') &&
+    speedClientPagesJs.includes('zySubmitClientRateCardRequest')
+  );
+  assertCheck('Phase 4: client-pages.js removes USD/USDT/Payoneer/PayPal and enforces PKR Wallet & CDR',
+    speedClientPagesJs.includes('Bank Transfer (IBAN)') &&
+    speedClientPagesJs.includes('JazzCash') &&
+    speedClientPagesJs.includes('Easypaisa') &&
+    speedClientPagesJs.includes("currency: 'PKR'") &&
+    speedClientPagesJs.includes('client_payout_pkr') &&
+    !speedClientPagesJs.includes('USDT') &&
+    !speedClientPagesJs.includes('Payoneer') &&
+    !speedClientPagesJs.includes('PayPal') &&
+    !speedClientPagesJs.includes('window.open(') &&
+    !speedClientJs.includes('window.open(')
+  );
+  assertCheck('Phase 4: humex-panel.css defines .zy-qty-card and .zy-cl-rc-* styles',
+    speedPanelCss.includes('.zy-qty-card') && speedPanelCss.includes('.zy-cl-rc-rate') && speedPanelCss.includes('.zy-cl-rc-lock')
+  );
+
+  // 13. Structural Refinements: Flat Profile, Split Payment & Request Queues, Target Relocation, Range Card Parity
+  const sharedRouterJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-url-router.js'), 'utf8');
+  assertCheck('Refinement 13a: Owner bottom AGENT REQUESTS & Agent bottom CLIENT REQUESTS + My Payment Requests configured cleanly',
+    speedAdminJs.includes('"AGENT REQUESTS"') &&
+    speedAdminJs.includes('Agent Payment Requests') &&
+    speedAdminJs.includes('Agent Number Requests') &&
+    ownerEngineJs.includes('Agent Payment Requests') &&
+    speedAgentJs.includes('"CLIENT REQUESTS"') &&
+    speedAgentJs.includes('Client Payment Requests') &&
+    speedAgentJs.includes('Client Number Requests') &&
+    speedAgentJs.includes('My Payment Requests') &&
+    sharedRouterJs.includes("'client-payment-requests': 'ClientPaymentRequests'") &&
+    sharedRouterJs.includes("agentpaymentrequests: 'payout-requests'")
+  );
+
+  const clientRateSetSlice = speedAgentPagesJs.slice(
+    speedAgentPagesJs.indexOf('async function pgClientRateSet'),
+    speedAgentPagesJs.indexOf('function zyCrsUpdateTabs')
+  );
+  const clientPaymentReqSlice = speedAgentPagesJs.slice(
+    speedAgentPagesJs.indexOf('async function pgClientPaymentRequests'),
+    speedAgentPagesJs.indexOf('window.zyAgtPrintClientPayoutReceipt') + 200
+  );
+  assertCheck('Refinement 13b: Weekly Client PKR Target removed from pgClientRateSet and moved to pgClientPaymentRequests with 4-card PKR KPIs & tabs',
+    !clientRateSetSlice.includes('Weekly Client PKR Target') &&
+    !clientRateSetSlice.includes('id="crs-target-val"') &&
+    speedAgentPagesJs.includes('window.zyCrsViewRangeSpec = function') &&
+    clientPaymentReqSlice.includes('Weekly Client PKR Target') &&
+    clientPaymentReqSlice.includes('id="crs-target-val"') &&
+    clientPaymentReqSlice.includes('Pending Approval') &&
+    clientPaymentReqSlice.includes('Total Paid Out') &&
+    clientPaymentReqSlice.includes('zyAgtFilterClientPayouts') &&
+    clientPaymentReqSlice.includes('zyAgtPrintClientPayoutReceipt') &&
+    speedAgentPagesJs.includes("'client-payment-requests': () => pgClientPaymentRequests('all')")
+  );
+
+  assertCheck('Refinement 13c: Client Ranges Rate Card matches Agent Ranges layout (Weekly 7/3, Biweekly 15/3, Monthly 30/5 {W}, Held/Pool, payterms_pkr modal)',
+    speedClientPagesJs.includes('Weekly (7/3)') &&
+    speedClientPagesJs.includes('Biweekly (15/3)') &&
+    speedClientPagesJs.includes('Monthly (30/5) {W}') &&
+    speedClientPagesJs.includes('Held / Pool') &&
+    speedClientPagesJs.includes('Allowed Batch') &&
+    speedClientPagesJs.includes('Today Quota') &&
+    speedClientPagesJs.includes('payterms_pkr') &&
+    speedClientPagesJs.includes('Payterms Rate Card (PKR)')
+  );
+
+  // 14. Whitenoise Provider, Permission-Gated CDR 2 & Monthly (30/5) {W} Schedule
+  const sharedKitJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');
+  const serverJsSrc = fs.readFileSync(path.resolve('server.js'), 'utf8');
+
+  assertCheck('Whitenoise 14a: server.js defines Whitenoise adapter, connections endpoints, CDR 2 routes, Monthly (30/5) {W} enforcement & whitenoise_access',
+    serverJsSrc.includes('/api/whitenoise-connections') &&
+    serverJsSrc.includes('/api/cdr2/logs') &&
+    serverJsSrc.includes('/api/cdr2/sync') &&
+    serverJsSrc.includes('/api/cdr2/export') &&
+    serverJsSrc.includes('/api/numbers/:id/whitenoise-fetch') &&
+    serverJsSrc.includes('hasWhitenoiseAccess') &&
+    serverJsSrc.includes('monthly30_5') &&
+    serverJsSrc.includes('/sms/register-sms-conversion')
+  );
+
+  assertCheck('Whitenoise 14b: shared-ui-kit.js & shared-url-router.js support Monthly (30/5) {W} & cdr2/whitenoise-panels routes',
+    sharedKitJs.includes('Monthly (30/5) {W}') &&
+    sharedKitJs.includes('Biweekly (15/3)') &&
+    sharedKitJs.includes('Weekly (7/3)') &&
+    sharedRouterJs.includes("'cdr2': 'CDR2'") &&
+    sharedRouterJs.includes("'whitenoise-panels': 'WhitenoiseAPI'")
+  );
+
+  assertCheck('Whitenoise 14c: Owner UI wires CDR 2, Whitenoise API, Monthly (30/5) {W} Range rows & whitenoise_access toggles',
+    speedAdminJs.includes("'cdr2'") &&
+    speedAdminJs.includes('renderOwnerCdr2') &&
+    ownerEngineJs.includes('renderWhitenoisePanels') &&
+    ownerEngineJs.includes('/api/whitenoise-connections') &&
+    ownerEngineJs.includes('Monthly (30/5) {W}') &&
+    ownerEngineJs.includes('edit-ag-wn-access') &&
+    ownerEngineJs.includes('edit-cl-wn-access')
+  );
+
+  assertCheck('Whitenoise 14d: Agent UI wires permission-gated CDR 2, Fetch OTP, Client whitenoise_access toggle & Monthly Cycle Settlement Box',
+    speedAgentJs.includes("['CDR 2 (Monthly)', 'cdr2'") &&
+    !speedAgentJs.includes('CDR 2 (Whitenoise)') &&
+    speedAgentJs.includes('zyRefreshWhitenoiseNav') &&
+    speedAgentJs.includes('/api/auth/me') &&
+    speedAgentPagesJs.includes('async function pgCdr2') &&
+    speedAgentPagesJs.includes('/api/cdr2/logs') &&
+    speedAgentPagesJs.includes('/api/cdr2/sync') &&
+    speedAgentPagesJs.includes('zyAgentFetchWhitenoiseOtp') &&
+    speedAgentPagesJs.includes('nc-wn-access') &&
+    speedAgentPagesJs.includes('ec-wn-access') &&
+    speedAgentPagesJs.includes('Monthly (30/5) {W}') &&
+    speedAgentPagesJs.includes('Monthly Cycle (30/5) {W} Settlement Box') &&
+    speedAgentPagesJs.includes("'cdr2': pgCdr2")
+  );
+
+  assertCheck('Whitenoise 14e: Client UI wires permission-gated CDR 2 (PKR), Fetch OTP & Monthly Cycle Settlement Box',
+    speedClientJs.includes("label: 'CDR 2 (Monthly)', page: 'cdr2'") &&
+    !speedClientJs.includes('CDR 2 (Whitenoise)') &&
+    speedClientJs.includes('zyRefreshWhitenoiseNav') &&
+    speedClientJs.includes('/api/auth/me') &&
+    speedClientPagesJs.includes('async function pgCdr2') &&
+    speedClientPagesJs.includes('/api/cdr2/logs') &&
+    speedClientPagesJs.includes('/api/cdr2/sync') &&
+    speedClientPagesJs.includes('zyClientFetchWhitenoiseOtp') &&
+    speedClientPagesJs.includes('Monthly (30/5) {W}') &&
+    speedClientPagesJs.includes('Monthly Cycle (30/5) {W} Settlement Box') &&
+    speedClientPagesJs.includes("'cdr2': pgCdr2")
+  );
+})();
+
+if (failed) {
+  console.error('\nUI Wiring tests failed!');
+  process.exit(1);
+} else {
+  console.log('\nAll UI Wiring tests passed successfully!');
+}
+

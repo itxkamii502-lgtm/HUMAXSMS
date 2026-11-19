@@ -1,0 +1,25 @@
+[
+  {
+    "id": 1,
+    "username": "new_agent_omer",
+    "full_name": "Omer Farooq",
+    "email": "omer@partner.test",
+    "phone": "+923119988776",
+    "role": "Agent",
+    "notes": "Requesting new Agent test account",
+    "status": "pending",
+    "created": "2026-11-19T09:44:45.776Z"
+  },
+  {
+    "id": 2,
+    "username": "new_client_hassan",
+    "full_name": "Hassan Raza",
+    "email": "hassan@client.test",
+    "phone": "+923128877665",
+    "role": "Client",
+    "agent_id": 1,
+    "notes": "Referred by agent_ali",
+    "status": "pending",
+    "created": "2026-11-19T07:44:45.776Z"
+  }
+]

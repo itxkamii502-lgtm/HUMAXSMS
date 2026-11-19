@@ -3619,9 +3619,10 @@ function sendInjectedHtml(res, filePath, req = null) {
 
     const userThemePayload = { theme_key: userThemeKey, theme_mode: userThemeMode };
     const isProdEnv = process.env.NODE_ENV === 'production';
-    const guardEnabled = isProdEnv && process.env.CLIENT_GUARD_ENABLED !== 'false';
+    const guardEnabled = isProdEnv && process.env.CLIENT_GUARD_ENABLED === 'true';
     const protectOwner = process.env.GUARD_PROTECT_OWNER === 'true';
-    const guardActive = guardEnabled && (!isOwnerSession || protectOwner);
+    const isLoginPage = baseName.includes('login');
+    const guardActive = guardEnabled && !isLoginPage && (!isOwnerSession || protectOwner);
     const prodGuardHtml = guardActive
       ? `\n  <script>window.__PROD_GUARD__=${JSON.stringify({ enabled: true })};</script>\n  <script src="/static/js/shared-prod-guard.js"></script>`
       : '';

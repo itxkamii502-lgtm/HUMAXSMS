@@ -1802,11 +1802,14 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     ownerEngineJs.includes("bulk-allocation")
   );
 
-  assertCheck('Sidebar 17b: Owner, Agent & Client dashboards omit duplicate Quick Access redirect tiles and use domain-specific sidebar icons',
-    speedAdminJs.includes('shortcuts: []') &&
-    speedAgentJs.includes('shortcuts: []') &&
-    speedClientJs.includes('shortcuts: []') &&
-    sharedKitJs.includes('shortcuts.length ?') &&
+  assertCheck('Sidebar 17b: Owner, Agent & Client dashboards wire role-based Quick Access shortcut tiles and domain-specific sidebar icons',
+    speedAdminJs.includes("label: 'CDR Reports', page: 'my-sms'") &&
+    speedAdminJs.includes("label: 'Agent Requests', page: 'agent-requests'") &&
+    speedAgentJs.includes("label: 'Client Rate Set', page: 'client-rate-set'") &&
+    speedAgentJs.includes('agentHasWn') &&
+    speedClientJs.includes("label: 'Ranges Rate Card', page: 'sms-overview'") &&
+    speedClientJs.includes('clientHasWn') &&
+    sharedKitJs.includes('zy-ud-qtile-${zyEsc(tone)}') &&
     speedAdminJs.includes('zy-sub-ic') &&
     speedAgentJs.includes('zy-sub-ic') &&
     !speedAdminJs.includes('fa-folder') &&
@@ -1817,6 +1820,34 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     adminSkinCss.includes('cubic-bezier(0.16, 1, 0.3, 1)') &&
     panelCssSrc.includes('body.rmsui.dark .zy-sidenav .zy-snav') &&
     panelCssSrc.includes('body.rmsui.dark .zy-sidenav .zy-ssub div')
+  );
+
+  // 18. Royal Blue & Emerald Theme, Plus Jakarta Sans Typography & Locked System Text Colors
+  const brandThemeJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-brand-theme.js'), 'utf8');
+  const indexHtmlSrc = fs.readFileSync(path.resolve('humex-sms/static/index.html'), 'utf8');
+  const agentHtmlSrc = fs.readFileSync(path.resolve('humex-sms/static/agent.html'), 'utf8');
+  const clientHtmlSrc = fs.readFileSync(path.resolve('humex-sms/static/client.html'), 'utf8');
+  const loginHtmlSrc = fs.readFileSync(path.resolve('humex-sms/static/login.html'), 'utf8');
+
+  assertCheck('Theme 18a: Royal Blue & Emerald (cobalt_emerald) is default theme with Blue+Green accent variables across server & client',
+    serverJsSrc.includes("key: 'cobalt_emerald'") &&
+    serverJsSrc.includes("default_theme_key: 'cobalt_emerald'") &&
+    brandThemeJs.includes("key: 'cobalt_emerald'") &&
+    brandThemeJs.includes("default_theme_key: 'cobalt_emerald'") &&
+    brandThemeJs.includes('--theme-accent-blue') &&
+    brandThemeJs.includes('--theme-accent-green') &&
+    panelCssSrc.includes('.zy-ud-qtile-blue:hover') &&
+    panelCssSrc.includes('.zy-ud-qtile-green:hover')
+  );
+
+  assertCheck('Theme 18b: Plus Jakarta Sans + JetBrains Mono loaded across all HTML portals with locked uniform system text colors',
+    indexHtmlSrc.includes('Plus+Jakarta+Sans') &&
+    agentHtmlSrc.includes('Plus+Jakarta+Sans') &&
+    clientHtmlSrc.includes('Plus+Jakarta+Sans') &&
+    loginHtmlSrc.includes('Plus+Jakarta+Sans') &&
+    brandThemeJs.includes("font_family: 'jakarta'") &&
+    brandThemeJs.includes('color: var(--sp-text-primary, #0f172a) !important;') &&
+    panelCssSrc.includes('FINAL SYSTEM TYPOGRAPHY, LOCKED INK COLOR & BLUE-GREEN HARMONY')
   );
 })();
 

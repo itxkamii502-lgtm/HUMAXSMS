@@ -9,23 +9,23 @@ const ZY_LOGO_SRC = window.ZY_LOGO_SRC || '/static/img/humex-sms-logo.png';
 
 /* ── Agent menu model (exact Owner folder structure) ───────── */
 const ZY_AGENT_MENU = [
-  { t: null, c: '#e0a030', items: [
+  { t: null, c: '#1d4ed8', items: [
       ['Dashboard', 'dashboard', 'fa-gauge-high'],
   ] },
-  { t: null, c: '#16a34a', items: [
+  { t: null, c: '#059669', items: [
       ['Live Chat', 'live-chat', 'fa-comments'],
   ] },
-  { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#d97706', items: [
+  { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['My Numbers', 'my-sms-numbers', 'fa-mobile-screen'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
       ['Client Rate Set', 'client-rate-set', 'fa-tags'],
       ['Bulk Allocation', 'bulk-add', 'fa-cloud-arrow-up'],
   ] },
-  { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#2563eb', items: [
+  { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#059669', items: [
       ['CDR & Statistics', 'detailed-sms', 'fa-comment-sms'],
       ['CDR 2 (Monthly)', 'cdr2', 'fa-tower-cell'],
   ] },
-  { t: "USERS & NOTIFICATIONS", i: 'fa-users', c: '#16a34a', items: [
+  { t: "USERS & NOTIFICATIONS", i: 'fa-users', c: '#0284c7', items: [
       ['Clients', 'my-clients', 'fa-users'],
       ['Notifications', 'notifications', 'fa-bell'],
   ] },
@@ -35,10 +35,10 @@ const ZY_AGENT_MENU = [
       ['Credit Notes', 'credit-notes', 'fa-receipt'],
       ['Statements', 'usd-statements', 'fa-file-invoice-dollar'],
   ] },
-  { t: "CLIENT REQUESTS", i: 'fa-inbox', c: '#0284c7', items: [
+  { t: "CLIENT REQUESTS", i: 'fa-inbox', c: '#0d9488', items: [
       ['Client Number Requests', 'client-requests', 'fa-sim-card'],
   ] },
-  { t: null, c: '#0284c7', items: [
+  { t: null, c: '#1d4ed8', items: [
       ['My Profile', 'my-profile', 'fa-user'],
   ] }
 ];
@@ -202,7 +202,7 @@ pgDashboard = async function () {
     zyUpdateBreadcrumb('dashboard', 'Dashboard');
   }
   try {
-    const [clients, daily, periodStats, numbersRes, rangesRes, news, earnRes, clientRatesRes] = await Promise.all([
+    const [clients, daily, periodStats, numbersRes, rangesRes, news, earnRes, clientRatesRes, meRes] = await Promise.all([
       apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=200`).catch(() => ({ data: [] })),
       apiFetch(`/api/sms/daily-stats?agent_id=${AGENT_ID}`),
       apiFetch(`/api/sms/period-stats?agent_id=${AGENT_ID}`).catch(() => null),
@@ -210,8 +210,13 @@ pgDashboard = async function () {
       apiFetch('/api/numbers/sms-ranges').catch(() => []),
       apiFetch('/api/notifications?limit=5').catch(() => ({ data: [] })),
       apiFetch(`/api/agent/${AGENT_ID}/earnings`).catch(() => null),
-      apiFetch('/api/agent/client-rates', { silent: true }).catch(() => null)
+      apiFetch('/api/agent/client-rates', { silent: true }).catch(() => null),
+      apiFetch('/api/auth/me', { silent: true }).catch(() => null)
     ]);
+    if (meRes && typeof window.zyRefreshWhitenoiseNav === 'function') {
+      window.zyRefreshWhitenoiseNav(meRes);
+    }
+    const agentHasWn = Boolean((meRes && meRes.whitenoise_access) || window.ZY_WHITENOISE_ACCESS);
 
     const d = daily || {};
     const p = periodStats || {};
@@ -308,7 +313,16 @@ pgDashboard = async function () {
           { label: 'Profit Today', value: fmtM(profitToday, '$'), sub: 'Net agent commission today', icon: 'fa-sack-dollar', page: 'payment-requests' },
           { label: 'Profit Week', value: fmtM(profitWeek, '$'), sub: 'Current week (Mon–Sun)', icon: 'fa-chart-line', page: 'payment-requests' }
         ],
-        shortcuts: [],
+        shortcuts: [
+          { label: 'My Numbers', page: 'my-sms-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
+          { label: 'Ranges & Rates', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
+          { label: 'Client Rate Set', page: 'client-rate-set', icon: 'fa-tags', tone: 'blue' },
+          { label: 'CDR & Stats', page: 'detailed-sms', icon: 'fa-comment-sms', tone: 'green' },
+          agentHasWn
+            ? { label: 'CDR 2 (Monthly)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'blue' }
+            : { label: 'My Clients', page: 'my-clients', icon: 'fa-users', tone: 'blue' },
+          { label: 'Client Payouts', page: 'client-payment-requests', icon: 'fa-money-bill-transfer', tone: 'green' }
+        ],
         volumes: [
           { label: 'Today SMS', value: todaySmsVal, page: 'detailed-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'detailed-sms' },

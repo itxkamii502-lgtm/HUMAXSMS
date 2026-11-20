@@ -3215,24 +3215,25 @@ window.zyRenderWeeklyAreaChart = function (containerId, labels, values) {
     const textColor = isDark ? '#94a3b8' : '#64748b';
     const dotBg = isDark ? '#131c2e' : '#ffffff';
     const gradId = 'zy-area-grad-' + Math.random().toString(36).slice(2, 8);
+    const strokeGradId = 'zy-line-grad-' + Math.random().toString(36).slice(2, 8);
 
     const yTicks = [0, 1, 2, 3, 4].map(i => {
       const val = step * i;
       const y = (padT + plotH - (val / yMax) * plotH).toFixed(1);
       return `
         <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${gridColor}" stroke-dasharray="${i === 0 ? '' : '3 3'}" stroke-width="1"/>
-        <text x="${padL - 8}" y="${y}" text-anchor="end" dominant-baseline="middle" fill="${textColor}" font-size="11" font-weight="600">${val.toLocaleString()}</text>
+        <text x="${padL - 8}" y="${y}" text-anchor="end" dominant-baseline="middle" fill="${textColor}" font-size="11" font-weight="500">${val.toLocaleString()}</text>
       `;
     }).join('');
 
     const xTicks = coords.map(pt => `
-      <text x="${pt.x.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="${textColor}" font-size="11" font-weight="600">${zyEsc(pt.label)}</text>
+      <text x="${pt.x.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="${textColor}" font-size="11" font-weight="500">${zyEsc(pt.label)}</text>
     `).join('');
 
     const dots = coords.map((pt, idx) => `
       <g class="zy-chart-pt" data-idx="${idx}" style="cursor:pointer;">
         <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="12" fill="transparent"/>
-        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="4.2" fill="${dotBg}" stroke="#10b981" stroke-width="2.4"/>
+        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="4.2" fill="${dotBg}" stroke="${idx % 2 === 0 ? '#1d4ed8' : '#059669'}" stroke-width="2.4"/>
       </g>
     `).join('');
 
@@ -3240,15 +3241,20 @@ window.zyRenderWeeklyAreaChart = function (containerId, labels, values) {
       <div class="zy-ud-chart-tooltip" id="${host.id}-tip"></div>
       <svg width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="display:block;overflow:visible;">
         <defs>
+          <linearGradient id="${strokeGradId}" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#1d4ed8"/>
+            <stop offset="100%" stop-color="#059669"/>
+          </linearGradient>
           <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#10b981" stop-opacity="0.28"/>
-            <stop offset="100%" stop-color="#10b981" stop-opacity="0.01"/>
+            <stop offset="0%" stop-color="#1d4ed8" stop-opacity="0.18"/>
+            <stop offset="55%" stop-color="#059669" stop-opacity="0.10"/>
+            <stop offset="100%" stop-color="#059669" stop-opacity="0.01"/>
           </linearGradient>
         </defs>
         ${yTicks}
         ${xTicks}
         <path d="${areaD}" fill="url(#${gradId})"/>
-        <path d="${lineD}" fill="none" stroke="#10b981" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="${lineD}" fill="none" stroke="url(#${strokeGradId})" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
         ${dots}
       </svg>
     `;
@@ -3312,13 +3318,16 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const notificationsRoute = cfg.notificationsRoute || 'notifications';
   const chartId = cfg.chartId || 'zy-ud-weekly-chart';
 
-  const quickTilesHtml = shortcuts.map(s => `
-    <div class="zy-ud-qtile" role="button" tabindex="0" onclick="loadPage('${zyEsc(s.page)}')"
+  const quickTilesHtml = shortcuts.map((s, idx) => {
+    const tone = s.tone || (idx % 2 === 0 ? 'blue' : 'green');
+    return `
+    <div class="zy-ud-qtile zy-ud-qtile-${zyEsc(tone)}" data-tone="${zyEsc(tone)}" role="button" tabindex="0" onclick="loadPage('${zyEsc(s.page)}')"
          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${zyEsc(s.page)}');}">
       <div class="zy-ud-qtile-ic"><i class="fas ${zyEsc(s.icon || 'fa-circle-dot')}"></i></div>
       <div class="zy-ud-qtile-lbl">${zyEsc(s.label)}</div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   const volBoxesHtml = volumes.map(v => `
     <div class="zy-ud-vol-box">

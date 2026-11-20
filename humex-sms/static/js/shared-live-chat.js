@@ -60,7 +60,9 @@
     isTypingActive: false,
     audioCtx: null,
     audioUnlocked: false,
-    totalUnread: 0
+    totalUnread: 0,
+    pendingImages: [],
+    dragDepth: 0
   };
 
   function esc(v) {
@@ -193,7 +195,10 @@
     const heading = isGroup
       ? `${esc(ev.conversation_title || 'Group')} · ${esc(msg.sender_name || roleTag)}`
       : `${esc(msg.sender_name || roleTag)} · ${roleTag}`;
-    const snippet = esc(String(msg.body || '').slice(0, 110));
+    const snippetText = msg.image
+      ? (msg.body ? `📷 ${String(msg.body).slice(0, 100)}` : '📷 Photo')
+      : String(msg.body || '').slice(0, 110);
+    const snippet = esc(snippetText);
 
     const el = document.createElement('div');
     el.className = 'zy-chat-alert-toast';
@@ -357,9 +362,21 @@
         // Replace optimistic pending message if any or deduplicate by id
         const existingIdx = arr.findIndex(m => Number(m.id) === Number(msg.id));
         if (existingIdx === -1) {
-          const optIdx = isSelf ? arr.findIndex(m => m._optimistic && m.body === msg.body) : -1;
-          if (optIdx !== -1) arr[optIdx] = msg;
-          else arr.push(msg);
+          const optIdx = isSelf
+            ? arr.findIndex(m => m._optimistic && (
+                (ev.client_temp_id && m._clientTempId && m._clientTempId === ev.client_temp_id) ||
+                (!m._isMedia && !msg.image && m.body === msg.body)
+              ))
+            : -1;
+          if (optIdx !== -1) {
+            const oldPreview = arr[optIdx]._localPreviewUrl;
+            arr[optIdx] = msg;
+            if (oldPreview && msg.image && msg.image.url) {
+              preloadAndRevoke(msg.image.url, oldPreview);
+            }
+          } else {
+            arr.push(msg);
+          }
         }
       }
 
@@ -369,7 +386,9 @@
         fetchBootstrap(true);
       } else {
         conv.last_message_id = Number(msg.id);
-        conv.last_message_preview = String(msg.body || '').slice(0, 120);
+        conv.last_message_preview = msg.image
+          ? (msg.body ? `📷 ${String(msg.body)}`.slice(0, 120) : '📷 Photo')
+          : String(msg.body || '').slice(0, 120);
         conv.last_message_sender_key = msg.sender_key;
         conv.last_message_sender_name = msg.sender_name;
         conv.last_message_at = msg.created_at;
@@ -483,6 +502,7 @@
         if (target) {
           target.deleted = true;
           target.body = 'This message was deleted';
+          target.image = null;
           target.reply_to = null;
         }
       }
@@ -552,6 +572,7 @@
 
   async function selectConversation(convId) {
     state.activeConvId = Number(convId);
+    clearPendingImages();
     state.replyTo = null;
     state.emojiOpen = false;
     state.drawerOpen = false;
@@ -594,17 +615,413 @@
     }
   }
 
+  function formatByteSize(bytes) {
+    const n = Number(bytes || 0);
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function preloadAndRevoke(finalUrl, blobUrl) {
+    if (!blobUrl) return;
+    try {
+      const pre = new Image();
+      pre.onload = pre.onerror = () => {
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (_) {} }, 1500);
+      };
+      pre.src = finalUrl;
+    } catch (_) {
+      try { URL.revokeObjectURL(blobUrl); } catch (__) {}
+    }
+  }
+
+  function clearPendingImages() {
+    if (Array.isArray(state.pendingImages)) {
+      state.pendingImages.forEach(item => {
+        if (item && item.previewUrl && !item._sent) {
+          try { URL.revokeObjectURL(item.previewUrl); } catch (_) {}
+        }
+      });
+    }
+    state.pendingImages = [];
+  }
+
+  // Fast WhatsApp-style client-side image compression (WebP/JPEG max 1440px, ~60-180KB typical)
+  async function compressImageFast(file) {
+    const MAX_DIM = 1440;
+    const isGif = file.type === 'image/gif' || /\.gif$/i.test(file.name || '');
+    if (isGif && file.size <= 4 * 1024 * 1024) {
+      return { blob: file, ext: 'gif', width: 0, height: 0, size: file.size };
+    }
+
+    let bmp = null;
+    let imgEl = null;
+    let origW = 0;
+    let origH = 0;
+
+    try {
+      if (typeof createImageBitmap === 'function') {
+        bmp = await createImageBitmap(file);
+        origW = bmp.width;
+        origH = bmp.height;
+      } else {
+        imgEl = await new Promise((resolve, reject) => {
+          const im = new Image();
+          const u = URL.createObjectURL(file);
+          im.onload = () => { URL.revokeObjectURL(u); resolve(im); };
+          im.onerror = () => { URL.revokeObjectURL(u); reject(new Error('Invalid image')); };
+          im.src = u;
+        });
+        origW = imgEl.naturalWidth || imgEl.width;
+        origH = imgEl.naturalHeight || imgEl.height;
+      }
+    } catch (_) {
+      return { blob: file, ext: 'jpg', width: 0, height: 0, size: file.size };
+    }
+
+    // Already tiny and within max dimensions -> upload directly with zero delay
+    if (file.size <= 120 * 1024 && origW <= MAX_DIM && origH <= MAX_DIM &&
+        /^image\/(jpeg|png|webp)$/i.test(file.type || '')) {
+      if (bmp && typeof bmp.close === 'function') bmp.close();
+      const ext = file.type === 'image/png' ? 'png' : (file.type === 'image/webp' ? 'webp' : 'jpg');
+      return { blob: file, ext, width: origW, height: origH, size: file.size };
+    }
+
+    const scale = Math.min(1, MAX_DIM / Math.max(origW || 1, origH || 1));
+    const targetW = Math.max(1, Math.round(origW * scale));
+    const targetH = Math.max(1, Math.round(origH * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bmp || imgEl, 0, 0, targetW, targetH);
+    if (bmp && typeof bmp.close === 'function') bmp.close();
+
+    const encode = (mime, quality) => new Promise(resolve => {
+      try {
+        canvas.toBlob(b => resolve(b), mime, quality);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+
+    // Prefer WebP for blazing fast upload speed; fallback to JPEG if browser lacks WebP encoder
+    let outBlob = await encode('image/webp', 0.82);
+    let outExt = 'webp';
+    if (!outBlob || outBlob.type !== 'image/webp') {
+      outBlob = await encode('image/jpeg', 0.82);
+      outExt = 'jpg';
+    }
+    if (!outBlob || (outBlob.size > file.size && origW <= MAX_DIM && origH <= MAX_DIM)) {
+      const origExt = file.type === 'image/png' ? 'png' : (file.type === 'image/webp' ? 'webp' : 'jpg');
+      return { blob: file, ext: origExt, width: origW, height: origH, size: file.size };
+    }
+    return { blob: outBlob, ext: outExt, width: targetW, height: targetH, size: outBlob.size };
+  }
+
+  function queueImagesForPreview(fileList) {
+    const conv = getActiveConv();
+    if (!conv || !conv.can_send) return;
+    const files = Array.from(fileList || []).filter(f => f && /^image\/(jpeg|jpg|png|webp|gif)$/i.test(f.type || ''));
+    if (!files.length) {
+      if (typeof toast === 'function') toast('Only JPG, PNG, WebP or GIF images are supported.', 'warning');
+      return;
+    }
+    const maxSlots = Math.max(0, 5 - state.pendingImages.length);
+    if (maxSlots <= 0) {
+      if (typeof toast === 'function') toast('Maximum 5 photos can be queued at once.', 'warning');
+      return;
+    }
+
+    const picked = files.slice(0, maxSlots);
+    picked.forEach(file => {
+      if (file.size > 20 * 1024 * 1024) {
+        if (typeof toast === 'function') toast(`${file.name} is too large (max 20 MB).`, 'warning');
+        return;
+      }
+      const item = {
+        id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        blob: null,
+        ext: 'webp',
+        previewUrl: URL.createObjectURL(file),
+        width: 0,
+        height: 0,
+        size: file.size,
+        compressing: true,
+        promise: null
+      };
+      item.promise = compressImageFast(file).then(res => {
+        item.blob = res.blob;
+        item.ext = res.ext;
+        item.width = res.width;
+        item.height = res.height;
+        item.size = res.size;
+        item.compressing = false;
+        renderMediaStrip();
+        return item;
+      }).catch(() => {
+        item.blob = file;
+        item.compressing = false;
+        renderMediaStrip();
+        return item;
+      });
+      state.pendingImages.push(item);
+    });
+
+    state.emojiOpen = false;
+    renderEmojiPopover();
+    renderMediaStrip();
+    const inp = document.getElementById('zy-chat-input');
+    if (inp) inp.focus();
+  }
+
+  function renderMediaStrip() {
+    const el = document.getElementById('zy-chat-media-strip');
+    const inp = document.getElementById('zy-chat-input');
+    if (inp) {
+      inp.placeholder = state.pendingImages.length ? 'Add a caption...' : 'Type a message...';
+    }
+    if (!el) return;
+    if (!state.pendingImages.length) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      return;
+    }
+    el.style.display = 'flex';
+    el.innerHTML = `
+      <div class="zy-chat-media-thumbs">
+        ${state.pendingImages.map(item => `
+          <div class="zy-chat-media-thumb-card" data-pimg="${esc(item.id)}">
+            <img src="${item.previewUrl}" alt="Preview">
+            <button type="button" class="zy-chat-media-remove" data-rm-pimg="${esc(item.id)}" title="Remove"><i class="fas fa-times"></i></button>
+            <span class="zy-chat-media-size">${item.compressing ? '<i class="fas fa-spinner fa-spin"></i>' : esc(formatByteSize(item.size))}</span>
+          </div>
+        `).join('')}
+        ${state.pendingImages.length < 5 ? `
+          <button type="button" class="zy-chat-media-add-more" id="zy-chat-media-add-more" title="Add another photo">
+            <i class="fas fa-plus"></i>
+          </button>
+        ` : ''}
+      </div>
+    `;
+    el.querySelectorAll('[data-rm-pimg]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.rmPimg;
+        const idx = state.pendingImages.findIndex(x => x.id === id);
+        if (idx !== -1) {
+          const [removed] = state.pendingImages.splice(idx, 1);
+          if (removed && removed.previewUrl) {
+            try { URL.revokeObjectURL(removed.previewUrl); } catch (_) {}
+          }
+          renderMediaStrip();
+        }
+      });
+    });
+    const addMore = document.getElementById('zy-chat-media-add-more');
+    if (addMore) {
+      addMore.addEventListener('click', () => {
+        const fi = document.getElementById('zy-chat-file-input');
+        if (fi) fi.click();
+      });
+    }
+  }
+
+  function uploadChatImageXhr(convId, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/chat/conversations/${convId}/messages-media`, true);
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && typeof onProgress === 'function') {
+          onProgress(Math.min(99, Math.max(5, Math.round((ev.loaded / ev.total) * 100))));
+        }
+      };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new Error(data.error || `Upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('Network error while uploading image'));
+      xhr.send(formData);
+    });
+  }
+
+  async function sendPendingImages(captionText, replySnapshot) {
+    const convId = Number(state.activeConvId);
+    if (!convId || !state.pendingImages.length) return;
+
+    const batch = state.pendingImages.splice(0, state.pendingImages.length);
+    batch.forEach(item => { item._sent = true; });
+    renderMediaStrip();
+
+    if (!state.messagesByConv.has(convId)) state.messagesByConv.set(convId, []);
+    const arr = state.messagesByConv.get(convId);
+
+    // Push instant 0ms optimistic bubbles for every photo in the batch
+    const tasks = batch.map((item, idx) => {
+      const caption = idx === 0 ? captionText : '';
+      const replyForThis = idx === 0 ? replySnapshot : null;
+      const tempId = -(Date.now() + idx + Math.floor(Math.random() * 999));
+      const clientTempId = `ct_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 7)}`;
+      const optimistic = {
+        id: tempId,
+        conversation_id: convId,
+        sender_key: state.me.key,
+        sender_role: state.me.role,
+        sender_name: state.me.display_name || state.me.username,
+        body: caption,
+        image: {
+          url: item.previewUrl,
+          width: item.width || undefined,
+          height: item.height || undefined,
+          size: item.size
+        },
+        reply_to: replyForThis ? {
+          id: replyForThis.id,
+          sender_name: replyForThis.sender_name,
+          body_snippet: String(replyForThis.body || '').slice(0, 120)
+        } : null,
+        deleted: false,
+        created_at: new Date().toISOString(),
+        _optimistic: true,
+        _isMedia: true,
+        _clientTempId: clientTempId,
+        _localPreviewUrl: item.previewUrl,
+        _uploadProgress: 8
+      };
+      arr.push(optimistic);
+      return { item, caption, replyForThis, tempId, clientTempId };
+    });
+
+    renderMessagesPane(true);
+
+    // Upload all images concurrently for blazing-fast delivery
+    await Promise.all(tasks.map(async ({ item, caption, replyForThis, tempId, clientTempId }) => {
+      try {
+        if (item.compressing && item.promise) {
+          await item.promise;
+        }
+        const blobToSend = item.blob || item.file;
+        const fd = new FormData();
+        fd.append('image', blobToSend, `photo.${item.ext || 'webp'}`);
+        if (caption) fd.append('body', caption);
+        if (replyForThis && replyForThis.id) fd.append('reply_to_id', String(replyForThis.id));
+        if (item.width) fd.append('width', String(item.width));
+        if (item.height) fd.append('height', String(item.height));
+        fd.append('client_temp_id', clientTempId);
+
+        const data = await uploadChatImageXhr(convId, fd, (pct) => {
+          const bar = document.querySelector(`[data-upload-bar="${tempId}"]`);
+          if (bar) bar.style.width = `${pct}%`;
+          const lbl = document.querySelector(`[data-upload-pct="${tempId}"]`);
+          if (lbl) lbl.textContent = `${pct}%`;
+        });
+
+        const list = state.messagesByConv.get(convId) || [];
+        const optIdx = list.findIndex(m => m.id === tempId || (m._clientTempId && m._clientTempId === clientTempId));
+        if (data.message) {
+          const dupIdx = list.findIndex(m => Number(m.id) === Number(data.message.id));
+          if (dupIdx !== -1 && optIdx !== -1 && dupIdx !== optIdx) {
+            list.splice(optIdx, 1);
+          } else if (optIdx !== -1) {
+            list[optIdx] = data.message;
+          } else if (dupIdx === -1) {
+            list.push(data.message);
+          }
+          if (data.message.image && data.message.image.url) {
+            preloadAndRevoke(data.message.image.url, item.previewUrl);
+          }
+        }
+        if (data.conversation) {
+          const cIdx = state.conversations.findIndex(c => Number(c.id) === convId);
+          if (cIdx !== -1) state.conversations[cIdx] = data.conversation;
+          state.conversations.sort((a, b) => new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0));
+        }
+        renderInboxList();
+        if (Number(state.activeConvId) === convId) renderMessagesPane(true);
+      } catch (err) {
+        const list = state.messagesByConv.get(convId) || [];
+        const optIdx = list.findIndex(m => m.id === tempId);
+        if (optIdx !== -1) list.splice(optIdx, 1);
+        try { URL.revokeObjectURL(item.previewUrl); } catch (_) {}
+        if (Number(state.activeConvId) === convId) renderMessagesPane(false);
+        if (typeof toast === 'function') toast(err.message || 'Failed to upload photo', 'error');
+      }
+    }));
+  }
+
+  function openImageLightbox(url, caption, sender, timeStr) {
+    closeImageLightbox();
+    const lb = document.createElement('div');
+    lb.id = 'zy-chat-lightbox';
+    lb.className = 'zy-chat-lightbox';
+    lb.innerHTML = `
+      <div class="zy-chat-lb-bar">
+        <div class="zy-chat-lb-meta">
+          <div class="zy-chat-lb-who">${esc(sender || 'Photo')}</div>
+          ${timeStr ? `<div class="zy-chat-lb-time">${esc(timeStr)}</div>` : ''}
+        </div>
+        <div class="zy-chat-lb-actions">
+          <a class="zy-chat-lb-btn" href="${esc(url)}" download title="Download"><i class="fas fa-download"></i></a>
+          <button type="button" class="zy-chat-lb-btn" id="zy-chat-lb-close" title="Close"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+      <div class="zy-chat-lb-stage">
+        <img class="zy-chat-lb-img" src="${esc(url)}" alt="${esc(caption || 'Chat Photo')}">
+      </div>
+      ${caption ? `<div class="zy-chat-lb-caption">${esc(caption)}</div>` : ''}
+    `;
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeImageLightbox();
+    };
+    lb._escHandler = onKey;
+    document.addEventListener('keydown', onKey);
+    lb.addEventListener('click', (e) => {
+      if (e.target === lb || e.target.classList.contains('zy-chat-lb-stage')) closeImageLightbox();
+    });
+    lb.querySelector('#zy-chat-lb-close').addEventListener('click', closeImageLightbox);
+    document.body.appendChild(lb);
+  }
+
+  function closeImageLightbox() {
+    const lb = document.getElementById('zy-chat-lightbox');
+    if (lb) {
+      if (lb._escHandler) document.removeEventListener('keydown', lb._escHandler);
+      lb.remove();
+    }
+  }
+
   async function sendMessage() {
-    if (state.sending || !state.activeConvId) return;
+    if (!state.activeConvId) return;
     const input = document.getElementById('zy-chat-input');
     if (!input) return;
     const body = String(input.value || '').trim();
-    if (!body) return;
+    const hasPendingPhotos = state.pendingImages.length > 0;
+    if (!body && !hasPendingPhotos) return;
 
     const convId = Number(state.activeConvId);
     const replySnapshot = state.replyTo ? { ...state.replyTo } : null;
 
-    // Optimistic insert
+    if (hasPendingPhotos) {
+      input.value = '';
+      input.style.height = 'auto';
+      state.replyTo = null;
+      state.emojiOpen = false;
+      stopTypingSignal(convId);
+      renderReplyStrip();
+      renderEmojiPopover();
+      await sendPendingImages(body, replySnapshot);
+      return;
+    }
+
+    if (state.sending) return;
+
+    // Optimistic insert (text)
     const tempId = -Date.now();
     const optimistic = {
       id: tempId,
@@ -1080,15 +1497,36 @@
            </div>`
         : '';
 
+      const hasImage = !m.deleted && m.image && m.image.url;
+      const hasCaption = Boolean(!m.deleted && m.body && String(m.body).trim());
+      const imgOverlayMeta = hasImage && !hasCaption;
+
+      const mediaHtml = hasImage
+        ? `<div class="zy-chat-img-wrap ${m._optimistic ? 'is-uploading' : ''}" data-open-img="${esc(m.image.url)}" data-img-mid="${m.id}">
+             <img class="zy-chat-img" src="${esc(m.image.url)}" alt="${esc(m.body || 'Photo')}" loading="lazy" decoding="async">
+             ${m._optimistic ? `
+               <div class="zy-chat-img-progress">
+                 <div class="zy-chat-img-prog-track"><div class="zy-chat-img-prog-fill" data-upload-bar="${m.id}" style="width:${Number(m._uploadProgress || 10)}%;"></div></div>
+                 <span class="zy-chat-img-prog-pct" data-upload-pct="${m.id}">${Number(m._uploadProgress || 10)}%</span>
+               </div>
+             ` : ''}
+           </div>`
+        : '';
+
+      const textHtml = m.deleted
+        ? `<div class="zy-chat-text"><i class="fas fa-ban"></i> This message was deleted</div>`
+        : (hasCaption ? `<div class="zy-chat-text">${esc(m.body).replace(/\n/g, '<br>')}</div>` : '');
+
       return `
         ${divider}
         <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'}" data-msg-id="${m.id}">
-          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''}">
+          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''}">
             ${actionsHtml}
             ${senderLabel}
             ${replyBlock}
-            <div class="zy-chat-text">${m.deleted ? '<i class="fas fa-ban"></i> This message was deleted' : esc(m.body).replace(/\n/g, '<br>')}</div>
-            <div class="zy-chat-meta">
+            ${mediaHtml}
+            ${textHtml}
+            <div class="zy-chat-meta ${imgOverlayMeta ? 'is-img-overlay' : ''}">
               ${isPinned ? '<span class="zy-chat-pin-ico" title="Pinned"><i class="fas fa-thumbtack"></i></span>' : ''}
               <span class="zy-chat-ts">${esc(formatTime(m.created_at))}</span>
               ${computeTickHtml(m, conv)}
@@ -1099,6 +1537,22 @@
     }).join('');
 
     feed.innerHTML = html;
+
+    // Bind photo lightbox zoom
+    feed.querySelectorAll('[data-open-img]').forEach(wrap => {
+      wrap.addEventListener('click', (e) => {
+        if (wrap.classList.contains('is-uploading')) return;
+        e.stopPropagation();
+        const mid = Number(wrap.dataset.imgMid);
+        const target = msgs.find(x => Number(x.id) === mid);
+        openImageLightbox(
+          wrap.dataset.openImg,
+          target ? (target.body || '') : '',
+          target ? (target.sender_name || '') : '',
+          target ? `${formatDayLabel(target.created_at)} · ${formatTime(target.created_at)}` : ''
+        );
+      });
+    });
 
     // Bind quote jump
     feed.querySelectorAll('[data-jump-msg]').forEach(el => {
@@ -1112,7 +1566,10 @@
         const act = btn.dataset.act;
         const target = msgs.find(x => Number(x.id) === mid);
         if (act === 'reply' && target) {
-          state.replyTo = { id: target.id, sender_name: target.sender_name, body: target.body };
+          const replyBody = target.image
+            ? (target.body ? `📷 ${target.body}` : '📷 Photo')
+            : target.body;
+          state.replyTo = { id: target.id, sender_name: target.sender_name, body: replyBody };
           renderReplyStrip();
           const inp = document.getElementById('zy-chat-input');
           if (inp) inp.focus();
@@ -1389,13 +1846,22 @@
         ` : ''}
 
         <div class="zy-chat-feed" id="zy-chat-feed"></div>
+        <div class="zy-chat-drop-overlay" id="zy-chat-drop-overlay" style="display:none;">
+          <div class="zy-chat-drop-card">
+            <i class="far fa-image"></i>
+            <span>Drop photo to send</span>
+          </div>
+        </div>
 
         ${conv.can_send ? `
           <div class="zy-chat-composer-wrap">
             <div class="zy-chat-emoji-pop" id="zy-chat-emoji-pop" style="display:none;"></div>
             <div class="zy-chat-reply-strip" id="zy-chat-reply-strip" style="display:none;"></div>
+            <div class="zy-chat-media-strip" id="zy-chat-media-strip" style="display:none;"></div>
             <div class="zy-chat-composer">
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-emoji-toggle" title="Emoji" aria-label="Emoji"><i class="far fa-face-smile"></i></button>
+              <button type="button" class="zy-chat-icon-btn" id="zy-chat-img-btn" title="Send Photo" aria-label="Send Photo"><i class="far fa-image"></i></button>
+              <input type="file" id="zy-chat-file-input" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none;">
               <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" placeholder="Type a message..."></textarea>
               <button type="button" class="zy-chat-send-btn" id="zy-chat-send" title="Send" aria-label="Send"><i class="fas fa-paper-plane"></i></button>
             </div>
@@ -1413,6 +1879,7 @@
     updateThreadHeaderSubtitle();
     renderMessagesPane(scrollBottom);
     renderReplyStrip();
+    renderMediaStrip();
     renderEmojiPopover();
 
     // Wire header & composer events
@@ -1450,13 +1917,77 @@
       });
     }
 
+    const imgBtn = document.getElementById('zy-chat-img-btn');
+    const fileInput = document.getElementById('zy-chat-file-input');
+    if (imgBtn && fileInput) {
+      imgBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files.length) {
+          queueImagesForPreview(fileInput.files);
+          fileInput.value = '';
+        }
+      });
+    }
+
+    // Drag & Drop photos directly onto thread pane
+    if (conv.can_send) {
+      const threadCol = rightEl.querySelector('.zy-chat-thread-col');
+      const dropOverlay = document.getElementById('zy-chat-drop-overlay');
+      if (threadCol && dropOverlay) {
+        let dragDepth = 0;
+        const hasImageFiles = (e) => {
+          const dt = e.dataTransfer;
+          if (!dt) return false;
+          if (dt.types && Array.from(dt.types).includes('Files')) return true;
+          return false;
+        };
+        threadCol.addEventListener('dragenter', (e) => {
+          if (!hasImageFiles(e)) return;
+          e.preventDefault();
+          dragDepth++;
+          dropOverlay.style.display = 'flex';
+        });
+        threadCol.addEventListener('dragover', (e) => {
+          if (!hasImageFiles(e)) return;
+          e.preventDefault();
+        });
+        threadCol.addEventListener('dragleave', (e) => {
+          if (!hasImageFiles(e)) return;
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) dropOverlay.style.display = 'none';
+        });
+        threadCol.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dragDepth = 0;
+          dropOverlay.style.display = 'none';
+          const files = e.dataTransfer && e.dataTransfer.files;
+          if (files && files.length) queueImagesForPreview(files);
+        });
+      }
+    }
+
     const inp = document.getElementById('zy-chat-input');
     const sendBtn = document.getElementById('zy-chat-send');
     if (inp) {
       inp.addEventListener('input', () => {
         inp.style.height = 'auto';
-        inp.style.height = Math.min(120, inp.scrollHeight) + 'px';
+        inp.style.height = Math.min(84, inp.scrollHeight) + 'px';
         emitTypingSignal(conv.id);
+      });
+      inp.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        const pastedImgs = [];
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].kind === 'file' && /^image\//.test(items[i].type || '')) {
+            const f = items[i].getAsFile();
+            if (f) pastedImgs.push(f);
+          }
+        }
+        if (pastedImgs.length) {
+          e.preventDefault();
+          queueImagesForPreview(pastedImgs);
+        }
       });
       inp.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {

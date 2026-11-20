@@ -223,6 +223,7 @@ const HUMEX_DIR = path.join(__dirname, 'humex-sms');
 const STATIC_DIR = path.join(HUMEX_DIR, 'static');
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(HUMEX_DIR, 'data');
 const AGENT_FILES_DIR = path.join(DATA_DIR, 'agent_files');
+const CHAT_MEDIA_DIR = path.join(DATA_DIR, 'chat_media');
 console.log(`[BOOT] Resolved APP_DIR:  ${HUMEX_DIR}`);
 console.log(`[BOOT] Resolved DATA_DIR: ${DATA_DIR}`);
 
@@ -231,6 +232,9 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 if (!fs.existsSync(AGENT_FILES_DIR)) {
   fs.mkdirSync(AGENT_FILES_DIR, { recursive: true });
+}
+if (!fs.existsSync(CHAT_MEDIA_DIR)) {
+  fs.mkdirSync(CHAT_MEDIA_DIR, { recursive: true });
 }
 
 // ── Database Helpers ──────────────────────────────────────────
@@ -617,9 +621,9 @@ function bootstrapFreshDataDir() {
         default_currency: 'USD',
         timezone: 'Asia/Karachi',
         payterms: ['Weekly', 'Biweekly', 'Monthly'],
-        default_theme_key: 'daylight_cobalt',
+        default_theme_key: 'cobalt_emerald',
         theme_mode: 'light',
-        font_family: 'roboto',
+        font_family: 'jakarta',
         logo_url: '/static/img/humex-sms-logo.png',
         two_fa_enabled: true,
         max_sessions: 3,
@@ -5161,6 +5165,30 @@ app.use('/img', express.static(path.join(STATIC_DIR, 'img'), staticOpts));
 // ── Unified Role-Based Theme Architecture ─────────────────────
 const DEFAULT_ROLE_THEMES = [
   {
+    key: 'cobalt_emerald',
+    name: 'Royal Blue & Emerald',
+    description: 'Clean white surfaces, Royal Blue primary actions & Emerald Green accents with locked neutral ink',
+    is_builtin: true,
+    structure_tone: 'light',
+    structure_bg: '#ffffff',
+    structure_side_bg: '#ffffff',
+    structure_text: '#0f172a',
+    structure_muted: '#64748b',
+    structure_item_bg: '#f8fafc',
+    structure_item_hover: '#eff6ff',
+    structure_border: '#e2e8f0',
+    structure_table_bg: '#f1f5f9',
+    structure_table_text: '#334155',
+    primary_btn: '#1d4ed8',
+    primary_btn_hover: '#1e40af',
+    primary_btn_text: '#ffffff',
+    warning_btn: '#d97706',
+    warning_btn_hover: '#b45309',
+    warning_btn_text: '#ffffff',
+    danger_btn: '#dc2626',
+    danger_btn_hover: '#b91c1c'
+  },
+  {
     key: 'daylight_cobalt',
     name: 'Daylight Crisp & Cobalt',
     description: 'White header & sidebar, Slate table headers, Cobalt buttons, Amber exports',
@@ -5388,19 +5416,19 @@ function resolveEffectiveTheme(settings, userThemeKey = '') {
   const s = settings && typeof settings === 'object' ? settings : {};
   const catalog = getThemeCatalog(s);
   const byKey = new Map(catalog.map(t => [t.key, t]));
-  const defKey = (s.default_theme_key && byKey.has(s.default_theme_key)) ? s.default_theme_key : 'daylight_cobalt';
+  const defKey = (s.default_theme_key && byKey.has(s.default_theme_key)) ? s.default_theme_key : 'cobalt_emerald';
   const pickedKey = (userThemeKey && userThemeKey !== 'default' && byKey.has(userThemeKey)) ? userThemeKey : defKey;
   return byKey.get(pickedKey) || catalog[0];
 }
 
 const FONT_FAMILIES = {
+  jakarta: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   inter: "'Inter', sans-serif",
   poppins: "'Poppins', sans-serif",
   roboto: "'Roboto', sans-serif",
   outfit: "'Outfit', sans-serif",
   montserrat: "'Montserrat', sans-serif",
   opensans: "'Open Sans', sans-serif",
-  jakarta: "'Plus Jakarta Sans', sans-serif",
   system: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
   monospace: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace"
 };
@@ -5408,8 +5436,8 @@ const FONT_FAMILIES = {
 function getThemeCss(settings, userThemeKey = '') {
   const s = settings || {};
   const theme = resolveEffectiveTheme(s, userThemeKey);
-  const fontKey = s.font_family || 'system';
-  const fontFamily = FONT_FAMILIES[fontKey] || FONT_FAMILIES.system;
+  const fontKey = s.font_family || 'jakarta';
+  const fontFamily = FONT_FAMILIES[fontKey] || FONT_FAMILIES.jakarta;
   const isLightChrome = theme.structure_tone === 'light';
   const itemText = isLightChrome ? '#334155' : theme.structure_text;
   const subText = isLightChrome ? '#475569' : theme.structure_muted;
@@ -5435,24 +5463,31 @@ function getThemeCss(settings, userThemeKey = '') {
       --theme-btn-primary: ${theme.primary_btn};
       --theme-btn-primary-hover: ${theme.primary_btn_hover};
       --theme-btn-primary-text: ${theme.primary_btn_text};
-      --theme-btn-primary-tint: ${hexToRgba(theme.primary_btn, 0.12)};
+      --theme-btn-primary-tint: ${hexToRgba(theme.primary_btn, 0.10)};
+      --theme-accent-blue: #1d4ed8;
+      --theme-accent-blue-hover: #1e40af;
+      --theme-accent-blue-tint: rgba(29, 78, 216, 0.10);
+      --theme-accent-green: #059669;
+      --theme-accent-green-hover: #047857;
+      --theme-accent-green-tint: rgba(5, 150, 105, 0.10);
       --theme-btn-warn: ${theme.warning_btn};
       --theme-btn-warn-hover: ${theme.warning_btn_hover};
       --theme-btn-warn-text: ${theme.warning_btn_text};
       --theme-btn-danger: ${theme.danger_btn};
       --theme-btn-danger-hover: ${theme.danger_btn_hover};
-      --theme-focus-ring: ${hexToRgba(theme.primary_btn, 0.25)};
+      --theme-focus-ring: ${hexToRgba(theme.primary_btn, 0.22)};
       --brand-primary: ${theme.primary_btn};
       --brand-hover: ${theme.primary_btn_hover};
-      --brand-accent: ${theme.primary_btn};
-      --brand-glow: ${hexToRgba(theme.primary_btn, 0.28)};
+      --brand-accent: #059669;
+      --brand-glow: ${hexToRgba(theme.primary_btn, 0.24)};
       --sp-primary: ${theme.primary_btn};
       --sp-primary-hover: ${theme.primary_btn_hover};
       --sp-primary-contrast: ${theme.primary_btn_text};
+      --sp-success: #059669;
       --sp-warning: ${theme.warning_btn};
       --sp-danger: ${theme.danger_btn};
       --sp-danger-hover: ${theme.danger_btn_hover};
-      --sp-focus-ring: ${hexToRgba(theme.primary_btn, 0.25)};
+      --sp-focus-ring: ${hexToRgba(theme.primary_btn, 0.22)};
       --header-gradient: ${theme.structure_bg};
       --header-text-color: ${theme.structure_text};
     }
@@ -5494,7 +5529,7 @@ function sendInjectedHtml(res, filePath, req = null) {
     const themeCatalog = getThemeCatalog(settings);
     const defaultThemeKey = (settings.default_theme_key && themeCatalog.some(t => t.key === settings.default_theme_key))
       ? settings.default_theme_key
-      : 'daylight_cobalt';
+      : 'cobalt_emerald';
 
     let userThemeKey = '';
     let userThemeMode = '';
@@ -5524,7 +5559,7 @@ function sendInjectedHtml(res, filePath, req = null) {
       site_name: settings.site_name || 'HUMAX SMS',
       logo_url: settings.logo_url || '/static/img/humex-sms-logo.png',
       theme_mode: settings.theme_mode || 'light',
-      font_family: settings.font_family || 'system',
+      font_family: settings.font_family || 'jakarta',
       default_theme_key: defaultThemeKey,
       theme_catalog: themeCatalog,
       footer_text: settings.footer_text || `© ${new Date().getFullYear()} ${settings.site_name || 'HUMAX SMS'}. All rights reserved.`
@@ -15389,7 +15424,7 @@ app.get('/api/settings', (req, res) => {
     const themeCatalog = getThemeCatalog(settings);
     const defaultThemeKey = (settings.default_theme_key && themeCatalog.some(t => t.key === settings.default_theme_key))
       ? settings.default_theme_key
-      : 'daylight_cobalt';
+      : 'cobalt_emerald';
     settings.payterms = masterPayterms;
     settings.usd_to_pkr_rate = fxRate;
     settings.min_payout_pkr = minPayoutPkr;
@@ -15410,7 +15445,7 @@ app.get('/api/settings', (req, res) => {
       default_theme_key: defaultThemeKey,
       theme_catalog: themeCatalog,
       theme_mode: settings.theme_mode || 'light',
-      font_family: settings.font_family || 'system',
+      font_family: settings.font_family || 'jakarta',
       tagline: settings.tagline || '',
       footer_text: settings.footer_text || '',
       default_currency: settings.default_currency || 'USD',
@@ -15661,7 +15696,7 @@ app.delete('/api/settings/themes/:key', (req, res) => {
       return res.status(400).json({ error: 'Built-in starter themes cannot be deleted.' });
     }
     const settings = readDb('settings') || {};
-    const activeDefault = settings.default_theme_key || 'daylight_cobalt';
+    const activeDefault = settings.default_theme_key || 'cobalt_emerald';
     if (activeDefault === key) {
       return res.status(400).json({ error: 'Cannot delete the currently active default theme. Switch default first.' });
     }
@@ -16434,7 +16469,9 @@ function hydrateConversationForActor(conv, actor, allMessages) {
       id: Number(pinnedMsg.id),
       sender_name: pinnedMsg.sender_name,
       sender_role: pinnedMsg.sender_role,
-      body: String(pinnedMsg.body || '').slice(0, 140),
+      body: pinnedMsg.image
+        ? (pinnedMsg.body ? `📷 ${String(pinnedMsg.body).slice(0, 130)}` : '📷 Photo')
+        : String(pinnedMsg.body || '').slice(0, 140),
       created_at: pinnedMsg.created_at
     } : null,
     read_cursors: conv.read_cursors || {},
@@ -16606,11 +16643,14 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   if (replyId > 0) {
     const targetMsg = allMessages.find(m => Number(m.id) === replyId && Number(m.conversation_id) === convId && !m.deleted);
     if (targetMsg) {
+      const targetSnippet = targetMsg.image
+        ? (targetMsg.body ? `📷 ${String(targetMsg.body).slice(0, 110)}` : '📷 Photo')
+        : String(targetMsg.body || '').slice(0, 120);
       reply_to = {
         id: Number(targetMsg.id),
         sender_key: targetMsg.sender_key,
         sender_name: targetMsg.sender_name,
-        body_snippet: String(targetMsg.body || '').slice(0, 120)
+        body_snippet: targetSnippet
       };
     }
   }
@@ -16657,6 +16697,193 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
     message: msgRecord,
     conversation: hydrateConversationForActor(conv, actor, allMessages)
   });
+});
+
+// ── Live Chat Fast Binary Image Upload & Authorized Media Serving ──
+const chatImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 }
+});
+
+function detectChatImageType(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return { ext: 'jpg', mime: 'image/jpeg' };
+  }
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+      buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) {
+    return { ext: 'png', mime: 'image/png' };
+  }
+  // WebP: RIFF....WEBP
+  if (buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { ext: 'webp', mime: 'image/webp' };
+  }
+  // GIF: GIF87a / GIF89a
+  const gifSig = buf.subarray(0, 6).toString('ascii');
+  if (gifSig === 'GIF87a' || gifSig === 'GIF89a') {
+    return { ext: 'gif', mime: 'image/gif' };
+  }
+  return null;
+}
+
+const CHAT_MEDIA_FILE_RE = /^[a-zA-Z0-9_-]{8,64}\.(webp|jpg|png|gif)$/;
+
+// POST /api/chat/conversations/:id/messages-media — 1-request fast binary photo send (+ optional caption/reply)
+app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied to this conversation.' });
+  }
+  if (conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+  }
+
+  chatImageUpload.single('image')(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      if (uploadErr.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Image too large (max 8 MB).' });
+      }
+      return res.status(400).json({ error: uploadErr.message || 'Image upload failed.' });
+    }
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'Please select a valid image file.' });
+    }
+
+    const detected = detectChatImageType(req.file.buffer);
+    if (!detected) {
+      return res.status(400).json({ error: 'Unsupported image format. Only JPG, PNG, WebP, or GIF allowed.' });
+    }
+
+    try {
+      const convDir = path.join(CHAT_MEDIA_DIR, `c_${convId}`);
+      await fs.promises.mkdir(convDir, { recursive: true });
+      const fileName = `${Date.now().toString(36)}_${crypto.randomBytes(10).toString('hex')}.${detected.ext}`;
+      const absTarget = path.join(convDir, fileName);
+      await fs.promises.writeFile(absTarget, req.file.buffer);
+
+      const rawBody = String((req.body && req.body.body) || '').trim();
+      const body = rawBody.slice(0, 2000);
+      const clientTempId = String((req.body && req.body.client_temp_id) || '').slice(0, 64) || null;
+      const safeW = Math.max(0, Math.min(8000, Math.round(Number(req.body && req.body.width) || 0)));
+      const safeH = Math.max(0, Math.min(8000, Math.round(Number(req.body && req.body.height) || 0)));
+
+      const latestConvs = readDb('chat_conversations') || [];
+      const latestConv = latestConvs.find(c => Number(c.id) === convId);
+      if (!latestConv || !canAccessConversation(actor, latestConv)) {
+        try { await fs.promises.unlink(absTarget); } catch (_) {}
+        return res.status(403).json({ error: 'Conversation is no longer accessible.' });
+      }
+
+      const allMessages = readDb('chat_messages') || [];
+      let reply_to = null;
+      const replyId = Number((req.body && req.body.reply_to_id) || 0);
+      if (replyId > 0) {
+        const targetMsg = allMessages.find(m => Number(m.id) === replyId && Number(m.conversation_id) === convId && !m.deleted);
+        if (targetMsg) {
+          const targetSnippet = targetMsg.image
+            ? (targetMsg.body ? `📷 ${String(targetMsg.body).slice(0, 110)}` : '📷 Photo')
+            : String(targetMsg.body || '').slice(0, 120);
+          reply_to = {
+            id: Number(targetMsg.id),
+            sender_key: targetMsg.sender_key,
+            sender_name: targetMsg.sender_name,
+            body_snippet: targetSnippet
+          };
+        }
+      }
+
+      const now = new Date().toISOString();
+      const msgRecord = {
+        id: nextId(allMessages),
+        conversation_id: convId,
+        sender_key: actor.key,
+        sender_role: actor.role,
+        sender_name: actor.display_name || actor.username,
+        body,
+        image: {
+          file: fileName,
+          url: `/api/chat/conversations/${convId}/media/${fileName}`,
+          mime: detected.mime,
+          size: req.file.buffer.length,
+          width: safeW || undefined,
+          height: safeH || undefined
+        },
+        reply_to,
+        deleted: false,
+        created_at: now
+      };
+      allMessages.push(msgRecord);
+      writeDb('chat_messages', allMessages);
+
+      if (!latestConv.read_cursors) latestConv.read_cursors = {};
+      latestConv.read_cursors[actor.key] = msgRecord.id;
+      latestConv.last_message_id = msgRecord.id;
+      latestConv.last_message_preview = body ? (`📷 ${body}`).slice(0, 120) : '📷 Photo';
+      latestConv.last_message_sender_key = actor.key;
+      latestConv.last_message_sender_name = msgRecord.sender_name;
+      latestConv.last_message_at = now;
+      latestConv.updated_at = now;
+      writeDb('chat_conversations', latestConvs);
+
+      const alert_priority = computeChatAlertPriority(latestConv, actor.role);
+      sendChatWsEvent({
+        type: 'chat:message',
+        conversation_id: convId,
+        conversation_type: latestConv.type,
+        conversation_title: latestConv.type === 'agent_group' ? latestConv.title : msgRecord.sender_name,
+        alert_priority,
+        client_temp_id: clientTempId,
+        message: msgRecord
+      }, latestConv.participants);
+
+      return res.status(201).json({
+        message: msgRecord,
+        conversation: hydrateConversationForActor(latestConv, actor, allMessages)
+      });
+    } catch (err) {
+      console.error('[CHAT-MEDIA] Save error:', err);
+      return res.status(500).json({ error: 'Failed to save image.' });
+    }
+  });
+});
+
+// GET /api/chat/conversations/:id/media/:file — strictly role- & conversation-authorized media download/view
+app.get('/api/chat/conversations/:id/media/:file', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const fileName = String(req.params.file || '');
+  if (!Number.isFinite(convId) || convId <= 0 || !CHAT_MEDIA_FILE_RE.test(fileName)) {
+    return res.status(400).json({ error: 'Invalid media request.' });
+  }
+
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied to this media.' });
+  }
+
+  const convDir = path.resolve(CHAT_MEDIA_DIR, `c_${convId}`);
+  const absFile = path.resolve(convDir, fileName);
+  if (!absFile.startsWith(convDir + path.sep) || !fs.existsSync(absFile)) {
+    return res.status(404).json({ error: 'Media not found.' });
+  }
+
+  const ext = path.extname(fileName).toLowerCase();
+  const mimeMap = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif' };
+  res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', 'inline');
+  return res.sendFile(absFile);
 });
 
 // POST /api/chat/conversations/:id/read — mark conversation read
@@ -16709,8 +16936,15 @@ app.delete('/api/chat/conversations/:id/messages/:msgId', requireAuth, (req, res
     return res.status(403).json({ error: 'You can only delete your own messages.' });
   }
 
+  if (msg.image && msg.image.file && CHAT_MEDIA_FILE_RE.test(String(msg.image.file))) {
+    try {
+      const targetMedia = path.resolve(CHAT_MEDIA_DIR, `c_${convId}`, String(msg.image.file));
+      if (fs.existsSync(targetMedia)) fs.unlinkSync(targetMedia);
+    } catch (_) {}
+  }
   msg.deleted = true;
   msg.body = 'This message was deleted';
+  msg.image = null;
   msg.reply_to = null;
   writeDb('chat_messages', allMessages);
 
@@ -16955,6 +17189,10 @@ app.delete('/api/chat/groups/:id', requireAuth, (req, res) => {
   if (remaining.length !== allMessages.length) {
     writeDb('chat_messages', remaining);
   }
+  try {
+    const groupMediaDir = path.resolve(CHAT_MEDIA_DIR, `c_${convId}`);
+    if (fs.existsSync(groupMediaDir)) fs.rmSync(groupMediaDir, { recursive: true, force: true });
+  } catch (_) {}
 
   sendChatWsEvent({ type: 'chat:group_removed', conversation_id: convId }, removed.participants || []);
   res.json({ success: true, deleted_id: convId });

@@ -69,16 +69,16 @@ const ZY_CLIENT_ICONS = {
 };
 
 const ZY_CLIENT_MENU = [
-  { label: 'Dashboard', page: 'dashboard', color: '#d97706', tint: 'rgba(245, 158, 11, 0.14)' },
-  { label: 'Live Chat', page: 'live-chat', color: '#16a34a', tint: 'rgba(22, 163, 74, 0.14)' },
-  { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(14, 165, 233, 0.14)' },
-  { label: 'Ranges Rate Card', page: 'sms-overview', color: '#7c3aed', tint: 'rgba(139, 92, 246, 0.14)' },
-  { label: 'CDR & Statistics', page: 'my-sms', color: '#2563eb', tint: 'rgba(37, 99, 235, 0.14)' },
-  { label: 'CDR 2 (Monthly)', page: 'cdr2', color: '#4f46e5', tint: 'rgba(79, 70, 229, 0.14)', hiddenByDefault: true },
-  { label: 'Notifications', page: 'news', color: '#ea580c', tint: 'rgba(249, 115, 22, 0.14)' },
-  { label: 'Payment Requests', page: 'payout-requests', color: '#059669', tint: 'rgba(16, 185, 129, 0.14)' },
-  { label: 'Credit Notes', page: 'my-earnings', color: '#0d9488', tint: 'rgba(20, 184, 166, 0.14)' },
-  { label: 'My Profile', page: 'my-profile', color: '#0369a1', tint: 'rgba(2, 132, 199, 0.14)' }
+  { label: 'Dashboard', page: 'dashboard', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
+  { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
+  { label: 'Ranges Rate Card', page: 'sms-overview', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'CDR & Statistics', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
+  { label: 'CDR 2 (Monthly)', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
+  { label: 'Notifications', page: 'news', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
+  { label: 'Payment Requests', page: 'payout-requests', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'Credit Notes', page: 'my-earnings', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)' },
+  { label: 'My Profile', page: 'my-profile', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' }
 ];
 const ZY_LABELS = {
   'dashboard': 'Dashboard',
@@ -220,14 +220,19 @@ pgDashboard = async function () {
         CLIENT_USER = Object.assign({}, CLIENT_USER || {}, me);
       }
     }
-    const [numbersRes, daily, periodStats, rateCardRes, news, earnRes] = await Promise.all([
+    const [numbersRes, daily, periodStats, rateCardRes, news, earnRes, meRes] = await Promise.all([
       apiFetch(`/api/numbers?client_id=${CLIENT_ID}&limit=1`, { silent: true }).catch(() => ({ total: 0, data: [] })),
       apiFetch(`/api/sms/daily-stats?client_id=${CLIENT_ID}`, { silent: true }),
       apiFetch(`/api/sms/period-stats?client_id=${CLIENT_ID}`, { silent: true }).catch(() => null),
       apiFetch('/api/client/rate-card', { silent: true }).catch(() => ({ ranges: [] })),
       apiFetch('/api/notifications?limit=5', { silent: true }).catch(() => ({ data: [] })),
-      CLIENT_ID ? apiFetch(`/api/client/${CLIENT_ID}/earnings`, { silent: true }).catch(() => null) : Promise.resolve(null)
+      CLIENT_ID ? apiFetch(`/api/client/${CLIENT_ID}/earnings`, { silent: true }).catch(() => null) : Promise.resolve(null),
+      apiFetch('/api/auth/me', { silent: true }).catch(() => null)
     ]);
+    if (meRes && typeof window.zyRefreshWhitenoiseNav === 'function') {
+      window.zyRefreshWhitenoiseNav(meRes);
+    }
+    const clientHasWn = Boolean((meRes && meRes.whitenoise_access) || window.ZY_WHITENOISE_ACCESS || (window.CLIENT_USER && CLIENT_USER.whitenoise_access));
 
     const d = daily || {};
     const p = periodStats || {};
@@ -323,7 +328,16 @@ pgDashboard = async function () {
           { label: 'My Earnings Today', value: fmtPkr(earnToday), sub: 'Earned today (PKR)', icon: 'fa-sack-dollar', page: 'my-earnings' },
           { label: 'My Earnings Week', value: fmtPkr(earnWeek), sub: 'Current week (Mon–Sun PKR)', icon: 'fa-chart-line', page: 'my-balance' }
         ],
-        shortcuts: [],
+        shortcuts: [
+          { label: 'My Numbers', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
+          { label: 'Ranges Rate Card', page: 'sms-overview', icon: 'fa-table-list', tone: 'green' },
+          { label: 'CDR & Stats', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
+          clientHasWn
+            ? { label: 'CDR 2 (Monthly)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' }
+            : { label: 'Live Chat', page: 'live-chat', icon: 'fa-comments', tone: 'green' },
+          { label: 'Payment Requests', page: 'payout-requests', icon: 'fa-wallet', tone: 'blue' },
+          { label: 'Credit Notes', page: 'my-earnings', icon: 'fa-receipt', tone: 'green' }
+        ],
         volumes: [
           { label: 'Today SMS', value: todaySmsVal, page: 'my-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },

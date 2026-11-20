@@ -9,26 +9,26 @@
 const ZY_LOGO_SRC = window.ZY_LOGO_SRC || '/static/img/humex-sms-logo.png';
 
 const ZY_ADMIN_MENU = [
-  { t: null, c: '#e0a030', items: [
+  { t: null, c: '#1d4ed8', items: [
       ['Dashboard', 'dashboard', 'fa-gauge-high'],
   ] },
-  { t: null, c: '#16a34a', items: [
+  { t: null, c: '#059669', items: [
       ['Live Chat', 'live-chat', 'fa-comments'],
   ] },
-  { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#d97706', items: [
+  { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['Numbers Pool Hub', 'my-numbers', 'fa-mobile-screen'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
       ['Upload & Blacklist', 'upload-numbers', 'fa-cloud-arrow-up'],
       ['Allocation & Transfer Log', 'allocation-history', 'fa-file-lines'],
   ] },
-  { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#2563eb', items: [
+  { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#059669', items: [
       ['SMS CDR Reports', 'my-sms', 'fa-comment-sms'],
       ['CDR 2 (Whitenoise)', 'cdr2', 'fa-tower-cell'],
       ['Failed SMS', 'failed-sms', 'fa-triangle-exclamation'],
       ['Live Monitor', 'live-otp-feed', 'fa-signal'],
       ['Analytics & Reports', 'sms-analytics', 'fa-chart-pie'],
   ] },
-  { t: "PROVIDERS", i: 'fa-plug', c: '#16a34a', items: [
+  { t: "PROVIDERS", i: 'fa-plug', c: '#0284c7', items: [
       ['CR API Panels', 'cr-api-panels', 'fa-link'],
       ['Web Scraping Panels', 'login-panels', 'fa-globe'],
       ['Whitenoise Excel Reports', 'whitenoise-panels', 'fa-file-excel'],
@@ -40,12 +40,12 @@ const ZY_ADMIN_MENU = [
       ['Statements', 'statements', 'fa-file-invoice-dollar'],
       ['Credit Notes', 'credit-notes', 'fa-receipt'],
   ] },
-  { t: "ACCOUNTS & SECURITY", i: 'fa-shield-halved', c: '#dc2626', items: [
+  { t: "ACCOUNTS & SECURITY", i: 'fa-shield-halved', c: '#1d4ed8', items: [
       ['Accounts & Hierarchy', 'agents', 'fa-user-secret'],
       ['Security & Firewall', 'firewall-dashboard', 'fa-shield-halved'],
       ['Audit Logs', 'audit-logs', 'fa-clipboard-list'],
   ] },
-  { t: "PLATFORM & SUPPORT", i: 'fa-sliders', c: '#ea580c', items: [
+  { t: "PLATFORM & SUPPORT", i: 'fa-sliders', c: '#0d9488', items: [
       ['General & Brand Settings', 'general-settings', 'fa-gear'],
       ['Notifications', 'notifications', 'fa-bell'],
       ['Communication Hub', 'announcements', 'fa-bullhorn'],
@@ -54,7 +54,7 @@ const ZY_ADMIN_MENU = [
       ['Agent Number Requests', 'agent-requests', 'fa-sim-card'],
       ['Registration Requests', 'registration-requests', 'fa-user-plus'],
   ] },
-  { t: null, c: '#0284c7', items: [
+  { t: null, c: '#1d4ed8', items: [
       ['My Profile', 'my-profile', 'fa-user'],
   ] }
 ];
@@ -381,7 +381,14 @@ renderDashboard = async function () {
           { label: 'Profit Today', value: fmtM(profitToday, '$'), sub: 'Net system margin today', icon: 'fa-sack-dollar', page: 'profit-stats' },
           { label: 'Profit Week', value: fmtM(profitWeek, '$'), sub: 'Current week (Mon–Sun)', icon: 'fa-chart-line', page: 'my-sms' }
         ],
-        shortcuts: [],
+        shortcuts: [
+          { label: 'CDR Reports', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
+          { label: 'CDR 2 (Excel)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' },
+          { label: 'Numbers Pool', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
+          { label: 'Ranges & Rates', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
+          { label: 'Agent Requests', page: 'agent-requests', icon: 'fa-sim-card', tone: 'blue' },
+          { label: 'Payout Requests', page: 'payout-requests', icon: 'fa-hand-holding-dollar', tone: 'green' }
+        ],
         volumes: [
           { label: 'Today SMS', value: todaySmsVal, page: 'my-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },

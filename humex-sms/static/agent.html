@@ -23,7 +23,7 @@
     var cat = (s && Array.isArray(s.theme_catalog)) ? s.theme_catalog : [];
     var pickKey = (ut.theme_key && cat.some(function(t){ return t.key === ut.theme_key; }))
       ? ut.theme_key
-      : ((s && s.default_theme_key) || 'daylight_cobalt');
+      : ((s && s.default_theme_key) || 'cobalt_emerald');
     var th = null;
     for (var i = 0; i < cat.length; i++) {
       if (cat[i] && cat[i].key === pickKey) { th = cat[i]; break; }
@@ -31,7 +31,7 @@
     if (!th && cat.length) th = cat[0];
     if (th) {
       r.setAttribute('data-chrome-tone', th.structure_tone || 'light');
-      r.setAttribute('data-role-theme', th.key || 'daylight_cobalt');
+      r.setAttribute('data-role-theme', th.key || 'cobalt_emerald');
     }
   } catch(e) {}
 })();
@@ -47,8 +47,9 @@
     window.HumexAuth.initCrossTabWatcher(['Agent']);
   }
 </script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/static/css/humex-global.css">

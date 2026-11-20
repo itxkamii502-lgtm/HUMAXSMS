@@ -18,6 +18,30 @@
   /* ── Built-in Starter Role Themes (Mirrors server.js) ─────────────── */
   const DEFAULT_ROLE_THEMES = [
     {
+      key: 'cobalt_emerald',
+      name: 'Royal Blue & Emerald',
+      description: 'Clean white surfaces, Royal Blue primary actions & Emerald Green accents with locked neutral ink',
+      is_builtin: true,
+      structure_tone: 'light',
+      structure_bg: '#ffffff',
+      structure_side_bg: '#ffffff',
+      structure_text: '#0f172a',
+      structure_muted: '#64748b',
+      structure_item_bg: '#f8fafc',
+      structure_item_hover: '#eff6ff',
+      structure_border: '#e2e8f0',
+      structure_table_bg: '#f1f5f9',
+      structure_table_text: '#334155',
+      primary_btn: '#1d4ed8',
+      primary_btn_hover: '#1e40af',
+      primary_btn_text: '#ffffff',
+      warning_btn: '#d97706',
+      warning_btn_hover: '#b45309',
+      warning_btn_text: '#ffffff',
+      danger_btn: '#dc2626',
+      danger_btn_hover: '#b91c1c'
+    },
+    {
       key: 'daylight_cobalt',
       name: 'Daylight Crisp & Cobalt',
       description: 'White header & sidebar, Slate table headers, Cobalt buttons, Amber exports',
@@ -165,8 +189,8 @@
       url: 'https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap'
     },
     jakarta: {
-      family: "'Plus Jakarta Sans', sans-serif",
-      url: 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap'
+      family: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      url: 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap'
     },
     system: {
       family: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
@@ -338,9 +362,9 @@
   const DEFAULT_PRIMARY_SETTINGS = {
     site_name: 'HUMAX SMS',
     logo_url: '/static/img/humex-sms-logo.png',
-    default_theme_key: 'daylight_cobalt',
+    default_theme_key: 'cobalt_emerald',
     theme_mode: 'light',
-    font_family: 'system',
+    font_family: 'jakarta',
     custom_themes: [],
     theme_catalog: DEFAULT_ROLE_THEMES
   };
@@ -394,7 +418,7 @@
     const s = settingsOverride || _currentSettings || {};
     const catalog = getThemes(s);
     const byKey = new Map(catalog.map(t => [t.key, t]));
-    const defKey = (s.default_theme_key && byKey.has(s.default_theme_key)) ? s.default_theme_key : 'daylight_cobalt';
+    const defKey = (s.default_theme_key && byKey.has(s.default_theme_key)) ? s.default_theme_key : 'cobalt_emerald';
     const picked = (_userThemeKey && _userThemeKey !== 'default' && byKey.has(_userThemeKey)) ? _userThemeKey : defKey;
     return byKey.get(picked) || catalog[0];
   }
@@ -408,7 +432,7 @@
   }
 
   function loadGoogleFont(fontKey) {
-    const def = FONT_DEFS[fontKey] || FONT_DEFS.system;
+    const def = FONT_DEFS[fontKey] || FONT_DEFS.jakarta;
     if (def.url) {
       const linkId = 'dynamic-google-font-' + fontKey;
       if (!document.getElementById(linkId)) {
@@ -475,7 +499,7 @@
 
     const siteName = _currentSettings.site_name || 'HUMAX SMS';
     const logoUrl = _currentSettings.logo_url || '/static/img/humex-sms-logo.png';
-    const fontKey = _currentSettings.font_family || 'system';
+    const fontKey = _currentSettings.font_family || 'jakarta';
     const fontFamily = loadGoogleFont(fontKey);
 
     const isLightChrome = theme.structure_tone === 'light';
@@ -486,7 +510,7 @@
 
     if (document.documentElement) {
       document.documentElement.setAttribute('data-chrome-tone', theme.structure_tone || 'light');
-      document.documentElement.setAttribute('data-role-theme', theme.key || 'daylight_cobalt');
+      document.documentElement.setAttribute('data-role-theme', theme.key || 'cobalt_emerald');
     }
 
     // 1. Update Document Title
@@ -528,24 +552,31 @@
       rootStyle.setProperty('--theme-btn-primary', theme.primary_btn);
       rootStyle.setProperty('--theme-btn-primary-hover', theme.primary_btn_hover);
       rootStyle.setProperty('--theme-btn-primary-text', theme.primary_btn_text);
-      rootStyle.setProperty('--theme-btn-primary-tint', hexToRgba(theme.primary_btn, 0.12));
+      rootStyle.setProperty('--theme-btn-primary-tint', hexToRgba(theme.primary_btn, 0.10));
+      rootStyle.setProperty('--theme-accent-blue', '#1d4ed8');
+      rootStyle.setProperty('--theme-accent-blue-hover', '#1e40af');
+      rootStyle.setProperty('--theme-accent-blue-tint', 'rgba(29, 78, 216, 0.10)');
+      rootStyle.setProperty('--theme-accent-green', '#059669');
+      rootStyle.setProperty('--theme-accent-green-hover', '#047857');
+      rootStyle.setProperty('--theme-accent-green-tint', 'rgba(5, 150, 105, 0.10)');
       rootStyle.setProperty('--theme-btn-warn', theme.warning_btn);
       rootStyle.setProperty('--theme-btn-warn-hover', theme.warning_btn_hover);
       rootStyle.setProperty('--theme-btn-warn-text', theme.warning_btn_text);
       rootStyle.setProperty('--theme-btn-danger', theme.danger_btn);
       rootStyle.setProperty('--theme-btn-danger-hover', theme.danger_btn_hover);
-      rootStyle.setProperty('--theme-focus-ring', hexToRgba(theme.primary_btn, 0.25));
+      rootStyle.setProperty('--theme-focus-ring', hexToRgba(theme.primary_btn, 0.22));
       rootStyle.setProperty('--brand-primary', theme.primary_btn);
       rootStyle.setProperty('--brand-hover', theme.primary_btn_hover);
-      rootStyle.setProperty('--brand-accent', theme.primary_btn);
-      rootStyle.setProperty('--brand-glow', hexToRgba(theme.primary_btn, 0.28));
+      rootStyle.setProperty('--brand-accent', '#059669');
+      rootStyle.setProperty('--brand-glow', hexToRgba(theme.primary_btn, 0.24));
       rootStyle.setProperty('--sp-primary', theme.primary_btn);
       rootStyle.setProperty('--sp-primary-hover', theme.primary_btn_hover);
       rootStyle.setProperty('--sp-primary-contrast', theme.primary_btn_text);
+      rootStyle.setProperty('--sp-success', '#059669');
       rootStyle.setProperty('--sp-warning', theme.warning_btn);
       rootStyle.setProperty('--sp-danger', theme.danger_btn);
       rootStyle.setProperty('--sp-danger-hover', theme.danger_btn_hover);
-      rootStyle.setProperty('--sp-focus-ring', hexToRgba(theme.primary_btn, 0.25));
+      rootStyle.setProperty('--sp-focus-ring', hexToRgba(theme.primary_btn, 0.22));
       rootStyle.setProperty('--header-gradient', theme.structure_bg);
       rootStyle.setProperty('--header-text-color', theme.structure_text);
     } catch (e) {}
@@ -600,27 +631,31 @@
         margin: 0 auto !important;
       }
       .zy-panel-badge {
-        font-size: 15.5px !important;
-        font-weight: 800 !important;
+        font-size: 15px !important;
+        font-weight: 700 !important;
         color: var(--theme-struct-text) !important;
-        letter-spacing: 0.4px !important;
+        letter-spacing: -0.01em !important;
         display: inline-flex !important;
         align-items: center !important;
         gap: 8px !important;
       }
       .zy-panel-badge .zy-badge-name {
         color: var(--theme-struct-text) !important;
-        font-weight: 800 !important;
+        font-weight: 700 !important;
       }
       body.rmsui .stat-value, .stat-value, .zy-strip-txt i, .zy-circle-txt b {
-        color: var(--theme-btn-primary) !important;
+        color: var(--sp-text-primary, #0f172a) !important;
       }
       .zy-strip-up, .tpui .zy-tile-on span {
-        color: var(--theme-btn-primary) !important;
+        color: var(--theme-accent-green, #059669) !important;
       }
-      .stat-card-ims.green, .stat-card-ims.blue {
-        background: linear-gradient(135deg, var(--theme-btn-primary), var(--theme-btn-primary-hover)) !important;
-        color: var(--theme-btn-primary-text) !important;
+      .stat-card-ims.blue {
+        background: linear-gradient(135deg, #1d4ed8, #1e40af) !important;
+        color: #ffffff !important;
+      }
+      .stat-card-ims.green {
+        background: linear-gradient(135deg, #059669, #047857) !important;
+        color: #ffffff !important;
       }
       .zy-gentoken {
         background: var(--theme-btn-primary) !important;

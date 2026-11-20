@@ -2772,6 +2772,10 @@ const whitenoisePoolCursor = new Map();
 const whitenoiseLastClientSweepAt = new Map();
 const whitenoiseLastPoolSweepAt = new Map();
 const whitenoiseOnDemandFetchedAt = new Map();
+const whitenoiseWebLoginPromises = new Map();
+const whitenoiseWebInFlightPromises = new Map();
+const whitenoiseWebPhoneCache = new Map();
+const whitenoiseWebBackoffUntil = new Map();
 
 function formatWhitenoisePhone(raw) {
   const digits = String(raw || '').replace(/\D/g, '').replace(/^00+/, '');
@@ -2866,6 +2870,13 @@ function isWhitenoiseLoginHtml(html) {
 }
 
 async function loginWhitenoiseWebPanel(conn) {
+  const lockKey = String(conn.id != null ? conn.id : (conn.web_email || 'default'));
+  if (whitenoiseWebLoginPromises.has(lockKey)) {
+    const sharedCookie = await whitenoiseWebLoginPromises.get(lockKey);
+    conn.web_cookie = sharedCookie;
+    return sharedCookie;
+  }
+  const runPromise = (async () => {
   const email = String(conn.web_email || '').trim();
   const password = String(conn.web_password || '');
   if (!email || !password) {
@@ -2961,6 +2972,15 @@ async function loginWhitenoiseWebPanel(conn) {
     }
   }
   return cookieJar;
+  })();
+  whitenoiseWebLoginPromises.set(lockKey, runPromise);
+  try {
+    return await runPromise;
+  } finally {
+    if (whitenoiseWebLoginPromises.get(lockKey) === runPromise) {
+      whitenoiseWebLoginPromises.delete(lockKey);
+    }
+  }
 }
 
 async function callWhitenoiseApi(conn, endpointPath, payload = {}, method = 'POST') {
@@ -3152,115 +3172,202 @@ function formatWhitenoiseWebTime(dateObj) {
   return `${dateObj.getUTCFullYear()}-${pad(dateObj.getUTCMonth() + 1)}-${pad(dateObj.getUTCDate())}.${pad(dateObj.getUTCHours())}.${pad(dateObj.getUTCMinutes())}`;
 }
 
+function buildWhitenoiseWebSmsUrl(smsBaseUrl, opts = {}) {
+  if (smsBaseUrl.includes('?') && !opts.filterPhone) return smsBaseUrl;
+  const now = new Date();
+  const windowMin = Math.max(5, parseInt(opts.windowMinutes, 10) || 1440);
+  // Use UTC start-of-day (or wider lookback if requested) and UTC start-of-tomorrow (+24h)
+  // so timezone differences (e.g. Whitenoise UTC+3 vs UTC) never cut off fresh incoming SMS.
+  const todayMidnightUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+  const lookbackDt = new Date(now.getTime() - windowMin * 60000);
+  const startDt = lookbackDt < todayMidnightUtc ? lookbackDt : todayMidnightUtc;
+  const endDt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+
+  const qs = new URLSearchParams();
+  const targetPhone = opts.filterPhone ? formatWhitenoisePhone(opts.filterPhone) : '';
+  if (targetPhone) qs.set('sms_to', targetPhone);
+  qs.set('dup', String(opts.dup != null ? opts.dup : 2));
+  qs.set('sms_time_start', formatWhitenoiseWebTime(startDt));
+  qs.set('sms_time_end', formatWhitenoiseWebTime(endDt));
+  qs.set('order', 'id:desc');
+  const baseClean = smsBaseUrl.split('?')[0];
+  return `${baseClean}?${qs.toString()}`;
+}
+
 async function pollWhitenoiseWebFeed(conn, opts = {}) {
   const hasWebLogin = Boolean(conn.web_email && conn.web_password);
   if (!conn.web_cookie && !hasWebLogin) {
     throw new Error('Whitenoise Web Feed requires Email + Password or an APPSID Session Cookie.');
   }
-  const baseWeb = normalizeWhitenoiseWebBaseUrl(conn.web_login_url || conn.web_url || 'https://whitenoise.one');
-  const smsBaseUrl = String(conn.web_sms_url || `${baseWeb}/sms`).trim().replace(/\/+$/, '');
-  const now = new Date();
-  const windowMin = Math.max(5, parseInt(opts.windowMinutes ?? conn.web_window_minutes, 10) || 180);
-  const startDt = new Date(now.getTime() - windowMin * 60000);
-  const windowedUrl = smsBaseUrl.includes('?')
-    ? smsBaseUrl
-    : `${smsBaseUrl}?sms_time_start=${encodeURIComponent(formatWhitenoiseWebTime(startDt))}&sms_time_end=${encodeURIComponent(formatWhitenoiseWebTime(now))}&order=id:desc`;
-  const timeoutMs = Math.max(3000, Math.min(60000, parseInt(conn.timeout_ms, 10) || 20000));
-  const ua = String(conn.user_agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-  if (!conn.web_cookie && hasWebLogin) {
-    await loginWhitenoiseWebPanel(conn);
+  const targetPhone = opts.filterPhone ? formatWhitenoisePhone(opts.filterPhone) : '';
+  const connKey = String(conn.id != null ? conn.id : (conn.web_email || 'default'));
+  const cacheKey = `${connKey}:${targetPhone || '__all__'}`;
+  const nowMs = Date.now();
+
+  // Respect temporary rate-limit backoff if Whitenoise returned HTTP 429
+  const backoffUntil = whitenoiseWebBackoffUntil.get(connKey) || 0;
+  if (!opts.bypassCooldown && backoffUntil > nowMs) {
+    const waitSec = Math.ceil((backoffUntil - nowMs) / 1000);
+    return { rows_parsed: 0, new_sms: 0, rows: [], rate_limited: true, retry_after_sec: waitSec };
   }
 
-  const fetchSmsHtml = async (urlToHit) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const resp = await fetch(urlToHit, {
-        signal: controller.signal,
-        redirect: 'manual',
-        headers: {
-          'Cookie': String(conn.web_cookie || '').trim(),
-          'User-Agent': ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Referer': `${baseWeb}/`
-        }
-      });
-      const text = await resp.text();
-      return { status: resp.status, location: resp.headers.get('location') || '', html: text };
-    } finally {
-      clearTimeout(timeout);
+  // Serve from short per-number cache (protects Whitenoise under 200-500 req/min burst load)
+  const cacheTtlMs = opts.cacheTtlMs != null ? Number(opts.cacheTtlMs) : (targetPhone ? 10000 : 0);
+  if (!opts.bypassCooldown && cacheTtlMs > 0) {
+    const cached = whitenoiseWebPhoneCache.get(cacheKey);
+    if (cached && (nowMs - cached.ts) < cacheTtlMs) {
+      return { ...cached.result, cached: true, cooldown_active: true };
     }
-  };
+  }
 
-  let resObj = await fetchSmsHtml(windowedUrl);
-  const needsReauth = resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html);
-  if (needsReauth) {
-    if (hasWebLogin) {
+  // Deduplicate concurrent identical requests for the same (connection, phone)
+  if (whitenoiseWebInFlightPromises.has(cacheKey)) {
+    return whitenoiseWebInFlightPromises.get(cacheKey);
+  }
+
+  const runPromise = (async () => {
+    const baseWeb = normalizeWhitenoiseWebBaseUrl(conn.web_login_url || conn.web_url || 'https://whitenoise.one');
+    const smsBaseUrl = String(conn.web_sms_url || `${baseWeb}/sms`).trim().replace(/\/+$/, '');
+    const windowedUrl = buildWhitenoiseWebSmsUrl(smsBaseUrl, {
+      filterPhone: targetPhone,
+      windowMinutes: opts.windowMinutes ?? conn.web_window_minutes ?? 1440,
+      dup: opts.dup != null ? opts.dup : 2
+    });
+    const timeoutMs = Math.max(3000, Math.min(60000, parseInt(conn.timeout_ms, 10) || 20000));
+    const ua = String(conn.user_agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+
+    if (!conn.web_cookie && hasWebLogin) {
       await loginWhitenoiseWebPanel(conn);
-      resObj = await fetchSmsHtml(windowedUrl);
     }
-    if (resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html)) {
-      throw new Error('Whitenoise web session expired or unauthorized — please verify Email/Password or paste a fresh APPSID cookie.');
-    }
-  }
-  if (resObj.status < 200 || resObj.status >= 300) {
-    throw new Error(`Web feed HTTP ${resObj.status}`);
-  }
 
-  let parsedRows = parseWhitenoiseWebSmsHtml(resObj.html);
-  // Fallback to bare /sms default page if time-filtered view returned 0 rows
-  if (parsedRows.length === 0 && windowedUrl !== smsBaseUrl) {
-    const bareRes = await fetchSmsHtml(smsBaseUrl);
-    if (bareRes.status >= 200 && bareRes.status < 300 && !isWhitenoiseLoginHtml(bareRes.html)) {
-      parsedRows = parseWhitenoiseWebSmsHtml(bareRes.html);
-    }
-  }
-  const ordered = [...parsedRows].reverse();
-  const shouldIngest = opts.ingest !== false;
-  let newCount = 0;
+    const fetchSmsHtml = async (urlToHit) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const resp = await fetch(urlToHit, {
+          signal: controller.signal,
+          redirect: 'manual',
+          headers: {
+            'Cookie': String(conn.web_cookie || '').trim(),
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Referer': `${baseWeb}/sms`
+          }
+        });
+        const text = await resp.text();
+        return { status: resp.status, location: resp.headers.get('location') || '', html: text };
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
 
-  if (shouldIngest) {
-    for (const row of ordered) {
-      if (opts.filterPhone && !phoneDigitsVariantsMatch(row.dst, opts.filterPhone)) continue;
-      const hashKey = md5(`${row.dst}|${row.src}|${row.time_received}|${row.text}`).slice(0, 16);
-      const extKey = `wn-web-${conn.id}-${hashKey}`;
-      const ingestRes = ingestSms({
-        sender: row.src || row.service_name || 'Whitenoise',
-        to_number: row.dst,
-        message: row.text,
-        sms_id: hashKey,
-        company: conn.name || 'Whitenoise',
-        provider: conn.provider_tag || conn.name || 'Whitenoise',
-        source: 'whitenoise',
-        panel_id: conn.id,
-        panel_name: conn.name || 'Whitenoise',
-        ext_key: extKey,
-        timestamp: row.time_received || row.time_sent
-      });
-      if (ingestRes && ingestRes.logged) {
-        newCount++;
-        // Optional conversion lookup if api_key is present & client-matched
-        if (conn.api_key && conn.conversion_mode !== 'off' && ingestRes.entry?.client_id != null) {
-          callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: row.dst, since: 120 }, 'POST')
-            .then(apiRes => {
-              const list = Array.isArray(apiRes && apiRes.sms) ? apiRes.sms : [];
-              const matched = list.find(x => x && String(x.text || '').trim() === String(row.text || '').trim());
-              if (matched && matched.id != null) {
-                sendWhitenoiseConversionNonBlocking(conn, {
-                  smsId: matched.id,
-                  phone: row.dst,
-                  serviceName: matched.service_name || row.service_name || '',
-                  logEntryId: ingestRes.entry.id
-                });
-              }
-            })
-            .catch(() => {});
+    let resObj = await fetchSmsHtml(windowedUrl);
+    if (resObj.status === 429) {
+      whitenoiseWebBackoffUntil.set(connKey, Date.now() + 20000);
+      throw new Error('Whitenoise Web rate limited (HTTP 429) — cooling down 20s automatically.');
+    }
+    const needsReauth = resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html);
+    if (needsReauth) {
+      if (hasWebLogin) {
+        await loginWhitenoiseWebPanel(conn);
+        resObj = await fetchSmsHtml(windowedUrl);
+      }
+      if (resObj.status === 429) {
+        whitenoiseWebBackoffUntil.set(connKey, Date.now() + 20000);
+        throw new Error('Whitenoise Web rate limited (HTTP 429) — cooling down 20s automatically.');
+      }
+      if (resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html)) {
+        throw new Error('Whitenoise web session expired or unauthorized — please verify Email/Password or paste a fresh APPSID cookie.');
+      }
+    }
+    if (resObj.status < 200 || resObj.status >= 300) {
+      throw new Error(`Web feed HTTP ${resObj.status}`);
+    }
+
+    let parsedRows = parseWhitenoiseWebSmsHtml(resObj.html);
+    // Fallback: if time-filtered view returned 0 rows, try simpler query (sms_to+dup=2 for targeted, or bare /sms for global)
+    if (parsedRows.length === 0) {
+      const fallbackUrl = targetPhone
+        ? `${smsBaseUrl.split('?')[0]}?sms_to=${encodeURIComponent(targetPhone)}&dup=2`
+        : smsBaseUrl;
+      if (fallbackUrl !== windowedUrl) {
+        const bareRes = await fetchSmsHtml(fallbackUrl);
+        if (bareRes.status >= 200 && bareRes.status < 300 && !isWhitenoiseLoginHtml(bareRes.html)) {
+          parsedRows = parseWhitenoiseWebSmsHtml(bareRes.html);
         }
       }
     }
+
+    if (opts.onDemand && targetPhone) {
+      const digits = targetPhone.replace(/\D/g, '');
+      if (digits) whitenoiseOnDemandFetchedAt.set(`${conn.id}:${digits}`, Date.now());
+    }
+
+    const ordered = [...parsedRows].reverse();
+    const shouldIngest = opts.ingest !== false;
+    let newCount = 0;
+
+    if (shouldIngest) {
+      for (const row of ordered) {
+        if (targetPhone && !phoneDigitsVariantsMatch(row.dst, targetPhone)) continue;
+        const hashKey = md5(`${row.dst}|${row.src}|${row.time_received}|${row.text}`).slice(0, 16);
+        const wnRowId = /^\d{4,}$/.test(String(row.rowNum || '').trim()) ? String(row.rowNum).trim() : '';
+        const extKey = `wn-web-${conn.id}-${wnRowId || hashKey}`;
+        const ingestRes = ingestSms({
+          sender: row.src || row.service_name || 'Whitenoise',
+          to_number: row.dst,
+          message: row.text,
+          sms_id: wnRowId || hashKey,
+          company: conn.name || 'Whitenoise',
+          provider: conn.provider_tag || conn.name || 'Whitenoise',
+          source: 'whitenoise',
+          panel_id: conn.id,
+          panel_name: conn.name || 'Whitenoise',
+          ext_key: extKey,
+          timestamp: row.time_received || row.time_sent
+        });
+        if (ingestRes && ingestRes.logged) {
+          newCount++;
+          // Optional conversion lookup if api_key is present & client-matched
+          if (conn.api_key && conn.conversion_mode !== 'off' && ingestRes.entry?.client_id != null) {
+            callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: row.dst, since: 120 }, 'POST')
+              .then(apiRes => {
+                const list = Array.isArray(apiRes && apiRes.sms) ? apiRes.sms : [];
+                const matched = list.find(x => x && String(x.text || '').trim() === String(row.text || '').trim());
+                if (matched && matched.id != null) {
+                  sendWhitenoiseConversionNonBlocking(conn, {
+                    smsId: matched.id,
+                    phone: row.dst,
+                    serviceName: matched.service_name || row.service_name || '',
+                    logEntryId: ingestRes.entry.id
+                  });
+                }
+              })
+              .catch(() => {});
+          }
+        }
+      }
+    }
+    const result = { rows_parsed: parsedRows.length, new_sms: newCount, rows: parsedRows };
+    if (targetPhone) {
+      whitenoiseWebPhoneCache.set(cacheKey, { ts: Date.now(), result });
+      if (whitenoiseWebPhoneCache.size > 2000) {
+        const firstKey = whitenoiseWebPhoneCache.keys().next().value;
+        if (firstKey) whitenoiseWebPhoneCache.delete(firstKey);
+      }
+    }
+    return result;
+  })();
+
+  whitenoiseWebInFlightPromises.set(cacheKey, runPromise);
+  try {
+    return await runPromise;
+  } finally {
+    if (whitenoiseWebInFlightPromises.get(cacheKey) === runPromise) {
+      whitenoiseWebInFlightPromises.delete(cacheKey);
+    }
   }
-  return { rows_parsed: parsedRows.length, new_sms: newCount, rows: parsedRows };
 }
 
 function getNumbersForWhitenoiseConnection(conn, scopeFilter = {}) {
@@ -3312,13 +3419,87 @@ async function pollSingleWhitenoiseConnection(connId, force = false) {
     let statusDetail = '';
 
     if ((mode === 'web_login' || mode === 'hybrid') && hasWebCreds) {
+      const modeTag = mode === 'web_login' ? 'Web Login' : 'Hybrid';
       const webRes = await pollWhitenoiseWebFeed(conn);
       pulled += webRes.new_sms;
       checkedCount = webRes.rows_parsed || 0;
-      const modeTag = mode === 'web_login' ? 'Web Login' : 'Hybrid';
-      statusDetail = webRes.new_sms > 0
-        ? `OK (${modeTag}) — pulled ${webRes.new_sms} new from ${webRes.rows_parsed} web row(s)`
-        : `Active (${modeTag}) — scanned ${webRes.rows_parsed} web row(s)`;
+
+      // whitenoise.one/sms returns 0 rows unless ?sms_to=%2B<number>&dup=2 is passed.
+      // When global scan returns 0 rows, automatically sweep active assigned Whitenoise numbers with safe concurrency cap.
+      if (checkedCount === 0) {
+        const wnNumbers = getNumbersForWhitenoiseConnection(conn);
+        const nowMs = Date.now();
+        let batch = [];
+        if (force) {
+          const cycleMax = Math.max(1, Math.min(60, parseInt(conn.max_numbers_per_cycle, 10) || 25));
+          if (wnNumbers.length <= cycleMax) {
+            batch = wnNumbers;
+          } else {
+            const cursor = whitenoiseRoundRobinCursor.get(conn.id) || 0;
+            for (let i = 0; i < cycleMax; i++) batch.push(wnNumbers[(cursor + i) % wnNumbers.length]);
+            whitenoiseRoundRobinCursor.set(conn.id, (cursor + cycleMax) % wnNumbers.length);
+          }
+        } else {
+          const skipRecentOnDemand = (numObj) => {
+            const d = String(numObj?.number || '').replace(/\D/g, '');
+            if (!d) return false;
+            const lastOd = whitenoiseOnDemandFetchedAt.get(`${conn.id}:${d}`) || 0;
+            return (nowMs - lastOd) < 120000;
+          };
+          const clientNums = wnNumbers.filter(n => Boolean(n.client_id) && !skipRecentOnDemand(n));
+          const poolNums = wnNumbers.filter(n => !n.client_id && !skipRecentOnDemand(n));
+          const clientIntervalMs = Math.max(30, parseInt(conn.client_interval_sec ?? conn.interval, 10) || 120) * 1000;
+          const poolIntervalMs = Math.max(60, parseInt(conn.pool_interval_sec, 10) || 360) * 1000;
+          const pickBatch = (list, cursorMap, cap) => {
+            if (!list.length) return [];
+            if (list.length <= cap) return list.slice();
+            const cur = cursorMap.get(conn.id) || 0;
+            const picked = [];
+            for (let i = 0; i < cap; i++) picked.push(list[(cur + i) % list.length]);
+            cursorMap.set(conn.id, (cur + cap) % list.length);
+            return picked;
+          };
+          const lastClientAt = whitenoiseLastClientSweepAt.get(conn.id) || 0;
+          if (clientNums.length > 0 && (nowMs - lastClientAt) >= clientIntervalMs) {
+            whitenoiseLastClientSweepAt.set(conn.id, nowMs);
+            batch.push(...pickBatch(clientNums, whitenoiseClientCursor, Math.min(12, parseInt(conn.max_numbers_per_cycle, 10) || 12)));
+          }
+          const lastPoolAt = whitenoiseLastPoolSweepAt.get(conn.id) || 0;
+          if (poolNums.length > 0 && (nowMs - lastPoolAt) >= poolIntervalMs) {
+            whitenoiseLastPoolSweepAt.set(conn.id, nowMs);
+            batch.push(...pickBatch(poolNums, whitenoisePoolCursor, 10));
+          }
+        }
+
+        if (batch.length > 0) {
+          const effConcurrency = Math.min(4, Math.max(1, parseInt(conn.concurrency, 10) || 4));
+          const sweepResults = await runWithConcurrency(batch, effConcurrency, (numObj) =>
+            pollWhitenoiseWebFeed(conn, { filterPhone: numObj.number, bypassCooldown: force })
+          );
+          let numsSwept = 0;
+          let rowsFound = 0;
+          let firstErr = '';
+          for (const r of sweepResults) {
+            if (r && r.error && !firstErr) firstErr = r.error;
+            if (r && !r.error) {
+              numsSwept++;
+              rowsFound += Number(r.rows_parsed || 0);
+              pulled += Number(r.new_sms || 0);
+            }
+          }
+          checkedCount = rowsFound || numsSwept;
+          if (numsSwept === 0 && firstErr) throw new Error(firstErr);
+          statusDetail = pulled > 0
+            ? `OK (${modeTag}) — pulled ${pulled} new SMS across ${numsSwept} number(s)`
+            : `Active (${modeTag}) — checked ${numsSwept} number(s) (${rowsFound} row(s))`;
+        } else {
+          statusDetail = `Active (${modeTag}) — logged in (ready for per-number sms_to fetch)`;
+        }
+      } else {
+        statusDetail = webRes.new_sms > 0
+          ? `OK (${modeTag}) — pulled ${webRes.new_sms} new from ${webRes.rows_parsed} web row(s)`
+          : `Active (${modeTag}) — scanned ${webRes.rows_parsed} web row(s)`;
+      }
     } else if (conn.api_key) {
       const wnNumbers = getNumbersForWhitenoiseConnection(conn);
       const nowMs = Date.now();
@@ -13470,9 +13651,17 @@ app.post('/api/whitenoise-connections/:id/test-connection', async (req, res) => 
 
   if (hasWebCreds) {
     try {
-      const webRes = await pollWhitenoiseWebFeed(conn, { ingest: false, windowMinutes: 60 });
+      const wnNums = getNumbersForWhitenoiseConnection(conn);
+      const samplePhone = req.body?.phone || (wnNums[0] && wnNums[0].number) || '';
+      const webRes = await pollWhitenoiseWebFeed(conn, {
+        ingest: false,
+        windowMinutes: 1440,
+        filterPhone: samplePhone || undefined,
+        bypassCooldown: true
+      });
       webOk = true;
-      checks.push({ channel: 'web_panel', ok: true, detail: `Connected to ${normalizeWhitenoiseWebBaseUrl(conn.web_url)}/sms — parsed ${webRes.rows_parsed} recent SMS row(s).` });
+      const phoneLabel = samplePhone ? ` for ${formatWhitenoisePhone(samplePhone)}` : '';
+      checks.push({ channel: 'web_panel', ok: true, detail: `Connected to ${normalizeWhitenoiseWebBaseUrl(conn.web_url)}/sms${phoneLabel} — parsed ${webRes.rows_parsed} SMS row(s).` });
     } catch (err) {
       checks.push({ channel: 'web_panel', ok: false, detail: err.message });
     }
@@ -13572,9 +13761,15 @@ app.post('/api/whitenoise-connections/:id/test-number', async (req, res) => {
     }
   }
 
-  // Fallback or primary Web Panel Feed test for web_login / hybrid
+  // Fallback or primary Web Panel Feed test for web_login / hybrid (uses live ?sms_to=%2B...&dup=2)
   try {
-    const webRes = await pollWhitenoiseWebFeed(conn, { ingest: shouldIngest, filterPhone: phone, windowMinutes: 120 });
+    const webRes = await pollWhitenoiseWebFeed(conn, {
+      ingest: shouldIngest,
+      filterPhone: phone,
+      windowMinutes: 1440,
+      bypassCooldown: true,
+      onDemand: true
+    });
     const matched = (webRes.rows || []).filter(r => phoneDigitsVariantsMatch(r.dst, phone));
     return res.json({
       success: true,
@@ -15072,10 +15267,40 @@ app.post('/api/cdr2/sync', requireAuth, async (req, res) => {
     let conversions = 0;
 
     if (hybridWebConn && !apiConn) {
-      const webRes = await pollWhitenoiseWebFeed(hybridWebConn, isTargetedFetch ? { filterPhone: rawNumInput } : {});
-      new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
-      conversions += Number(webRes?.conversions || 0);
-      checked += Number(webRes?.rows_parsed || 0);
+      if (isTargetedFetch) {
+        const webRes = await pollWhitenoiseWebFeed(hybridWebConn, {
+          filterPhone: rawNumInput,
+          bypassCooldown: false,
+          cacheTtlMs: 8000,
+          onDemand: true
+        });
+        new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
+        conversions += Number(webRes?.conversions || 0);
+        if (webRes?.cooldown_active) skipped_cooldown++;
+        else checked += 1;
+      } else {
+        const globalRes = await pollWhitenoiseWebFeed(hybridWebConn, { bypassCooldown: false });
+        if ((globalRes?.rows_parsed || 0) > 0) {
+          new_sms += Number(globalRes?.new_sms || 0);
+          checked += Number(globalRes?.rows_parsed || 0);
+        } else if (batch.length > 0) {
+          const webBatch = batch.slice(0, 25);
+          const results = await runWithConcurrency(webBatch, Math.min(4, hybridWebConn.concurrency || 4), async (n) =>
+            pollWhitenoiseWebFeed(hybridWebConn, {
+              filterPhone: n.number,
+              bypassCooldown: false,
+              cacheTtlMs: 12000,
+              onDemand: true
+            })
+          );
+          for (const r of results) {
+            if (!r || r.error) continue;
+            if (r.cooldown_active || r.cached) skipped_cooldown++;
+            else checked++;
+            if (r.new_sms) new_sms += Number(r.new_sms) || 0;
+          }
+        }
+      }
     } else if (apiConn) {
       if (hybridWebConn && !isTargetedFetch) {
         const webRes = await pollWhitenoiseWebFeed(hybridWebConn).catch(() => ({ new_sms: 0, conversions: 0 }));
@@ -15171,12 +15396,20 @@ app.post('/api/numbers/:id/whitenoise-fetch', requireAuth, async (req, res) => {
       }
     }
 
-    const webRes = await pollWhitenoiseWebFeed(conn, { ingest: true, filterPhone: n.number, windowMinutes: 120 });
+    const webRes = await pollWhitenoiseWebFeed(conn, {
+      ingest: true,
+      filterPhone: n.number,
+      windowMinutes: 1440,
+      bypassCooldown: false,
+      cacheTtlMs: 8000,
+      onDemand: true
+    });
     const matched = (webRes.rows || []).filter(r => phoneDigitsVariantsMatch(r.dst, n.number));
     res.json({
       success: true,
       number: n.number,
       checked: true,
+      cached: Boolean(webRes.cached),
       new_sms: webRes.new_sms || 0,
       fetched_count: matched.length,
       latest_sms: matched

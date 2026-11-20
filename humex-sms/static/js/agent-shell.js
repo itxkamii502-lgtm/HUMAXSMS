@@ -15,27 +15,27 @@ const ZY_AGENT_MENU = [
   { t: null, c: '#16a34a', items: [
       ['Live Chat', 'live-chat', 'fa-comments'],
   ] },
-  { t: "NUMBERS & INVENTORY", c: '#e8a33d', items: [
+  { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#d97706', items: [
       ['My Numbers', 'my-sms-numbers', 'fa-mobile-screen'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
       ['Client Rate Set', 'client-rate-set', 'fa-tags'],
       ['Bulk Allocation', 'bulk-add', 'fa-cloud-arrow-up'],
   ] },
-  { t: "SMS & ANALYTICS", c: '#2f7fc4', items: [
+  { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#2563eb', items: [
       ['CDR & Statistics', 'detailed-sms', 'fa-comment-sms'],
       ['CDR 2 (Monthly)', 'cdr2', 'fa-tower-cell'],
   ] },
-  { t: "USERS & NOTIFICATIONS", c: '#4caf50', items: [
+  { t: "USERS & NOTIFICATIONS", i: 'fa-users', c: '#16a34a', items: [
       ['Clients', 'my-clients', 'fa-users'],
       ['Notifications', 'notifications', 'fa-bell'],
   ] },
-  { t: "PAYMENTS", c: '#10b981', items: [
+  { t: "PAYMENTS", i: 'fa-wallet', c: '#059669', items: [
       ['My Payment Requests', 'payment-requests', 'fa-hand-holding-dollar'],
-      ['Client Payment Requests', 'client-payment-requests', 'fa-hand-holding-dollar'],
+      ['Client Payment Requests', 'client-payment-requests', 'fa-money-bill-transfer'],
       ['Credit Notes', 'credit-notes', 'fa-receipt'],
       ['Statements', 'usd-statements', 'fa-file-invoice-dollar'],
   ] },
-  { t: "CLIENT REQUESTS", c: '#0ea5e9', items: [
+  { t: "CLIENT REQUESTS", i: 'fa-inbox', c: '#0284c7', items: [
       ['Client Number Requests', 'client-requests', 'fa-sim-card'],
   ] },
   { t: null, c: '#0284c7', items: [
@@ -70,7 +70,6 @@ const ZY_LABELS = {
   'my-profile': 'My Profile',
   'profile-security': 'My Profile',
   '2fa': 'My Profile',
-  'api-tokens': 'My Profile',
   'audit-logs': 'My Profile'
 };
 window.ZY_LABELS = ZY_LABELS;
@@ -89,7 +88,6 @@ const AGENT_ROUTE_PARENT = {
   'profile': 'my-profile',
   'profile-security': 'my-profile',
   '2fa': 'my-profile',
-  'api-tokens': 'my-profile',
   'audit-logs': 'my-profile'
 };
 window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
@@ -113,21 +111,23 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
           `<div class="zy-snav nav-item" id="nav-${page}" data-page="${page}" role="link" tabindex="0"
                 onclick="loadPage('${page}')"
                 onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">
-             <span class="zy-ic"><i class="fas ${icon}" style="color:${g.c}"></i></span><span>${label}</span>
-             <i class="fas fa-chevron-right zy-caret" style="opacity:0.65;font-size:10px;"></i>
+             <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${icon}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${label}</span>
+             <i class="fas fa-chevron-right zy-caret zy-caret-sm"></i>
            </div>`
         ).join('');
       }
-      const subItems = g.items.map(([label, page]) =>
+      const subItems = g.items.map(([label, page, icon]) =>
         `<div class="zy-ssub-item" id="nav-${page}" data-page="${page}" role="link" tabindex="0"
               ${page === 'cdr2' ? 'style="display:none;"' : ''}
               onclick="loadPage('${page}')"
-              onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">${label}</div>`
+              onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">
+           <i class="fas ${icon || 'fa-circle-dot'} zy-sub-ic" aria-hidden="true"></i><span class="zy-sub-txt">${label}</span>
+         </div>`
       ).join('');
       return `<div class="zy-snav" id="grp-agt-${gi}" role="button" tabindex="0" aria-expanded="false" aria-controls="sb-${gi}"
                    onclick="zyToggleGroup('sb-${gi}', this)"
                    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();zyToggleGroup('sb-${gi}', this);}">
-                <span class="zy-ic"><i class="fas fa-folder" style="color:${g.c}"></i></span><span>${g.t}</span>
+                <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${g.i || 'fa-layer-group'}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${g.t}</span>
                 <i class="fas fa-chevron-down zy-caret"></i>
               </div>
               <div class="zy-ssub" id="sb-${gi}" role="region">${subItems}</div>`;
@@ -282,12 +282,6 @@ pgDashboard = async function () {
             ${pendingPart}
             ${targetPart ? `<span style="color:var(--sp-border);">|</span>${targetPart}` : ''}
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            ${hasDashTarget ? `<button type="button" class="btn btn-outline btn-xs" onclick="loadPage('client-payment-requests')"><i class="fas fa-hand-holding-dollar"></i> Client Payouts</button>` : ''}
-            <button type="button" class="btn btn-primary btn-xs" onclick="loadPage('client-rate-set')">
-              <i class="fas fa-sliders"></i> Client Rate Set
-            </button>
-          </div>
         </div>`;
     }
 
@@ -314,14 +308,7 @@ pgDashboard = async function () {
           { label: 'Profit Today', value: fmtM(profitToday, '$'), sub: 'Net agent commission today', icon: 'fa-sack-dollar', page: 'payment-requests' },
           { label: 'Profit Week', value: fmtM(profitWeek, '$'), sub: 'Current week (Mon–Sun)', icon: 'fa-chart-line', page: 'payment-requests' }
         ],
-        shortcuts: [
-          { label: 'Client Rate Set', icon: 'fa-tags', page: 'client-rate-set' },
-          { label: 'Client Payouts', icon: 'fa-hand-holding-dollar', page: 'client-payment-requests' },
-          { label: 'Rate Card', icon: 'fa-table-list', page: 'sms-ranges' },
-          { label: 'My Clients', icon: 'fa-users', page: 'my-clients' },
-          { label: 'SMS Reports', icon: 'fa-chart-column', page: 'detailed-sms' },
-          { label: 'My Numbers', icon: 'fa-mobile-screen', page: 'my-sms-numbers' }
-        ],
+        shortcuts: [],
         volumes: [
           { label: 'Today SMS', value: todaySmsVal, page: 'detailed-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'detailed-sms' },

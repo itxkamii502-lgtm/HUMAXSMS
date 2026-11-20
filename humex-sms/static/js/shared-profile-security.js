@@ -1,13 +1,12 @@
 /* ═══════════════════════════════════════════════════════════════════
-   HUMEX SMS — Self-Service Profile, Theme, Security & API Engine
+   HUMEX SMS — Self-Service Profile, Theme & Security Engine
    Shared across Owner, Agent & Client portals:
    1. Personal Details (Full name, Email, Phone/WhatsApp, Teams/Telegram)
    2. Account Login & Status (Username, Role, Status)
    3. Appearance & Theme Mode (Light / Dark / System sync)
    4. Change Password (Current, New, Confirm + min 8 char validation)
    5. Two-Factor Authentication (QR Code, Secret, Backup Recovery Codes)
-   6. REST API Integration & Scoped Tokens (Owner/Agent scoped, Client info)
-   7. Account Audit Log (Role-scoped security & profile activity)
+   6. Account Audit Log (Role-scoped security & profile activity)
    ═══════════════════════════════════════════════════════════════════ */
 
 (function (window) {
@@ -137,9 +136,6 @@
       <div class="zy-pro-tabs">
         <button type="button" id="tab-btn-details" class="zy-pro-tab active" onclick="window.HumexProfile.switchTab('details')">
           <i class="far fa-user"></i> My Profile
-        </button>
-        <button type="button" id="tab-btn-api" class="zy-pro-tab" onclick="window.HumexProfile.switchTab('api')">
-          <i class="fas fa-key"></i> REST API
         </button>
         <button type="button" id="tab-btn-audit" class="zy-pro-tab" onclick="window.HumexProfile.switchTab('audit')">
           <i class="far fa-file-lines"></i> Audit Log
@@ -411,32 +407,7 @@
 
       </div>
 
-      <!-- TAB 2: REST API -->
-      <div id="pro-tab-api" class="zy-pro-shell" style="display:none;">
-        <div class="zy-pro-card">
-          <div class="zy-pro-card-head">
-            <div>
-              <div class="zy-pro-card-title">REST API INTEGRATION</div>
-              <div class="zy-pro-card-sub">Live REST API endpoints and scoped bearer tokens for automated SMS &amp; CDR retrieval</div>
-            </div>
-          </div>
-
-          <div class="zy-pro-field">
-            <label class="zy-pro-label" for="pro-api-endpoint-val">SMS Logs Endpoint (GET)</label>
-            <div style="display:flex; gap:8px;">
-              <input type="text" id="pro-api-endpoint-val" class="zy-pro-input is-mono" readonly value="${escapeHtml(window.location.origin)}/api/sms" style="flex:1;">
-              <button type="button" class="zy-pro-btn zy-pro-btn-outline" onclick="window.HumexProfile.copyText(document.getElementById('pro-api-endpoint-val').value, 'Endpoint copied!')">Copy</button>
-            </div>
-            <div class="zy-pro-hint">Authenticate requests with header <code>X-API-Token: &lt;token&gt;</code> or <code>Authorization: Bearer &lt;token&gt;</code>. Query stats via <code>/crapi/viewstats</code>.</div>
-          </div>
-
-          <div id="pro-api-tokens-wrap">
-            <div class="zy-pro-empty">Loading API tokens...</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB 3: AUDIT LOG -->
+      <!-- TAB 2: AUDIT LOG -->
       <div id="pro-tab-audit" class="zy-pro-shell" style="display:none;">
         <div class="zy-pro-card">
           <div class="zy-pro-card-head">
@@ -546,26 +517,19 @@
 
   function switchProfileTab(tabName) {
     const details = document.getElementById('pro-tab-details');
-    const api = document.getElementById('pro-tab-api');
     const audit = document.getElementById('pro-tab-audit');
     const btnDetails = document.getElementById('tab-btn-details');
-    const btnApi = document.getElementById('tab-btn-api');
     const btnAudit = document.getElementById('tab-btn-audit');
 
-    const isApi = tabName === 'api' || tabName === 'api-tokens';
     const isAudit = tabName === 'audit' || tabName === 'audit-logs';
 
-    if (details) details.style.display = (!isApi && !isAudit) ? 'flex' : 'none';
-    if (api) api.style.display = isApi ? 'flex' : 'none';
+    if (details) details.style.display = !isAudit ? 'flex' : 'none';
     if (audit) audit.style.display = isAudit ? 'flex' : 'none';
 
-    if (btnDetails) btnDetails.classList.toggle('active', !isApi && !isAudit);
-    if (btnApi) btnApi.classList.toggle('active', isApi);
+    if (btnDetails) btnDetails.classList.toggle('active', !isAudit);
     if (btnAudit) btnAudit.classList.toggle('active', isAudit);
 
-    if (isApi) {
-      loadApiTokens();
-    } else if (isAudit) {
+    if (isAudit) {
       loadAuditLogs();
     } else if (tabName === 'security' || tabName === 'password' || tabName === 'profile-security' || tabName === '2fa') {
       const targetId = tabName === '2fa' ? 'pro-2fa-card' : 'pro-pwd-card';
@@ -577,150 +541,6 @@
           setTimeout(() => el.classList.remove('is-highlighted'), 1800);
         }
       }, 60);
-    }
-  }
-
-  async function loadApiTokens() {
-    const wrap = document.getElementById('pro-api-tokens-wrap');
-    if (!wrap) return;
-
-    const user = activeProfileUser || getCachedUser();
-    const roleLower = String(user.role || '').toLowerCase();
-    const isOwner = roleLower === 'owner' || roleLower === 'admin';
-    const isClient = roleLower === 'client';
-
-    if (isClient) {
-      wrap.innerHTML = `<div class="zy-pro-notice">
-        <i class="fas fa-circle-info" style="color:var(--brand-primary); margin-right:6px;"></i>
-        API bearer tokens are provisioned and managed by your Agent or Owner. Contact your Agent if you need automated CDR access credentials.
-      </div>`;
-      return;
-    }
-
-    try {
-      const res = await fetch('/api/tokens', { credentials: 'include' });
-      if (res.status === 403) {
-        wrap.innerHTML = `<div class="zy-pro-notice">
-          API tokens are issued and managed by your Agent or Owner via the <b>REST API Keys</b> screen.
-        </div>`;
-        return;
-      }
-      if (!res.ok) {
-        wrap.innerHTML = `<div class="zy-pro-notice" style="color:#ef4444;">Unable to load API tokens.</div>`;
-        return;
-      }
-      const tokens = await res.json();
-      const list = Array.isArray(tokens) ? tokens : (tokens.data || []);
-
-      let agents = [];
-      if (isOwner) {
-        const agRes = await fetch('/api/agents?limit=200', { credentials: 'include' });
-        const agData = agRes.ok ? await agRes.json() : { data: [] };
-        agents = Array.isArray(agData) ? agData : (agData.data || []);
-      }
-
-      wrap.innerHTML = `
-        <form onsubmit="window.HumexProfile.createApiToken(event)" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; align-items:center;">
-          <input type="text" id="pro-new-tok-name" class="zy-pro-input" placeholder="Token label (e.g. Production Pull)" required style="flex:1; min-width:180px;">
-          ${(isOwner && agents.length) ? `
-            <select id="pro-new-tok-agent" class="zy-pro-input" style="width:auto; min-width:170px;">
-              <option value="">All Chain (Owner)</option>
-              ${agents.map(a => `<option value="${Number(a.id)}">${escapeHtml(a.username)}</option>`).join('')}
-            </select>
-          ` : ''}
-          <button type="submit" class="zy-pro-btn zy-pro-btn-primary">
-            <i class="fas fa-plus"></i> Create Token
-          </button>
-        </form>
-        <div id="pro-created-token-box" class="zy-pro-backup-box" style="display:none; margin-top:0; margin-bottom:16px;">
-          <div style="font-size:12.5px; font-weight:700; color:#10b981; margin-bottom:8px;">Copy your new API token now — it will only be shown once:</div>
-          <div style="display:flex; gap:8px;">
-            <input type="text" id="pro-created-token-val" class="zy-pro-input is-mono" readonly style="flex:1;">
-            <button type="button" class="zy-pro-btn zy-pro-btn-outline" onclick="window.HumexProfile.copyText(document.getElementById('pro-created-token-val').value, 'Token copied!')">Copy</button>
-          </div>
-        </div>
-        ${list.length ? `
-          <div class="zy-pro-table-wrap">
-            <table class="zy-pro-table">
-              <thead>
-                <tr>
-                  <th>Label</th>
-                  <th>Scope</th>
-                  <th>Token Preview</th>
-                  <th>Calls</th>
-                  <th>Created</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${list.map(t => `
-                  <tr>
-                    <td style="font-weight:600;">${escapeHtml(t.name || 'API Key')}</td>
-                    <td>${escapeHtml(t.agent_username || (isOwner ? 'All Chain' : (user.username || 'Agent')))}</td>
-                    <td style="font-family:monospace;">${escapeHtml(t.token_masked || ('••••••••' + (t.token_hint || '')))}</td>
-                    <td style="font-variant-numeric:tabular-nums;">${Number(t.calls || 0)}</td>
-                    <td style="white-space:nowrap; font-variant-numeric:tabular-nums;">${escapeHtml((t.created || '').slice(0, 10) || '—')}</td>
-                    <td>
-                      <button type="button" class="zy-pro-btn-revoke" onclick="window.HumexProfile.revokeApiToken(${Number(t.id)})">Revoke</button>
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        ` : `<div class="zy-pro-empty">No API tokens created yet.</div>`}
-      `;
-    } catch (err) {
-      wrap.innerHTML = `<div class="zy-pro-notice" style="color:#ef4444;">Failed to load API tokens.</div>`;
-    }
-  }
-
-  async function createApiToken(e) {
-    if (e) e.preventDefault();
-    const name = document.getElementById('pro-new-tok-name')?.value.trim();
-    const agentSel = document.getElementById('pro-new-tok-agent');
-    const agent_id = agentSel && agentSel.value ? Number(agentSel.value) : null;
-    if (!name) return;
-    try {
-      const res = await fetch('/api/tokens', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, ...(agent_id ? { agent_id } : {}) })
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Failed to create API token.', 'error');
-        return;
-      }
-      await loadApiTokens();
-      if (data.token) {
-        const box = document.getElementById('pro-created-token-box');
-        const val = document.getElementById('pro-created-token-val');
-        if (val) val.value = data.token;
-        if (box) box.style.display = 'block';
-      }
-      showToast('API token created!', 'success');
-    } catch (err) {
-      showToast('Network error creating API token.', 'error');
-    }
-  }
-
-  async function revokeApiToken(id) {
-    try {
-      const res = await fetch(`/api/tokens/${Number(id)}`, {
-        method: 'DELETE',
-        credentials: 'include'
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        showToast(data.error || 'Failed to revoke token.', 'error');
-        return;
-      }
-      showToast('API token revoked.', 'info');
-      loadApiTokens();
-    } catch (err) {
-      showToast('Network error revoking API token.', 'error');
     }
   }
 
@@ -997,9 +817,6 @@
     setThemePreference,
     selectPortalTheme,
     loadAuditLogs,
-    loadApiTokens,
-    createApiToken,
-    revokeApiToken,
     copyText,
     copyBackupCodes,
     finish2FASetup,

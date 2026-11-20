@@ -37,9 +37,6 @@ const dir = makeFixture({
   sms_log: [
     { id: 601, number: '233500000005', user: 'client_one', client_id: 1, agent_id: 1, cli: 'WhatsApp', provider: 'Orange', range_name: 'Ghana', message: 'OTP 112233', profit: 0.01, timestamp: new Date().toISOString(), status: 'DELIVRD' },
     { id: 602, number: '233500000007', user: 'client_three', client_id: 3, agent_id: 2, cli: 'Telegram', provider: 'Orange', range_name: 'Ghana', message: 'OTP 998877', profit: 0.01, timestamp: new Date().toISOString(), status: 'DELIVRD' }
-  ],
-  api_tokens: [
-    { id: 801, name: 'ag2-token', token: 'ag2-secret-token-123', agent_id: 3, role: 'Agent', status: 'active', calls: 0 }
   ]
 });
 
@@ -152,13 +149,19 @@ try {
   const leakedServerSrc = typeof traversalProbe.data === 'string' && traversalProbe.data.includes('registerPaginatedCrud');
   check('Security: /api/reports/orphans restricted to Owner & static traversal blocked', orphanNonOwner.status === 403 && !leakedServerSrc);
 
-  // 11. /api/sms/viewstats enforces active API token & scopes by agent_id
-  const unauthViewStats = await srv.api('GET', '/api/sms/viewstats');
-  const ag2ViewStats = await srv.api('GET', '/api/sms/viewstats?token=ag2-secret-token-123');
-  const cookieOnlyDenied = await srv.api('GET', '/api/sms/viewstats', { cookie: ag2Login.cookie });
+  // 11. Removed outward REST API, SMPP & Webhook endpoints are inaccessible
+  const rmTokens = await srv.api('GET', '/api/tokens', { cookie: ownerLogin.cookie });
+  const rmViewStats = await srv.api('GET', '/api/sms/viewstats');
+  const rmCrApiOut = await srv.api('GET', '/crapi/viewstats');
+  const rmSmpp = await srv.api('GET', '/api/smpp/accounts', { cookie: ownerLogin.cookie });
+  const rmWebhook = await srv.api('GET', '/api/webhook/config', { cookie: ownerLogin.cookie });
   check(
-    'Security: /api/sms/viewstats requires API token and scopes agent_two data',
-    unauthViewStats.status === 401 && cookieOnlyDenied.status === 401 && ag2ViewStats.status === 200 && Array.isArray(ag2ViewStats.data?.data) && ag2ViewStats.data.data.length === 0
+    'Security: removed SMPP, Webhook & outward REST API endpoints return 401/404',
+    [401, 404].includes(rmTokens.status) &&
+    [401, 404].includes(rmViewStats.status) &&
+    [401, 404].includes(rmCrApiOut.status) &&
+    [401, 404].includes(rmSmpp.status) &&
+    [401, 404].includes(rmWebhook.status)
   );
 } finally {
   await srv.stop();

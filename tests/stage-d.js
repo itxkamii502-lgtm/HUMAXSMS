@@ -112,12 +112,12 @@ export async function stageD() {
     const req2Updated = reqsAfterReject.find(r => r.id === req2Id);
     check('D3 Rejected request records rejected status and reason', req2Updated && req2Updated.status === 'rejected' && req2Updated.rejected_reason === 'No inventory currently');
 
-    // ── D4: Webhooks & Notifications Pipeline ──
+    // ── D4: Removed Webhook Endpoints & Active Notifications Pipeline ──
     const webhookGet = await ow('GET', '/api/webhook/config');
-    check('D4 Webhook config read (/api/webhook/config)', webhookGet.status === 200);
+    check('D4 Removed webhook config returns 404 (/api/webhook/config)', webhookGet.status === 404);
 
     const webhookTest = await ow('POST', '/api/webhook/test', { test: true });
-    check('D4 Webhook test endpoint responds 200 (/api/webhook/test)', webhookTest.status === 200 && webhookTest.data.success === true);
+    check('D4 Removed webhook test returns 404 (/api/webhook/test)', webhookTest.status === 404);
 
     const notifs = await ag('GET', '/api/notifications');
     const agNotifList = Array.isArray(notifs.data) ? notifs.data : (notifs.data.data || []);

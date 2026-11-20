@@ -5,7 +5,7 @@ module.exports = {
       script: 'server.js',
       cwd: __dirname,
       exec_mode: 'fork',
-      instances: 1, // Single fork required for in-memory DB cache & SMPP TCP listener
+      instances: 1, // Single fork required for in-memory DB cache & WebSocket hub
       autorestart: true,
       watch: false,
       max_memory_restart: '1G',

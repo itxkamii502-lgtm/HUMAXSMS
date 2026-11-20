@@ -1,6 +1,6 @@
 # HUMEX SMS
 
-Production Node.js + Express + WebSocket + SMPP SMS Panel.
+Production Node.js + Express + WebSocket SMS Panel.
 
 ## Quick Start
 

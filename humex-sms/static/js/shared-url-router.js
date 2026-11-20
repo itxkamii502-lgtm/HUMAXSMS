@@ -27,17 +27,9 @@
       'sms-analytics': 'SMSAnalytics',
       'failed-sms': 'FailedSMS',
       'live-traffic': 'LiveTraffic',
-      'smpp-dashboard': 'SMPPDashboard',
-      'smpp-accounts': 'SMPPAccounts',
       'login-panels': 'LoginPanels',
       'cr-api-panels': 'CRAPIPanels',
-      'whitenoise-panels': 'WhitenoiseAPI',
-      'smpp-sessions': 'SMPPSessions',
-      'connected-clients': 'ConnectedClients',
-      'dlr-monitor': 'DLRMonitor',
-      'throughput-monitor': 'ThroughputMonitor',
-      'smpp-security': 'SMPPSecurity',
-      'connection-logs': 'ConnectionLogs',
+      'whitenoise-panels': 'WhitenoiseReports',
       'registration-requests': 'RegistrationRequests',
       'agent-requests': 'NumberRequests',
       'number-requests': 'AgentNumberRequests',
@@ -62,16 +54,6 @@
       'firewall-rates': 'FirewallRates',
       'business-reports': 'BusinessReports',
       'permissions': 'Permissions',
-      'http-overview': 'HTTPOverview',
-      'standard-webhook': 'StandardWebhook',
-      'custom-postback': 'CustomPostback',
-      'field-mapping': 'FieldMapping',
-      'test-endpoint': 'TestEndpoint',
-      'api-tokens': 'ApiTokens',
-      'api-playground': 'APIPlayground',
-      'live-test': 'LiveTest',
-      'webhook-config': 'WebhookConfig',
-      'documentation': 'Documentation',
       'services-cli': 'ServicesCLI',
       'cli-manager': 'CLIManager',
       'services-manager': 'ServicesManager',
@@ -85,7 +67,6 @@
       '2fa': 'TwoFactorAuth',
       'general-settings': 'GeneralSettings',
       'security-settings': 'SecuritySettings',
-      'smpp-settings': 'SMPPSettings',
       'system-health': 'SystemHealth'
     },
     agent: {
@@ -116,7 +97,6 @@
       'my-profile': 'Profile',
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
-      'api-tokens': 'ApiTokens',
       'audit-logs': 'AuditLogs'
     },
     client: {
@@ -137,7 +117,6 @@
       'profile': 'Profile',
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
-      'api-tokens': 'ApiTokens',
       'audit-logs': 'AuditLogs'
     }
   };

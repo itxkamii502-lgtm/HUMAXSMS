@@ -20,11 +20,6 @@ async function pgSmsRanges() {
           Agent-approved termination ranges priced in PKR. Request 25 or 50 numbers directly (1 request per range per UTC day).
         </div>
       </div>
-      <div class="page-actions" style="display:flex;gap:8px;">
-        <button class="btn btn-primary btn-sm" onclick="loadPage('my-numbers')">
-          <i class="fas fa-mobile-screen"></i> My Numbers
-        </button>
-      </div>
     </div>
     <div class="apx-card" style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
       <div class="apx-card-body" id="cl-ranges-table-host" style="padding:14px;"><div class="zy-loading">Loading termination ranges…</div></div>
@@ -823,7 +818,7 @@ async function pgMySmsLoad(page = 1) {
   }
 }
 
-/* ═══ CDR 2 (MONTHLY ROUTE — PERMISSION GATED · PKR · MONTHLY 30/5 {W}) ═══ */
+/* ═══ CDR 2 (MONTHLY ROUTE — EXCEL DAILY STATS · PKR · MONTHLY 30/5 {W}) ═══ */
 async function pgCdr2() {
   const c = document.getElementById('page-content');
   zyCrumb(['SMS & Analytics', 'CDR 2 (Monthly)']);
@@ -833,11 +828,11 @@ async function pgCdr2() {
     if (typeof window.zyRefreshWhitenoiseNav === 'function') window.zyRefreshWhitenoiseNav(me);
     if (!me || !me.whitenoise_access) {
       c.innerHTML = `
-        <div class="zy-panel" style="border:1.5px solid #e2e8f0;border-radius:10px;background:#fff;padding:42px 24px;text-align:center;">
-          <div style="width:54px;height:54px;border-radius:50%;background:#fef2f2;color:#ef4444;display:inline-flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:12px;">
+        <div class="zy-panel" style="border:1px solid #e2e8f0;border-radius:8px;background:#fff;padding:42px 24px;text-align:center;">
+          <div style="width:48px;height:48px;border-radius:50%;background:#fef2f2;color:#ef4444;display:inline-flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:12px;">
             <i class="fas fa-lock"></i>
           </div>
-          <h3 style="margin:0 0 6px;font-size:17px;font-weight:800;color:#0f172a;">CDR 2 Access Not Enabled</h3>
+          <h3 style="margin:0 0 6px;font-size:16px;font-weight:700;color:#0f172a;">CDR 2 Access Not Enabled</h3>
           <p style="max-width:460px;margin:0 auto;font-size:13px;color:#64748b;line-height:1.5;">
             CDR 2 (Monthly 30/5 {W}) access is not enabled for your account. Please ask your Agent to enable CDR 2 Access for you.
           </p>
@@ -846,16 +841,16 @@ async function pgCdr2() {
     }
   } catch (_) {}
 
-  const defaultFrom = typeof zyDefaultFromDateTime === 'function' ? zyDefaultFromDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 00:00:00`;
-  const defaultTo = typeof zyDefaultToDateTime === 'function' ? zyDefaultToDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 23:59:59`;
+  const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
+  const defaultFrom = `${today.slice(0, 7)}-01 00:00:00`;
+  const defaultTo = `${today} 23:59:59`;
 
   const groupChips = [
-    { id: 'hour', label: 'Hour', val: 'hour' },
     { id: 'date', label: 'Date', val: 'date' },
     { id: 'month', label: 'Month', val: 'month' },
     { id: 'range', label: 'Range', val: 'range' },
     { id: 'number', label: 'Number', val: 'number' },
-    { id: 'cli', label: 'CLI', val: 'cli' }
+    { id: 'cli', label: 'Service / CLI', val: 'cli' }
   ];
 
   const chipsHtml = groupChips.map(g => `
@@ -865,20 +860,20 @@ async function pgCdr2() {
     </label>`).join('');
 
   c.innerHTML = `
-    <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title"><i class="fas fa-tower-cell" style="color:#4f46e5;"></i> CDR 2 — Monthly Route</div>
-        <div class="page-subtitle">Your Monthly (30/5) {W} OTP &amp; SMS records in PKR · Fixed <b>Monthly (30/5) {W}</b> settlement schedule (5-day hold).</div>
+        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> CDR 2 — Monthly Route Stats</div>
+        <div class="page-subtitle">Monthly (30/5) {W} · PKR Earnings · Updated daily from official report · Historical dates preserved</div>
       </div>
       <div>
-        <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;padding:6px 12px;font-weight:700;"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W} · 5d Hold</span>
+        <button type="button" class="btn btn-outline btn-sm" onclick="zyClientExportCdr2Report()"><i class="fas fa-download"></i> Export CSV</button>
       </div>
     </div>
 
     <div class="zy-filter-grid" data-cdr-compact="1">
       <div class="zy-cdr-head-row">
-        <span><i class="fas fa-tower-cell" style="color:#4f46e5;margin-right:6px;"></i> Filters &amp; Live Number Sync</span>
-        <span id="cdr2-sync-status" style="font-size:11.5px;font-weight:600;color:#64748b;"></span>
+        <span><i class="fas fa-sliders" style="color:#2563eb;margin-right:6px;"></i> Daily Stats Filters</span>
+        <span id="cdr2-sync-status" style="font-size:12px;color:#64748b;">Daily company report · Monthly (30/5) {W}</span>
       </div>
       <div class="zy-filter-grid-fields">
         <div class="zy-filter-field">
@@ -895,50 +890,31 @@ async function pgCdr2() {
         </div>
       </div>
 
-      <div class="zy-groupby-card zy-cdr2-special-bar">
-        <div class="zy-groupby-title">
-          <i class="fas fa-phone-volume" style="font-size:11px;color:#4f46e5;"></i>
-          Special Number Sync :
-        </div>
-        <div class="zy-groupby-search-wrap">
-          <input type="text" id="cdr2-sync-number" class="zy-groupby-search-input"
-            placeholder="Your number with/without + or country code (e.g. +923001234567)"
-            autocomplete="off"
-            oninput="var b=document.getElementById('cdr2-sync-number-clear');if(b)b.style.display=this.value.trim()?'inline-flex':'none';"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();zyClientSyncCdr2Number();}">
-          <button type="button" id="cdr2-sync-number-clear" class="zy-groupby-search-clear" title="Clear number" aria-label="Clear number" style="display:none;" onclick="zyClearClientCdr2SyncNumber()">
-            <i class="fas fa-times"></i>
-          </button>
-        </div>
-        <button type="button" class="zy-btn-blue-solid" id="btn-sync-cdr2-number" onclick="zyClientSyncCdr2Number()">
-          <i class="fas fa-magnifying-glass"></i> Sync<span class="zy-hide-xs"> &amp; Search Number</span>
-        </button>
-      </div>
-
       <div class="zy-groupby-card">
         <div class="zy-groupby-title"><i class="fas fa-layer-group" style="font-size:11px;color:var(--sp-text-muted,#64748b);"></i> Group By :</div>
         <div class="zy-groupby-chips">${chipsHtml}</div>
         <div class="zy-groupby-search-wrap">
           <input type="text" id="cdr2-search" class="zy-groupby-search-input"
-            placeholder="Search Table (Date, Range, CLI, SMS, PKR)..."
+            placeholder="Search Date, Range, Number, Service, PKR..."
             autocomplete="off"
-            oninput="zyHandleCdrSearchInput(this, 'cdr2-search-clear', () => pgClientCdr2Load(1, false))"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();if(window._zyCdrSearchTimer){clearTimeout(window._zyCdrSearchTimer);}pgClientCdr2Load(1, false);}">
-          <button type="button" id="cdr2-search-clear" class="zy-groupby-search-clear" title="Clear search" aria-label="Clear search" style="display:none;" onclick="zyClearCdrSearch('cdr2-search', 'cdr2-search-clear', () => pgClientCdr2Load(1, false))">
+            oninput="zyHandleCdrSearchInput(this, 'cdr2-search-clear', () => pgClientCdr2Load(1))"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();if(window._zyCdrSearchTimer){clearTimeout(window._zyCdrSearchTimer);}pgClientCdr2Load(1);}">
+          <button type="button" id="cdr2-search-clear" class="zy-groupby-search-clear" title="Clear search" aria-label="Clear search" style="display:none;" onclick="zyClearCdrSearch('cdr2-search', 'cdr2-search-clear', () => pgClientCdr2Load(1))">
             <i class="fas fa-times"></i>
           </button>
         </div>
       </div>
 
       <div class="zy-table-toolbar zy-cdr-control-bar">
-        <div class="zy-cdr-actions-left">
-          <button type="button" class="zy-btn-blue-solid" id="btn-show-cdr2" onclick="zyClientShowCdr2Report()"><i class="fas fa-chart-column"></i> Show Report</button>
+        <div class="zy-cdr-actions-left" style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="zy-btn-blue-solid" id="btn-show-cdr2" onclick="pgClientCdr2Load(1)"><i class="fas fa-chart-column"></i> Show Report</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="zyResetClientCdr2Filters()"><i class="fas fa-rotate-left"></i> Reset</button>
         </div>
         <div class="zy-toolbar-right">
           <button type="button" class="zy-btn-pill zy-cols-btn" onclick="zyToggleColumnsModal('dt-cdr2', this)"><i class="fas fa-columns"></i> Columns</button>
           <div class="zy-toolbar-select-wrap">
             <label class="zy-toolbar-label" for="cdr2-limit">Show Records</label>
-            <select id="cdr2-limit" class="zy-toolbar-select" onchange="pgClientCdr2Load(1, false)">
+            <select id="cdr2-limit" class="zy-toolbar-select" onchange="pgClientCdr2Load(1)">
               <option value="10">10</option>
               <option value="25" selected>25</option>
               <option value="50">50</option>
@@ -952,7 +928,7 @@ async function pgCdr2() {
       </div>
 
       <div class="zy-panel-body" id="cdr2-body" style="padding:0;margin-top:12px;">
-        <div class="zy-loading" style="padding:40px;text-align:center;color:#64748b;">Loading CDR 2 records…</div>
+        <div class="zy-loading" style="padding:40px;text-align:center;color:#64748b;">Loading CDR 2 daily stats…</div>
       </div>
     </div>`;
 
@@ -964,65 +940,24 @@ async function pgCdr2() {
     rEl.innerHTML = `<option value="">All Monthly Ranges</option>` +
       ranges.map(r => `<option value="${r.range_id || r.id}">${zyEsc(r.range_name || r.name || r.country || '')}${r.prefix ? ` (${zyEsc(r.prefix)})` : ''}</option>`).join('');
   }
-  pgClientCdr2Load(1, false);
+  pgClientCdr2Load(1);
 }
 
-window.zyClientSyncCdr2Number = function() {
-  const inp = document.getElementById('cdr2-sync-number');
-  const raw = inp ? inp.value.trim() : '';
-  const digits = raw.replace(/\D/g, '');
-  if (digits.length < 6) {
-    if (typeof toast === 'function') toast('Please enter your assigned number (with or without country code or +) to sync.', 'warning');
-    const syncEl = document.getElementById('cdr2-sync-status');
-    if (syncEl) syncEl.innerHTML = `<span style="color:#d97706;"><i class="fas fa-exclamation-circle"></i> Enter your assigned phone number above to sync live OTP.</span>`;
-    if (inp) {
-      inp.focus();
-      inp.style.borderColor = '#ef4444';
-      setTimeout(() => { inp.style.borderColor = ''; }, 1800);
-    }
-    return;
-  }
-  pgClientCdr2Load(1, true);
-};
-
-window.zyClientShowCdr2Report = function() {
-  const raw = (document.getElementById('cdr2-sync-number')?.value || '').trim();
-  const digits = raw.replace(/\D/g, '');
-  if (digits.length >= 6) {
-    pgClientCdr2Load(1, true);
-  } else {
-    const syncEl = document.getElementById('cdr2-sync-status');
-    if (syncEl) syncEl.innerHTML = `<span style="color:#64748b;"><i class="fas fa-info-circle"></i> Showing synced records · Enter your number above to live-sync new OTPs.</span>`;
-    pgClientCdr2Load(1, false);
-  }
-};
-
-window.zyClearClientCdr2SyncNumber = function() {
-  const inp = document.getElementById('cdr2-sync-number');
-  if (inp) inp.value = '';
-  const clr = document.getElementById('cdr2-sync-number-clear');
-  if (clr) clr.style.display = 'none';
-  pgClientCdr2Load(1, false);
-};
-
 window.zyResetClientCdr2Filters = function() {
-  const f = document.getElementById('cdr2-from');
-  const t = document.getElementById('cdr2-to');
-  if (f && typeof zyDefaultFromDateTime === 'function') f.value = zyDefaultFromDateTime();
-  if (t && typeof zyDefaultToDateTime === 'function') t.value = zyDefaultToDateTime();
-  ['cdr2-range', 'cdr2-search', 'cdr2-sync-number'].forEach(id => {
+  const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
+  const f = document.getElementById('cdr2-from'); if (f) f.value = `${today.slice(0, 7)}-01 00:00:00`;
+  const t = document.getElementById('cdr2-to'); if (t) t.value = `${today} 23:59:59`;
+  ['cdr2-range', 'cdr2-search'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
   const clr = document.getElementById('cdr2-search-clear');
   if (clr) clr.style.display = 'none';
-  const clrNum = document.getElementById('cdr2-sync-number-clear');
-  if (clrNum) clrNum.style.display = 'none';
   document.querySelectorAll('.cdr2-grp-chk').forEach(cb => {
     cb.checked = false;
     cb.closest('.zy-chip-pill')?.classList.remove('active');
   });
-  pgClientCdr2Load(1, false);
+  pgClientCdr2Load(1);
 };
 
 window.zyClientExportCdr2Report = function() {
@@ -1033,13 +968,12 @@ window.zyClientExportCdr2Report = function() {
   if (val('cdr2-from')) p.set('date_from', val('cdr2-from'));
   if (val('cdr2-to')) p.set('date_to', val('cdr2-to'));
   if (val('cdr2-range')) p.set('range', val('cdr2-range'));
-  if (val('cdr2-sync-number').trim()) p.set('number', val('cdr2-sync-number').trim());
   if (val('cdr2-search').trim()) p.set('search', val('cdr2-search').trim());
   if (checkedBoxes.length) p.set('group_by', checkedBoxes.join(','));
   if (typeof zyDownloadFile === 'function') zyDownloadFile(`/api/cdr2/export?${p.toString()}`, 'cdr2_monthly.csv');
 };
 
-async function pgClientCdr2Load(page = 1, doSync = false) {
+async function pgClientCdr2Load(page = 1) {
   const targetPage = typeof page === 'number' ? page : 1;
   const body = document.getElementById('cdr2-body');
   if (!body) return;
@@ -1053,35 +987,9 @@ async function pgClientCdr2Load(page = 1, doSync = false) {
   const val = id => (document.getElementById(id) || {}).value || '';
   const from = val('cdr2-from'), to = val('cdr2-to');
   const rangeId = val('cdr2-range');
-  const syncNumber = val('cdr2-sync-number').trim();
   const search = val('cdr2-search').trim();
 
-  if (doSync) {
-    const syncEl = document.getElementById('cdr2-sync-status');
-    const syncDigits = syncNumber.replace(/\D/g, '');
-    if (syncDigits.length < 6) {
-      if (typeof toast === 'function') toast('Please enter your assigned number (with or without country code or +) to sync.', 'warning');
-      if (syncEl) syncEl.innerHTML = `<span style="color:#d97706;"><i class="fas fa-exclamation-circle"></i> Enter your assigned phone number above to sync live OTP.</span>`;
-      return;
-    }
-    if (syncEl) syncEl.innerHTML = `<i class="fas fa-spinner fa-spin" style="color:#4f46e5;"></i> Syncing number ${zyEsc(syncNumber)}…`;
-    try {
-      const sRes = await apiFetch('/api/cdr2/sync', {
-        method: 'POST',
-        body: JSON.stringify({ range: rangeId, number: syncNumber })
-      });
-      if (syncEl && sRes) {
-        const mNote = Array.isArray(sRes.matched_numbers) && sRes.matched_numbers.length === 1 ? ` (${zyEsc(sRes.matched_numbers[0])})` : '';
-        syncEl.innerHTML = `<span style="color:#059669;"><i class="fas fa-check-circle"></i> Checked ${Number(sRes.checked || 0)}${mNote} · ${Number(sRes.new_sms || 0)} new SMS</span>`;
-      }
-    } catch (e) {
-      const errMsg = e?.message || 'Live sync skipped';
-      if (syncEl) syncEl.innerHTML = `<span style="color:#dc2626;"><i class="fas fa-exclamation-triangle"></i> ${zyEsc(errMsg)}</span>`;
-      if (typeof toast === 'function') toast(errMsg, 'error');
-    }
-  }
-
-  body.innerHTML = `<div class="zy-loading" style="padding:40px;text-align:center;color:#64748b;"><i class="fas fa-spinner fa-spin fa-2x" style="color:#4f46e5;"></i><div style="margin-top:8px;">Loading CDR 2 records…</div></div>`;
+  body.innerHTML = `<div class="zy-loading" style="padding:36px;text-align:center;color:#64748b;"><i class="fas fa-spinner fa-spin fa-lg" style="color:#2563eb;"></i><div style="margin-top:8px;">Loading CDR 2 daily stats…</div></div>`;
 
   const checkedBoxes = Array.from(document.querySelectorAll('.cdr2-grp-chk:checked')).map(cb => cb.value);
   const params = new URLSearchParams();
@@ -1089,7 +997,6 @@ async function pgClientCdr2Load(page = 1, doSync = false) {
   if (from) params.append('date_from', from);
   if (to) params.append('date_to', to);
   if (rangeId) params.append('range', rangeId);
-  if (syncNumber) params.append('number', syncNumber);
   if (search) params.append('search', search);
   if (checkedBoxes.length) params.append('group_by', checkedBoxes.join(','));
   const limitVal = val('cdr2-limit') || '25';
@@ -1106,12 +1013,27 @@ async function pgClientCdr2Load(page = 1, doSync = false) {
     const sum = logs.summary || {};
     const fx = Number(sum.usd_to_pkr_rate || window._zyClientFx || 280);
 
+    if (!data.length) {
+      body.innerHTML = `
+        <div style="padding:40px 24px;text-align:center;border:1px solid #e2e8f0;border-radius:8px;background:#fff;">
+          <i class="fas fa-chart-column" style="font-size:26px;color:#94a3b8;margin-bottom:8px;"></i>
+          <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:4px;">No Daily Stats Yet for Selected Dates</div>
+          <div style="font-size:13px;color:#64748b;">Your Monthly Route (CDR 2) SMS counts &amp; PKR earnings update daily after the company report is uploaded.</div>
+        </div>`;
+      return;
+    }
+
     if (logs && logs.grouped && checkedBoxes.length) {
-      const keyLabels = { hour: 'Hour', date: 'Date', month: 'Month', range: 'Range', number: 'Number', cli: 'CLI' };
-      const cols = [...checkedBoxes.map(k => keyLabels[k] || k), 'SMS Count', 'Payterm', 'Currency', 'My Payout (PKR)'];
+      const keyLabels = { date: 'Date', month: 'Month', range: 'Range', number: 'Number', cli: 'Service / CLI' };
+      const cols = [...checkedBoxes.map(k => keyLabels[k] || k), 'SMS Count', 'Cycle', 'My Earnings (PKR)'];
       const rows = data.map(g => {
         const gPkr = g.client_payout_pkr != null ? Number(g.client_payout_pkr) : (Number(g.client_payout || g.payout || 0) * fx);
-        return [...checkedBoxes.map(k => g[k] || '—'), g.sms_count || 0, 'Monthly (30/5) {W}', 'PKR', `Rs. ${zyFmtMoney(gPkr, 4)}`];
+        return [
+          ...checkedBoxes.map(k => g[k] || '—'),
+          { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
+          'Monthly (30/5) {W}',
+          { v: gPkr, h: `<span class="monospace" style="color:#059669;font-weight:700;">Rs. ${zyFmtMoney(gPkr, 2)}</span>` }
+        ];
       });
       const totalGroups = logs.total != null ? logs.total : (sum.total_groups != null ? sum.total_groups : data.length);
       const totalSms = sum.total_sms != null ? sum.total_sms : data.reduce((s, g) => s + (g.sms_count || 0), 0);
@@ -1128,45 +1050,42 @@ async function pgClientCdr2Load(page = 1, doSync = false) {
         totalRecords: logs.total != null ? logs.total : data.length,
         totalPages: logs.total_pages || 1,
         page: logs.page || targetPage,
-        onPageChange: (p) => pgClientCdr2Load(p, false),
+        onPageChange: (p) => pgClientCdr2Load(p),
         onSizeChange: (s) => {
           const sel = document.getElementById('cdr2-limit');
           if (sel) sel.value = String(s);
-          pgClientCdr2Load(1, false);
+          pgClientCdr2Load(1);
         },
         footRow: `<td><b>Total Groups: ${Number(totalGroups).toLocaleString()}</b></td>` + '<td></td>'.repeat(Math.max(0, checkedBoxes.length - 1)) +
-          `<td><b>${totalSms.toLocaleString()}</b></td><td><b>Monthly (30/5) {W}</b></td><td><b>PKR</b></td><td><b>Rs. ${zyFmtMoney(totalPkr, 4)}</b></td>`
+          `<td class="monospace"><b>${totalSms.toLocaleString()}</b></td><td><b>Monthly (30/5) {W}</b></td><td class="monospace" style="color:#059669;"><b>Rs. ${zyFmtMoney(totalPkr, 2)}</b></td>`
       });
       zy2Render('dt-cdr2');
     } else {
-      const cols = ['Date', 'Provider', 'Range', 'Payterm', 'Number', 'CLI', 'SMS', 'Currency', 'My Payout (PKR)', 'Cause'];
+      const cols = ['Date', 'Range', 'Number', 'Service / CLI', 'SMS Count', 'Rate (PKR)', 'My Earnings (PKR)', 'Cycle'];
       const rows = data.map(s => {
-        const dtCell = typeof zyFormatDateTimeStacked === 'function'
-          ? zyFormatDateTimeStacked(s.timestamp || s.date)
-          : { v: (s.timestamp || s.date || '').replace('T', ' ').slice(0, 19), h: (s.timestamp || s.date || '').replace('T', ' ').slice(0, 19) };
+        const dStr = s.date_ymd || String(s.date || s.timestamp || '').replace('T', ' ').slice(0, 10);
+        const smsCnt = Number(s.sms_count) > 0 ? Math.round(Number(s.sms_count)) : 1;
         const myPkr = s.client_amount_pkr != null
           ? Number(s.client_amount_pkr)
           : (s.my_payout_pkr != null ? Number(s.my_payout_pkr) : ((parseFloat(s.client_payout ?? s.client_rate ?? 0) || 0) * (Number(s.fx_usd_to_pkr) || fx)));
-        const maskedCli = typeof zyMaskCli === 'function' ? zyMaskCli(s.cli || s.app || '—') : (s.cli || s.app || '—');
-        const smsCellHtml = typeof zyRenderSmsCell === 'function' ? zyRenderSmsCell(s.message || '') : `<div class="zy-sms-cell">${zyEsc(s.message || '')}</div>`;
+        const unitPkr = Number(s.unit_client_rate_pkr != null ? s.unit_client_rate_pkr : (smsCnt > 0 ? myPkr / smsCnt : 0));
+        const maskedCli = typeof zyMaskCli === 'function' ? zyMaskCli(s.cli || s.service || s.app || 'General') : (s.cli || s.service || s.app || 'General');
         const numStr = String(s.number || '').trim();
-        const causeVal = s.cause || (s.status === 'delivered' || s.status === 'success' ? 'Success' : (s.status || '—'));
+        const clearLabel = s.clears_at ? `Clears ${String(s.clears_at).slice(0, 10)}` : 'Monthly (30/5) {W}';
 
         return [
-          dtCell,
-          zyEsc(s.provider || 'Carrier 2'),
+          { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
           zyEsc(s.range_name || s.range_label || s.range || s.country || '—'),
-          { v: 'Monthly (30/5) {W}', h: `<span class="zy-payterm-badge zy-pt-monthly" style="font-size:10px;"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>` },
           { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
-          { v: s.cli || '—', h: `<span class="monospace">${zyEsc(maskedCli)}</span>` },
-          { v: s.message || '', h: smsCellHtml },
-          'PKR',
-          { v: myPkr, h: `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(myPkr, 4)}</span>` },
-          zyEsc(causeVal)
+          { v: maskedCli, h: `<span class="monospace">${zyEsc(maskedCli)}</span>` },
+          { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },
+          { v: unitPkr, h: `<span class="monospace" style="color:#64748b;">Rs. ${zyFmtMoney(unitPkr, 2)}</span>` },
+          { v: myPkr, h: `<span class="monospace" style="color:#059669;font-weight:700;">Rs. ${zyFmtMoney(myPkr, 2)}</span>` },
+          `<span style="font-size:11.5px;color:#4338ca;font-weight:600;">${zyEsc(clearLabel)}</span>`
         ];
       });
 
-      const totalSms = sum.total_sms != null ? sum.total_sms : (logs.total != null ? logs.total : rows.length);
+      const totalSms = sum.total_sms != null ? sum.total_sms : data.reduce((a, s) => a + (Number(s.sms_count) || 1), 0);
       const totalPkr = sum.client_payout_pkr != null ? Number(sum.client_payout_pkr) : data.reduce((a, s) => a + (Number(s.client_amount_pkr ?? ((parseFloat(s.client_payout ?? s.client_rate ?? 0) || 0) * (Number(s.fx_usd_to_pkr) || fx))) || 0), 0);
 
       body.innerHTML = zyDT2('dt-cdr2', {
@@ -1174,15 +1093,16 @@ async function pgClientCdr2Load(page = 1, doSync = false) {
         totalRecords: logs.total != null ? logs.total : data.length,
         totalPages: logs.total_pages || 1,
         page: logs.page || targetPage,
-        onPageChange: (p) => pgClientCdr2Load(p, false),
+        onPageChange: (p) => pgClientCdr2Load(p),
         onSizeChange: (s) => {
           const sel = document.getElementById('cdr2-limit');
           if (sel) sel.value = String(s);
-          pgClientCdr2Load(1, false);
+          pgClientCdr2Load(1);
         },
-        footRow: `<td><b>Total SMS<br>${totalSms.toLocaleString()}</b></td>` + '<td></td>'.repeat(6) +
-          `<td><span class="badge" style="background:var(--sp-bg-subtle);">PKR</span></td>` +
-          `<td><b>My Payout (PKR)<br>Rs. ${zyFmtMoney(totalPkr, 4)}</b></td><td></td>`
+        footRow: `<td><b>Rows: ${Number(logs.total || data.length).toLocaleString()}</b></td>` + '<td></td>'.repeat(3) +
+          `<td class="monospace"><b>${totalSms.toLocaleString()}</b></td><td></td>` +
+          `<td class="monospace" style="color:#059669;"><b>Rs. ${zyFmtMoney(totalPkr, 2)}</b></td>` +
+          `<td><b>Monthly (30/5) {W}</b></td>`
       });
       zy2Render('dt-cdr2');
     }
@@ -1571,7 +1491,6 @@ window.zyClientWipeNotifications = async function() {
     'profile': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'details'); },
     'profile-security': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'security'); },
     '2fa': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', '2fa'); },
-    'api-tokens': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'api'); },
     'audit-logs': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'audit'); }
   };
   const prev = loadPage;

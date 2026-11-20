@@ -42,7 +42,6 @@ async function renderLoginPanels() {
         </button>
       </div>
     </div>
-    ${typeof renderOwnerHubTabs === 'function' ? renderOwnerHubTabs('providers', 'login-panels') : ''}
 
     <div class="card" style="margin-bottom:16px;background:rgba(76,110,245,0.08);border-color:rgba(76,110,245,0.2);">
       <div style="display:flex;align-items:flex-start;gap:10px;font-size:12px;color:var(--text-secondary);">

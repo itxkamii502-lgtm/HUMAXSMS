@@ -8,15 +8,14 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
-import net from 'net';
 import multer from 'multer';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const AdmZip = require('adm-zip');
+const XLSX = require('xlsx');
 const QRCode = require('qrcode');
 const bcrypt = require('bcryptjs');
-const smpp = require('smpp');
 
 const execFileAsync = promisify(execFile);
 
@@ -274,6 +273,9 @@ function readDb(name) {
     }
     DB_CACHE.set(name, data);
     DB_MTIME.set(name, stat.mtimeMs);
+    if (name === 'numbers' && Array.isArray(data) && !NUMBER_OWNERSHIP_SNAPSHOT_READY) {
+      refreshNumberOwnershipSnapshot(data);
+    }
     return data;
   } catch (err) {
     console.error(`Error reading ${name}.json:`, err);
@@ -305,6 +307,9 @@ function writeDb(name, data) {
       // everything in the journal is now inside sms_log.json
       try { fs.writeFileSync(SMS_JOURNAL, ''); } catch (e) { /* ignore */ }
       const t = debounceTimers.get('sms_log'); if (t) { clearTimeout(t); debounceTimers.delete('sms_log'); }
+    }
+    if (name === 'numbers' && Array.isArray(data) && !SUPPRESS_OWNERSHIP_LEDGER_HOOK) {
+      try { syncNumberOwnershipLedgerOnWrite(data); } catch (e) { console.error('[OWNERSHIP_LEDGER] hook error:', e.message); }
     }
     return true;
   } catch (err) {
@@ -516,20 +521,6 @@ function liveTrafficStats() {
   }
   return { mps: Math.round(last10 / 10 * 10) / 10, per_minute: recentSmsTs.length, success_rate: CACHED_SAMPLE_RATE, dlr: CACHED_SAMPLE_RATE };
 }
-function newSecretToken(prefix = 'tok_') { return prefix + crypto.randomBytes(24).toString('hex'); }
-function sha256Hex(v) { return crypto.createHash('sha256').update(String(v)).digest('hex'); }
-function findTokenRecord(tokens, raw) {
-  if (!raw || !Array.isArray(tokens)) return null;
-  const h = sha256Hex(raw);
-  return tokens.find(t => t && ((t.token_hash && t.token_hash === h) || (t.token && t.token === raw))) || null;
-}
-function publicTokenView(t) { const { token, token_hash, ...rest } = t; return { ...rest, token_hint: t.token_hint || (token ? String(token).slice(-4) : '') }; }
-function migrateTokensToHashed() {
-  const tokens = readDb('api_tokens'); if (!Array.isArray(tokens)) return;
-  let changed = false;
-  for (const t of tokens) { if (t && t.token && !t.token_hash) { t.token_hash = sha256Hex(t.token); t.token_hint = String(t.token).slice(-4); delete t.token; changed = true; } }
-  if (changed) writeDb('api_tokens', tokens);
-}
 
 
 function logAudit(actor, action, details, module = 'General') {
@@ -630,12 +621,6 @@ function bootstrapFreshDataDir() {
         theme_mode: 'light',
         font_family: 'roboto',
         logo_url: '/static/img/humex-sms-logo.png',
-        smpp_enabled: process.env.SMPP_ENABLED !== 'false',
-        smpp_host: process.env.SMPP_HOST || '0.0.0.0',
-        smpp_port: Number(process.env.SMPP_PORT) || 2775,
-        smpp_max_connections: 100,
-        smpp_max_mps: 500,
-        smpp_global_max_mps: 5000,
         two_fa_enabled: true,
         max_sessions: 3,
         session_timeout: 60
@@ -656,7 +641,6 @@ function bootstrapFreshDataDir() {
 
 bootstrapFreshDataDir();
 migratePlaintextPasswords();
-migrateTokensToHashed();
 recoverSmsJournal();
 rotateSmsLog();
 { const _t = setInterval(rotateSmsLog, 6 * 3600 * 1000); if (_t.unref) _t.unref(); }
@@ -677,11 +661,6 @@ function gracefulShutdown(signal) {
       wss.clients.forEach(client => {
         try { client.close(1001, 'Server restarting'); } catch (_) {}
       });
-    }
-  } catch (_) {}
-  try {
-    if (typeof smppServerInstance !== 'undefined' && smppServerInstance) {
-      smppServerInstance.close();
     }
   } catch (_) {}
   try {
@@ -1623,8 +1602,9 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
     }
     const isCleared = nowMs >= clearsMs;
 
+    const rowWeight = (s.sms_count != null && Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
     const b = byTerm[ptKey];
-    b.sms_count += 1;
+    b.sms_count += rowWeight;
     if (isCleared) {
       clearedUsd += amtUsd;
       clearedPkr += amtPkr;
@@ -1642,7 +1622,7 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
       if (nextReleaseMs === null || clearsMs < nextReleaseMs) nextReleaseMs = clearsMs;
     }
     if (isWn) {
-      wnSmsCount += 1;
+      wnSmsCount += rowWeight;
       wnUsd += amtUsd;
       wnPkr += amtPkr;
     }
@@ -2189,16 +2169,6 @@ function ingestSms({
       numberRec.sms_count = (numberRec.sms_count || 0) + 1;
       numberRec.last_sms = entry.timestamp;
       debouncedWriteDb('numbers');
-    }
-
-    if (company) {
-      const accounts = readDb('smpp_accounts') || [];
-      const acc = accounts.find(a => (a.company || '').toLowerCase() === String(company).toLowerCase() ||
-                                     (a.system_id || '').toLowerCase() === String(company).toLowerCase());
-      if (acc) {
-        acc.messages_today = (acc.messages_today || 0) + 1;
-        writeDb('smpp_accounts', accounts);
-      }
     }
 
     broadcastWs({
@@ -3606,27 +3576,1319 @@ async function pollSingleWhitenoiseConnection(connId, force = false) {
   return pulled;
 }
 
-setInterval(async () => {
+// NOTE: Automatic Whitenoise background API/Web polling has been retired (zero VPS background load).
+// Whitenoise (CDR 2) operates in Excel-Only Daily Stats mode via /api/whitenoise-excel/* endpoints.
+// Manual /api/whitenoise-connections/:id/pull and /api/cdr2/sync remain available if explicitly triggered.
+
+// ════════════════════════════════════════════════════════════════════
+//  WHITENOISE (CDR 2) EXCEL-ONLY DAILY STATS & DATE-OWNERSHIP ENGINE
+// ════════════════════════════════════════════════════════════════════
+const NUMBER_OWNERSHIP_SNAPSHOT = new Map();
+let NUMBER_OWNERSHIP_SNAPSHOT_READY = false;
+let SUPPRESS_OWNERSHIP_LEDGER_HOOK = false;
+const WHITENOISE_PREVIEW_CACHE = new Map();
+const WHITENOISE_PREVIEW_TTL_MS = 20 * 60 * 1000;
+
+function normalizePhoneDigits(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    return String(Math.trunc(val)).replace(/\D/g, '');
+  }
+  const s = String(val).trim();
+  if (!s) return '';
+  // Handle Excel scientific notation strings like "5.25644310154E+11"
+  if (/^\+?\d+(?:\.\d+)?e[+-]?\d+$/i.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) return String(Math.trunc(n)).replace(/\D/g, '');
+  }
+  return s.replace(/\D/g, '');
+}
+
+function normalizeServiceKey(val) {
+  const s = String(val || '').trim();
+  if (!s) return 'general';
+  return s.toLowerCase().replace(/\s+/g, ' ');
+}
+
+function getBusinessDateYmd(dateRef = new Date()) {
   try {
-    const conns = readDb('whitenoise_connections') || [];
-    for (const c of conns) {
-      if (!c || !c.active) continue;
-      if (whitenoiseInFlight.has(c.id)) continue;
-      const clientSec = Math.max(10, parseInt(c.client_interval_sec ?? c.interval, 10) || 240);
-      const poolSec = Math.max(60, parseInt(c.pool_interval_sec, 10) || 540);
-      const tickSec = Math.min(clientSec, poolSec, 30);
-      const lastPullMs = c.last_pulled_at ? new Date(c.last_pulled_at).getTime() : 0;
-      if (Date.now() - lastPullMs >= tickSec * 1000) {
-        whitenoiseInFlight.add(c.id);
-        pollSingleWhitenoiseConnection(c.id)
-          .catch(e => console.error('Whitenoise poller error:', e))
-          .finally(() => whitenoiseInFlight.delete(c.id));
+    const settings = readDb('settings') || {};
+    const tz = (settings && typeof settings === 'object' && settings.timezone) ? String(settings.timezone) : 'Asia/Karachi';
+    const d = dateRef instanceof Date ? dateRef : new Date(dateRef);
+    if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const ymd = fmt.format(d);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  } catch (_) {}
+  try {
+    const d = dateRef instanceof Date ? dateRef : new Date(dateRef);
+    return d.toISOString().slice(0, 10);
+  } catch (_) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function refreshNumberOwnershipSnapshot(numbersArr) {
+  NUMBER_OWNERSHIP_SNAPSHOT.clear();
+  for (const n of (numbersArr || [])) {
+    if (!n) continue;
+    const digits = normalizePhoneDigits(n.number);
+    if (!digits) continue;
+    NUMBER_OWNERSHIP_SNAPSHOT.set(digits, {
+      agent_id: n.agent_id ? Number(n.agent_id) : null,
+      client_id: n.client_id ? Number(n.client_id) : null,
+      range_id: n.range_id ? Number(n.range_id) : null
+    });
+  }
+  NUMBER_OWNERSHIP_SNAPSHOT_READY = true;
+}
+
+function getLedgerNextSeq(ledger) {
+  let max = 0;
+  for (const e of (ledger || [])) {
+    const s = Number(e && e.event_seq);
+    if (Number.isFinite(s) && s > max) max = s;
+  }
+  return max + 1;
+}
+
+function buildOwnershipRateSnapshotForNumber(numObj, ctx = null) {
+  const ranges = ctx ? ctx.ranges : (readDb('sms_ranges') || []);
+  const agents = ctx ? ctx.agents : (readDb('agents') || []);
+  const clients = ctx ? ctx.clients : (readDb('clients') || []);
+  const fx = ctx ? ctx.fxRate : getUsdToPkrRate();
+
+  const rng = (numObj.range_id && ranges.find(r => Number(r.id) === Number(numObj.range_id))) ||
+    (numObj.range_name && ranges.find(r => String(r.range_name || r.name || '').toLowerCase() === String(numObj.range_name || '').toLowerCase())) ||
+    null;
+
+  const agentId = numObj.agent_id ? Number(numObj.agent_id) : null;
+  const clientId = numObj.client_id ? Number(numObj.client_id) : null;
+  const agObj = agentId ? agents.find(a => Number(a.id) === agentId) : null;
+  const clObj = clientId ? clients.find(c => Number(c.id) === clientId) : null;
+
+  const ownerCostUsd = Number(rng?.cost ?? rng?.company_cost ?? numObj.company_rate ?? numObj.cost ?? 0) || 0;
+  let agentRateUsd = 0;
+  if (agentId) {
+    agentRateUsd = Number(numObj.agent_rate || numObj.payout || 0) || getRangeAgentRate(rng, 'Monthly') || Number(rng?.payout || 0) || 0;
+  } else {
+    agentRateUsd = Number(numObj.agent_rate || 0) || getRangeAgentRate(rng, 'Monthly') || Number(rng?.payout || 0) || 0;
+  }
+
+  let clientRatePkr = 0;
+  if (clientId) {
+    if (Number(numObj.client_rate_pkr) > 0) {
+      clientRatePkr = round2(Number(numObj.client_rate_pkr));
+    } else if (Number(numObj.client_rate || numObj.client_payout) > 0) {
+      clientRatePkr = round2(Number(numObj.client_rate || numObj.client_payout) * (Number(numObj.fx_usd_to_pkr) || fx));
+    } else {
+      const rp = resolveClientRatePair({
+        agentId,
+        rangeId: numObj.range_id || (rng && rng.id),
+        rangeName: numObj.range_name || (rng && rng.range_name),
+        payterm: 'Monthly',
+        agentRateUsd,
+        clientRecord: clObj
+      });
+      if (rp && !rp.error && Number(rp.client_rate_pkr) > 0) {
+        clientRatePkr = round2(Number(rp.client_rate_pkr));
       }
     }
-  } catch (e) {
-    console.error('Whitenoise poller loop error:', e);
   }
-}, 10000);
+
+  return {
+    agent_id: agentId,
+    agent_name: agObj?.username || numObj.agent_username || numObj.agent_name || '',
+    client_id: clientId,
+    client_name: clObj?.username || numObj.client_username || numObj.client_name || numObj.user || '',
+    range_id: numObj.range_id ? Number(numObj.range_id) : (rng ? Number(rng.id) : null),
+    range_name: numObj.range_name || rng?.range_name || rng?.name || numObj.country || '',
+    owner_cost_usd: round4(ownerCostUsd),
+    agent_rate_usd: round4(agentRateUsd),
+    client_rate_pkr: round2(clientRatePkr),
+    fx_usd_to_pkr: round2(Number(numObj.fx_usd_to_pkr) || fx)
+  };
+}
+
+function syncNumberOwnershipLedgerOnWrite(nextNumbers, opts = {}) {
+  if (!Array.isArray(nextNumbers)) return;
+  if (!NUMBER_OWNERSHIP_SNAPSHOT_READY) {
+    refreshNumberOwnershipSnapshot(nextNumbers);
+    return;
+  }
+
+  const eventDate = normalizeYmd(opts.eventDate) || getBusinessDateYmd();
+  const actor = opts.actor || 'System';
+  const changed = [];
+
+  for (const n of nextNumbers) {
+    if (!n) continue;
+    const digits = normalizePhoneDigits(n.number);
+    if (!digits) continue;
+    const prev = NUMBER_OWNERSHIP_SNAPSHOT.get(digits) || { agent_id: null, client_id: null, range_id: null };
+    const nextAg = n.agent_id ? Number(n.agent_id) : null;
+    const nextCl = n.client_id ? Number(n.client_id) : null;
+
+    if (prev.agent_id !== nextAg || prev.client_id !== nextCl) {
+      let action = 'update';
+      if (!prev.agent_id && nextAg && !nextCl) action = 'assign_agent';
+      else if (!prev.client_id && nextCl) action = 'assign_client';
+      else if (prev.client_id && nextCl && prev.client_id !== nextCl) action = 'transfer';
+      else if (prev.client_id && !nextCl && nextAg) action = 'return_to_agent';
+      else if ((prev.agent_id || prev.client_id) && !nextAg && !nextCl) action = 'unassign';
+      else if (prev.agent_id !== nextAg && nextAg) action = 'assign_agent';
+      changed.push({ n, digits, action });
+    }
+  }
+
+  if (changed.length > 0) {
+    const ledger = readDb('number_ownership_ledger') || [];
+    let seq = getLedgerNextSeq(ledger);
+    let idCounter = nextId(ledger);
+    const ctx = {
+      ranges: readDb('sms_ranges') || [],
+      agents: readDb('agents') || [],
+      clients: readDb('clients') || [],
+      fxRate: getUsdToPkrRate()
+    };
+    const nowIso = new Date().toISOString();
+    for (const item of changed) {
+      const snap = buildOwnershipRateSnapshotForNumber(item.n, ctx);
+      ledger.push({
+        id: idCounter++,
+        number_digits: item.digits,
+        number: String(item.n.number || item.digits),
+        event_date: eventDate,
+        event_seq: seq++,
+        action: opts.action || item.action,
+        ...snap,
+        actor,
+        created_at: nowIso
+      });
+    }
+    writeDb('number_ownership_ledger', ledger);
+  }
+
+  refreshNumberOwnershipSnapshot(nextNumbers);
+}
+
+function recordExplicitOwnershipEvent({ number, event_date, action, agent_id, client_id, range_id, owner_cost_usd, agent_rate_usd, client_rate_pkr, fx_usd_to_pkr, actor = 'Owner' }) {
+  const digits = normalizePhoneDigits(number);
+  if (!digits) throw new Error('Valid phone number is required');
+  const ymd = normalizeYmd(event_date) || getBusinessDateYmd();
+  const numbers = readDb('numbers') || [];
+  const numObj = numbers.find(n => normalizePhoneDigits(n.number) === digits) || { number: digits };
+  const ctx = {
+    ranges: readDb('sms_ranges') || [],
+    agents: readDb('agents') || [],
+    clients: readDb('clients') || [],
+    fxRate: getUsdToPkrRate()
+  };
+
+  const mergedNum = {
+    ...numObj,
+    agent_id: agent_id !== undefined ? (agent_id ? Number(agent_id) : null) : (numObj.agent_id ? Number(numObj.agent_id) : null),
+    client_id: client_id !== undefined ? (client_id ? Number(client_id) : null) : (numObj.client_id ? Number(numObj.client_id) : null),
+    range_id: range_id !== undefined ? (range_id ? Number(range_id) : null) : (numObj.range_id ? Number(numObj.range_id) : null)
+  };
+  const snap = buildOwnershipRateSnapshotForNumber(mergedNum, ctx);
+  if (owner_cost_usd != null && Number.isFinite(Number(owner_cost_usd))) snap.owner_cost_usd = round4(Number(owner_cost_usd));
+  if (agent_rate_usd != null && Number.isFinite(Number(agent_rate_usd))) snap.agent_rate_usd = round4(Number(agent_rate_usd));
+  if (client_rate_pkr != null && Number.isFinite(Number(client_rate_pkr))) snap.client_rate_pkr = round2(Number(client_rate_pkr));
+  if (fx_usd_to_pkr != null && Number.isFinite(Number(fx_usd_to_pkr))) snap.fx_usd_to_pkr = round2(Number(fx_usd_to_pkr));
+
+  const ledger = readDb('number_ownership_ledger') || [];
+  const evt = {
+    id: nextId(ledger),
+    number_digits: digits,
+    number: String(numObj.number || number),
+    event_date: ymd,
+    event_seq: getLedgerNextSeq(ledger),
+    action: action || (snap.client_id ? 'assign_client' : (snap.agent_id ? 'assign_agent' : 'unassign')),
+    ...snap,
+    actor,
+    created_at: new Date().toISOString()
+  };
+  ledger.push(evt);
+  writeDb('number_ownership_ledger', ledger);
+  return evt;
+}
+
+function seedOwnershipLedgerIfEmpty() {
+  try {
+    const numbers = readDb('numbers') || [];
+    refreshNumberOwnershipSnapshot(numbers);
+    const ledger = readDb('number_ownership_ledger') || [];
+    if (ledger.length > 0) return;
+
+    const assignedNums = numbers.filter(n => n && (n.agent_id || n.client_id));
+    if (!assignedNums.length) return;
+
+    const ctx = {
+      ranges: readDb('sms_ranges') || [],
+      agents: readDb('agents') || [],
+      clients: readDb('clients') || [],
+      fxRate: getUsdToPkrRate()
+    };
+    const seeded = [];
+    let seq = 1;
+    let id = 1;
+    const nowIso = new Date().toISOString();
+    for (const n of assignedNums) {
+      const digits = normalizePhoneDigits(n.number);
+      if (!digits) continue;
+      const rawDate = String(n.assigned_date || n.assigned_at || n.created || '').replace('T', ' ').slice(0, 10);
+      const ymd = normalizeYmd(rawDate) || getBusinessDateYmd();
+      const snap = buildOwnershipRateSnapshotForNumber(n, ctx);
+      seeded.push({
+        id: id++,
+        number_digits: digits,
+        number: String(n.number || digits),
+        event_date: ymd,
+        event_seq: seq++,
+        action: snap.client_id ? 'assign_client' : 'assign_agent',
+        ...snap,
+        actor: 'BootSeed',
+        created_at: nowIso
+      });
+    }
+    if (seeded.length) {
+      writeDb('number_ownership_ledger', seeded);
+      console.log(`[OWNERSHIP_LEDGER] Seeded ${seeded.length} baseline ownership event(s).`);
+    }
+  } catch (err) {
+    console.error('[OWNERSHIP_LEDGER] seed error:', err.message);
+  }
+}
+
+function buildOwnershipResolverContext() {
+  const ledger = readDb('number_ownership_ledger') || [];
+  const numbers = readDb('numbers') || [];
+  const ranges = readDb('sms_ranges') || [];
+  const agents = readDb('agents') || [];
+  const clients = readDb('clients') || [];
+  const fxRate = getUsdToPkrRate();
+  const wnRangesMap = buildRangesLookupMap();
+  const wnTags = getWhitenoiseProviderTags();
+
+  const ledgerByDigits = new Map();
+  for (const e of ledger) {
+    if (!e || !e.number_digits) continue;
+    const d = String(e.number_digits);
+    if (!ledgerByDigits.has(d)) ledgerByDigits.set(d, []);
+    ledgerByDigits.get(d).push(e);
+  }
+  const numbersByDigits = new Map();
+  for (const n of numbers) {
+    if (!n) continue;
+    const d = normalizePhoneDigits(n.number);
+    if (d && !numbersByDigits.has(d)) numbersByDigits.set(d, n);
+  }
+  const wnRanges = ranges.filter(r => isWhitenoiseRecord(r, wnRangesMap, wnTags));
+  const rangesByPrefixDesc = (wnRanges.length ? wnRanges : ranges)
+    .filter(r => r && String(r.prefix || '').replace(/\D/g, '').length > 0)
+    .sort((a, b) => String(b.prefix || '').replace(/\D/g, '').length - String(a.prefix || '').replace(/\D/g, '').length);
+
+  return {
+    ledgerByDigits,
+    numbersByDigits,
+    ranges,
+    rangesById: new Map(ranges.map(r => [Number(r.id), r])),
+    rangesByPrefixDesc,
+    agents,
+    agentsById: new Map(agents.map(a => [Number(a.id), a])),
+    clients,
+    clientsById: new Map(clients.map(c => [Number(c.id), c])),
+    fxRate
+  };
+}
+
+function resolveNumberOwnershipForDate(numberDigits, dateYmd, ctx) {
+  const digits = normalizePhoneDigits(numberDigits);
+  const altDigits = digits.startsWith('00') ? digits.slice(2) : digits;
+  const lookupDigits = ctx.ledgerByDigits.has(digits) || ctx.numbersByDigits.has(digits) ? digits : altDigits;
+
+  const events = ctx.ledgerByDigits.get(lookupDigits) || [];
+  const numRec = ctx.numbersByDigits.get(lookupDigits) || null;
+
+  // Match range from number record or longest Whitenoise prefix fallback
+  let fallbackRng = null;
+  if (numRec && numRec.range_id) fallbackRng = ctx.rangesById.get(Number(numRec.range_id)) || null;
+  if (!fallbackRng && numRec && numRec.range_name) {
+    fallbackRng = ctx.ranges.find(r => String(r.range_name || r.name || '').toLowerCase() === String(numRec.range_name).toLowerCase()) || null;
+  }
+  if (!fallbackRng) {
+    for (const r of ctx.rangesByPrefixDesc) {
+      const pfx = String(r.prefix || '').replace(/\D/g, '');
+      if (pfx && lookupDigits.startsWith(pfx)) {
+        fallbackRng = r;
+        break;
+      }
+    }
+  }
+
+  // Filter ledger events where event_date <= dateYmd, sort DESC by (event_date, event_seq)
+  const eligible = events.filter(e => e && e.event_date && e.event_date <= dateYmd);
+  if (eligible.length > 0) {
+    eligible.sort((a, b) => {
+      if (a.event_date !== b.event_date) return b.event_date.localeCompare(a.event_date);
+      return (Number(b.event_seq) || 0) - (Number(a.event_seq) || 0);
+    });
+    const top = eligible[0];
+    const rng = (top.range_id && ctx.rangesById.get(Number(top.range_id))) || fallbackRng;
+    const agObj = top.agent_id ? ctx.agentsById.get(Number(top.agent_id)) : null;
+    const clObj = top.client_id ? ctx.clientsById.get(Number(top.client_id)) : null;
+    const matchStatus = top.client_id ? 'matched_client' : (top.agent_id ? 'agent_pool' : 'unassigned');
+    return {
+      number_digits: lookupDigits,
+      number: top.number || (numRec && numRec.number) || lookupDigits,
+      match_status: matchStatus,
+      resolved_via: 'ownership_ledger',
+      event_date: top.event_date,
+      event_seq: top.event_seq,
+      agent_id: top.agent_id ? Number(top.agent_id) : null,
+      agent_name: agObj?.username || top.agent_name || '',
+      client_id: top.client_id ? Number(top.client_id) : null,
+      client_name: clObj?.username || top.client_name || '',
+      range_id: top.range_id ? Number(top.range_id) : (rng ? Number(rng.id) : null),
+      range_name: top.range_name || rng?.range_name || rng?.name || (numRec && numRec.range_name) || 'Whitenoise',
+      country: rng?.country || (numRec && numRec.country) || detectCountry(lookupDigits),
+      owner_cost_usd: Number(top.owner_cost_usd) > 0 ? Number(top.owner_cost_usd) : (Number(rng?.cost ?? rng?.company_cost ?? 0) || 0),
+      agent_rate_usd: top.agent_id ? (Number(top.agent_rate_usd) > 0 ? Number(top.agent_rate_usd) : (getRangeAgentRate(rng, 'Monthly') || Number(rng?.payout || 0) || 0)) : 0,
+      client_rate_pkr: top.client_id ? (Number(top.client_rate_pkr) || 0) : 0,
+      fx_usd_to_pkr: Number(top.fx_usd_to_pkr) || ctx.fxRate
+    };
+  }
+
+  // No ledger event <= dateYmd
+  if (numRec) {
+    // If ledger has later events (number was assigned AFTER dateYmd), it was unassigned on dateYmd!
+    const hasFutureEvents = events.length > 0;
+    const assignedRaw = String(numRec.assigned_date || numRec.assigned_at || '').replace('T', ' ').slice(0, 10);
+    const assignedYmd = normalizeYmd(assignedRaw);
+    const legacyEligible = !hasFutureEvents && (numRec.agent_id || numRec.client_id) && (!assignedYmd || dateYmd >= assignedYmd);
+
+    if (legacyEligible) {
+      const snap = buildOwnershipRateSnapshotForNumber(numRec, ctx);
+      return {
+        number_digits: lookupDigits,
+        number: String(numRec.number || lookupDigits),
+        match_status: snap.client_id ? 'matched_client' : 'agent_pool',
+        resolved_via: 'legacy_number_record',
+        event_date: assignedYmd || dateYmd,
+        event_seq: 0,
+        ...snap,
+        country: fallbackRng?.country || numRec.country || detectCountry(lookupDigits)
+      };
+    }
+
+    return {
+      number_digits: lookupDigits,
+      number: String(numRec.number || lookupDigits),
+      match_status: 'unassigned',
+      resolved_via: hasFutureEvents ? 'before_first_assignment' : 'pool_unassigned',
+      event_date: null,
+      event_seq: 0,
+      agent_id: null,
+      agent_name: '',
+      client_id: null,
+      client_name: '',
+      range_id: numRec.range_id ? Number(numRec.range_id) : (fallbackRng ? Number(fallbackRng.id) : null),
+      range_name: numRec.range_name || fallbackRng?.range_name || fallbackRng?.name || 'Whitenoise',
+      country: fallbackRng?.country || numRec.country || detectCountry(lookupDigits),
+      owner_cost_usd: Number(fallbackRng?.cost ?? fallbackRng?.company_cost ?? numRec.company_rate ?? 0) || 0,
+      agent_rate_usd: 0,
+      client_rate_pkr: 0,
+      fx_usd_to_pkr: ctx.fxRate
+    };
+  }
+
+  // Unknown number (not in numbers.json)
+  return {
+    number_digits: lookupDigits,
+    number: lookupDigits,
+    match_status: 'unknown_number',
+    resolved_via: 'not_in_inventory',
+    event_date: null,
+    event_seq: 0,
+    agent_id: null,
+    agent_name: '',
+    client_id: null,
+    client_name: '',
+    range_id: fallbackRng ? Number(fallbackRng.id) : null,
+    range_name: fallbackRng?.range_name || fallbackRng?.name || 'Unmatched Range',
+    country: fallbackRng?.country || detectCountry(lookupDigits),
+    owner_cost_usd: Number(fallbackRng?.cost ?? fallbackRng?.company_cost ?? 0) || 0,
+    agent_rate_usd: 0,
+    client_rate_pkr: 0,
+    fx_usd_to_pkr: ctx.fxRate
+  };
+}
+
+function parseExcelDateYmd(val) {
+  if (val === null || val === undefined || val === '') return null;
+  if (val instanceof Date && !Number.isNaN(val.getTime())) {
+    const y = val.getUTCFullYear();
+    const m = String(val.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(val.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  if (typeof val === 'number' && Number.isFinite(val) && val > 25000 && val < 75000) {
+    try {
+      const dc = XLSX.SSF.parse_date_code(val);
+      if (dc && dc.y >= 2000 && dc.y <= 2100 && dc.m >= 1 && dc.m <= 12 && dc.d >= 1 && dc.d <= 31) {
+        return `${dc.y}-${String(dc.m).padStart(2, '0')}-${String(dc.d).padStart(2, '0')}`;
+      }
+    } catch (_) {}
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+
+  // Numeric string Excel serial
+  if (/^\d{5}(\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    if (n > 25000 && n < 75000) return parseExcelDateYmd(n);
+  }
+  // YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD (optionally with time)
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT].*)?$/);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if (y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  // DD.MM.YYYY or DD-MM-YYYY or DD/MM/YYYY (optionally with time)
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[\sT].*)?$/);
+  if (m) {
+    let a = Number(m[1]), b = Number(m[2]), y = Number(m[3]);
+    // If second part > 12 and first <= 12, it's MM/DD/YYYY; otherwise treat as DD.MM.YYYY
+    let d = a, mo = b;
+    if (b > 12 && a <= 12) { mo = a; d = b; }
+    if (y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  // DD.MM.YY or DD/MM/YY
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$/);
+  if (m) {
+    let d = Number(m[1]), mo = Number(m[2]), y = 2000 + Number(m[3]);
+    if (mo > 12 && d <= 12) { const tmp = d; d = mo; mo = tmp; }
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  return null;
+}
+
+function detectSheetColumnMapping(rowsMatrix) {
+  let headerRowIdx = 0;
+  let bestRowScore = -1;
+
+  const maxScan = Math.min(rowsMatrix.length, 15);
+  for (let r = 0; r < maxScan; r++) {
+    const row = rowsMatrix[r] || [];
+    const nonEmpty = row.filter(c => String(c ?? '').trim() !== '').length;
+    if (nonEmpty < 2) continue;
+    let score = 0;
+    let dateHeaderCols = 0;
+    for (const cell of row) {
+      const h = String(cell ?? '').trim().toLowerCase();
+      if (!h) continue;
+      if (parseExcelDateYmd(cell)) dateHeaderCols++;
+      if (/\b(date|day|time|period|created|sent)\b/.test(h)) score += 3;
+      if (/\b(number|phone|msisdn|did|dst|destination|to|sms_to|recipient|num)\b/.test(h)) score += 4;
+      if (/\b(service|cli|sender|app|source|src|sid|origin|brand|product)\b/.test(h)) score += 3;
+      if (/\b(count|sms|qty|quantity|total|messages|msgs|hits|delivered|volume|amount)\b/.test(h)) score += 3;
+      if (/\b(range|country|route|prefix|operator)\b/.test(h)) score += 1;
+    }
+    if (dateHeaderCols >= 2) score += 6;
+    if (score > bestRowScore) {
+      bestRowScore = score;
+      headerRowIdx = r;
+    }
+  }
+
+  const rawHeaders = (rowsMatrix[headerRowIdx] || []).map((c, idx) => {
+    const dYmd = parseExcelDateYmd(c);
+    if (dYmd && typeof c === 'number') return dYmd;
+    const s = String(c ?? '').trim();
+    return s || `Col ${idx + 1}`;
+  });
+
+  const colMap = { date: -1, number: -1, service: -1, sms_count: -1, range: -1 };
+  const datePivotCols = [];
+
+  rawHeaders.forEach((hdr, idx) => {
+    const h = hdr.toLowerCase();
+    const parsedHeaderDate = parseExcelDateYmd(rowsMatrix[headerRowIdx]?.[idx]);
+    if (parsedHeaderDate) {
+      datePivotCols.push({ idx, date_ymd: parsedHeaderDate, label: hdr });
+      return;
+    }
+    if (colMap.date === -1 && /(^|[\s_-])(date|day|sms_date|stat_date|report_date|time|period)([\s_-]|$)/.test(h)) {
+      colMap.date = idx;
+    } else if (colMap.number === -1 && /(number|phone|msisdn|did|dst|destination|sms_to|recipient|tel|mobile)/.test(h)) {
+      colMap.number = idx;
+    } else if (colMap.service === -1 && /(service|cli|sender|app|source|src|sid|application|brand|origin)/.test(h)) {
+      colMap.service = idx;
+    } else if (colMap.sms_count === -1 && /(sms_count|count|sms|qty|quantity|total|messages|msgs|delivered|hits|volume|cnt)/.test(h) && !/rate|price|cost|payout|amount|usd|pkr/.test(h)) {
+      colMap.sms_count = idx;
+    } else if (colMap.range === -1 && /(range|country|route|prefix)/.test(h)) {
+      colMap.range = idx;
+    }
+  });
+
+  // Content-based fallback heuristic on first 20 data rows if any key column wasn't named cleanly
+  const sampleRows = rowsMatrix.slice(headerRowIdx + 1, headerRowIdx + 25);
+  if (sampleRows.length > 0) {
+    const colCount = rawHeaders.length;
+    if (colMap.number === -1) {
+      for (let c = 0; c < colCount; c++) {
+        if (Object.values(colMap).includes(c)) continue;
+        let phoneHits = 0, valid = 0;
+        for (const r of sampleRows) {
+          const d = normalizePhoneDigits(r[c]);
+          if (String(r[c] ?? '').trim() !== '') {
+            valid++;
+            if (d.length >= 8 && d.length <= 16) phoneHits++;
+          }
+        }
+        if (valid > 0 && phoneHits / valid >= 0.6) { colMap.number = c; break; }
+      }
+    }
+    if (colMap.date === -1 && datePivotCols.length === 0) {
+      for (let c = 0; c < colCount; c++) {
+        if (Object.values(colMap).includes(c)) continue;
+        let dateHits = 0, valid = 0;
+        for (const r of sampleRows) {
+          if (String(r[c] ?? '').trim() !== '') {
+            valid++;
+            if (parseExcelDateYmd(r[c])) dateHits++;
+          }
+        }
+        if (valid > 0 && dateHits / valid >= 0.6) { colMap.date = c; break; }
+      }
+    }
+    if (colMap.sms_count === -1 && datePivotCols.length === 0) {
+      for (let c = 0; c < colCount; c++) {
+        if (Object.values(colMap).includes(c)) continue;
+        let intHits = 0, valid = 0;
+        for (const r of sampleRows) {
+          const v = r[c];
+          if (v !== '' && v !== null && v !== undefined) {
+            valid++;
+            const n = Number(v);
+            if (Number.isInteger(n) && n >= 0 && n <= 1000000) intHits++;
+          }
+        }
+        if (valid > 0 && intHits / valid >= 0.7) { colMap.sms_count = c; break; }
+      }
+    }
+  }
+
+  const layout = (colMap.date === -1 && datePivotCols.length >= 1 && colMap.number !== -1) ? 'date_pivot' : 'tabular';
+  let sheetScore = 0;
+  if (colMap.number !== -1) sheetScore += 40;
+  if (colMap.date !== -1 || datePivotCols.length >= 1) sheetScore += 35;
+  if (colMap.service !== -1) sheetScore += 15;
+  if (colMap.sms_count !== -1 || datePivotCols.length >= 1) sheetScore += 15;
+  const dataRowCount = Math.max(0, rowsMatrix.length - headerRowIdx - 1);
+  if (dataRowCount > 0) sheetScore += Math.min(20, dataRowCount);
+
+  return {
+    headerRowIdx,
+    headers: rawHeaders,
+    colMap,
+    datePivotCols,
+    layout,
+    sheetScore,
+    dataRowCount
+  };
+}
+
+function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) {
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+  if (!wb || !Array.isArray(wb.SheetNames) || wb.SheetNames.length === 0) {
+    throw new Error('Workbook contains no readable sheets.');
+  }
+
+  const sheetInfos = wb.SheetNames.map(name => {
+    const ws = wb.Sheets[name];
+    const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+    const det = detectSheetColumnMapping(matrix);
+    return {
+      name,
+      matrix,
+      ...det
+    };
+  });
+
+  let selected = null;
+  if (opts.sheetName) {
+    selected = sheetInfos.find(s => s.name === opts.sheetName) || null;
+  }
+  if (!selected) {
+    const sorted = sheetInfos.slice().sort((a, b) => b.sheetScore - a.sheetScore);
+    selected = sorted[0];
+  }
+
+  const effectiveMap = {
+    date: opts.colMap && opts.colMap.date !== undefined ? Number(opts.colMap.date) : selected.colMap.date,
+    number: opts.colMap && opts.colMap.number !== undefined ? Number(opts.colMap.number) : selected.colMap.number,
+    service: opts.colMap && opts.colMap.service !== undefined ? Number(opts.colMap.service) : selected.colMap.service,
+    sms_count: opts.colMap && opts.colMap.sms_count !== undefined ? Number(opts.colMap.sms_count) : selected.colMap.sms_count,
+    range: opts.colMap && opts.colMap.range !== undefined ? Number(opts.colMap.range) : selected.colMap.range
+  };
+
+  // Determine layout (respect user override if they explicitly mapped a Date column)
+  const usePivot = (effectiveMap.date === -1 && selected.datePivotCols.length >= 1 && effectiveMap.number !== -1);
+  const warnings = [];
+  const aggregated = new Map();
+  let rawParsedRows = 0;
+  let skippedInvalidRows = 0;
+
+  // Fallback date from filename if no date column exists (e.g. sms_stats_19.11.2026.xlsx)
+  let fallbackFileDate = null;
+  const fnMatch = String(filename || '').match(/(\d{1,2})[.-](\d{1,2})[.-](\d{4})/);
+  if (fnMatch) {
+    fallbackFileDate = parseExcelDateYmd(`${fnMatch[1]}.${fnMatch[2]}.${fnMatch[3]}`);
+  } else {
+    const fnIso = String(filename || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (fnIso) fallbackFileDate = `${fnIso[1]}-${fnIso[2]}-${fnIso[3]}`;
+  }
+
+  const dataRows = selected.matrix.slice(selected.headerRowIdx + 1);
+  if (effectiveMap.number === -1) {
+    warnings.push('Could not auto-detect Number column — please select the Number column below.');
+  } else if (usePivot) {
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      if (!Array.isArray(row) || row.every(c => String(c ?? '').trim() === '')) continue;
+      const digits = normalizePhoneDigits(row[effectiveMap.number]);
+      if (digits.length < 6) { skippedInvalidRows++; continue; }
+      const serviceRaw = effectiveMap.service >= 0 ? String(row[effectiveMap.service] ?? '').trim() : '';
+      const serviceLabel = serviceRaw || 'General';
+      const serviceNorm = normalizeServiceKey(serviceLabel);
+      const rangeHint = effectiveMap.range >= 0 ? String(row[effectiveMap.range] ?? '').trim() : '';
+
+      for (const dc of selected.datePivotCols) {
+        const cnt = Number(row[dc.idx]);
+        if (!Number.isFinite(cnt) || cnt <= 0) continue;
+        const intCnt = Math.round(cnt);
+        rawParsedRows++;
+        const statKey = `${dc.date_ymd}|${digits}|${serviceNorm}`;
+        const prev = aggregated.get(statKey);
+        if (prev) {
+          prev.sms_count += intCnt;
+        } else {
+          aggregated.set(statKey, {
+            stat_key: statKey,
+            date_ymd: dc.date_ymd,
+            number_digits: digits,
+            service: serviceLabel,
+            service_normalized: serviceNorm,
+            sms_count: intCnt,
+            range_hint: rangeHint
+          });
+        }
+      }
+    }
+  } else {
+    if (effectiveMap.date === -1 && !fallbackFileDate) {
+      warnings.push('Could not auto-detect Date column — please map the Date column below.');
+    }
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      if (!Array.isArray(row) || row.every(c => String(c ?? '').trim() === '')) continue;
+      // Ignore footer "Total" rows
+      const firstCellStr = String(row[0] ?? '').trim().toLowerCase();
+      if (firstCellStr === 'total' || firstCellStr === 'grand total' || firstCellStr.startsWith('total:')) continue;
+
+      const digits = normalizePhoneDigits(row[effectiveMap.number]);
+      if (digits.length < 6) { skippedInvalidRows++; continue; }
+
+      const dateYmd = effectiveMap.date >= 0 ? parseExcelDateYmd(row[effectiveMap.date]) : fallbackFileDate;
+      if (!dateYmd) { skippedInvalidRows++; continue; }
+
+      const serviceRaw = effectiveMap.service >= 0 ? String(row[effectiveMap.service] ?? '').trim() : '';
+      const serviceLabel = serviceRaw || 'General';
+      const serviceNorm = normalizeServiceKey(serviceLabel);
+      const rangeHint = effectiveMap.range >= 0 ? String(row[effectiveMap.range] ?? '').trim() : '';
+
+      let cnt = 1;
+      if (effectiveMap.sms_count >= 0) {
+        const rawCnt = row[effectiveMap.sms_count];
+        const parsedCnt = Number(String(rawCnt ?? '').replace(/,/g, '').trim());
+        if (!Number.isFinite(parsedCnt) || parsedCnt < 0) { skippedInvalidRows++; continue; }
+        cnt = Math.round(parsedCnt);
+        if (cnt === 0) continue;
+      }
+
+      rawParsedRows++;
+      const statKey = `${dateYmd}|${digits}|${serviceNorm}`;
+      const prev = aggregated.get(statKey);
+      if (prev) {
+        prev.sms_count += cnt;
+      } else {
+        aggregated.set(statKey, {
+          stat_key: statKey,
+          date_ymd: dateYmd,
+          number_digits: digits,
+          service: serviceLabel,
+          service_normalized: serviceNorm,
+          sms_count: cnt,
+          range_hint: rangeHint
+        });
+      }
+    }
+  }
+
+  if (skippedInvalidRows > 0) {
+    warnings.push(`Skipped ${skippedInvalidRows} non-data / invalid row(s) (missing valid phone number, date, or count).`);
+  }
+
+  const canonicalRows = Array.from(aggregated.values()).sort((a, b) => {
+    if (a.date_ymd !== b.date_ymd) return b.date_ymd.localeCompare(a.date_ymd);
+    if (a.number_digits !== b.number_digits) return a.number_digits.localeCompare(b.number_digits);
+    return a.service.localeCompare(b.service);
+  });
+
+  return {
+    filename,
+    sheets: sheetInfos.map(s => ({
+      name: s.name,
+      row_count: s.dataRowCount,
+      score: s.sheetScore,
+      layout: s.layout,
+      headers: s.headers,
+      detected_col_map: s.colMap
+    })),
+    selected_sheet: selected.name,
+    layout: usePivot ? 'date_pivot' : 'tabular',
+    headers: selected.headers,
+    col_map: effectiveMap,
+    raw_parsed_rows: rawParsedRows,
+    skipped_invalid_rows: skippedInvalidRows,
+    warnings,
+    canonical_rows: canonicalRows
+  };
+}
+
+function computeStatFinancials(smsCount, { agent_id, client_id, owner_cost_usd, agent_rate_usd, client_rate_pkr, fx_usd_to_pkr }) {
+  const C = Math.max(0, Math.round(Number(smsCount) || 0));
+  const fx = Number(fx_usd_to_pkr) > 0 ? Number(fx_usd_to_pkr) : getUsdToPkrRate();
+  const rOwner = Number(owner_cost_usd) || 0;
+  const rAgent = agent_id ? (Number(agent_rate_usd) || 0) : 0;
+  const rClientPkr = client_id ? (Number(client_rate_pkr) || 0) : 0;
+
+  const owner_revenue_usd = round4(C * rOwner);
+  const agent_payout_usd = agent_id ? round4(C * rAgent) : 0;
+  const client_payout_pkr = client_id ? round2(C * rClientPkr) : 0;
+  const client_payout_usd = client_id ? round4(client_payout_pkr / fx) : 0;
+  const owner_profit_usd = agent_id ? round4(Math.max(0, owner_revenue_usd - agent_payout_usd)) : owner_revenue_usd;
+  const agent_profit_usd = agent_id ? round4(agent_payout_usd - client_payout_usd) : 0;
+
+  return {
+    owner_revenue_usd,
+    agent_payout_usd,
+    client_payout_pkr,
+    client_payout_usd,
+    owner_profit_usd,
+    agent_profit_usd,
+    fx_usd_to_pkr: round2(fx)
+  };
+}
+
+function evaluateWhitenoiseExcelUpload(buffer, filename, opts = {}) {
+  const parsed = parseWhitenoiseExcelBuffer(buffer, filename, opts);
+  const existingStats = readDb('whitenoise_daily_stats') || [];
+  const existingByKey = new Map();
+  for (const st of existingStats) {
+    if (st && st.stat_key) existingByKey.set(st.stat_key, st);
+  }
+  const resolverCtx = buildOwnershipResolverContext();
+  const monthlyCfg = getMonthlyCycleConfig();
+
+  let newRows = 0, updatedRows = 0, unchangedRows = 0;
+  let matchedClient = 0, agentPool = 0, unassigned = 0, unknownNumbers = 0;
+  let totalSmsInFile = 0, netSmsDelta = 0;
+  let netOwnerRevDelta = 0, netAgentPayDelta = 0, netClientPkrDelta = 0, netOwnerProfitDelta = 0;
+  let dateMin = null, dateMax = null;
+
+  const evaluatedRows = [];
+
+  for (const row of parsed.canonical_rows) {
+    if (!dateMin || row.date_ymd < dateMin) dateMin = row.date_ymd;
+    if (!dateMax || row.date_ymd > dateMax) dateMax = row.date_ymd;
+    totalSmsInFile += row.sms_count;
+
+    const existing = existingByKey.get(row.stat_key) || null;
+    const resolved = resolveNumberOwnershipForDate(row.number_digits, row.date_ymd, resolverCtx);
+
+    // If existing record exists and was already matched to an agent/client, keep its locked historical owner & rates.
+    // If existing was unassigned/unknown and Owner later added/assigned the number for that date, upgrade ownership cleanly!
+    const useLockedExisting = existing && (existing.agent_id || existing.client_id);
+    const effOwner = useLockedExisting ? {
+      number_digits: existing.number_digits,
+      number: existing.number,
+      match_status: existing.client_id ? 'matched_client' : 'agent_pool',
+      resolved_via: existing.resolved_via || 'locked_existing',
+      agent_id: existing.agent_id || null,
+      agent_name: existing.agent_name || '',
+      client_id: existing.client_id || null,
+      client_name: existing.client_name || '',
+      range_id: existing.range_id || resolved.range_id || null,
+      range_name: existing.range_name || resolved.range_name || row.range_hint || 'Whitenoise',
+      country: existing.country || resolved.country || '',
+      owner_cost_usd: Number(existing.owner_cost_usd ?? resolved.owner_cost_usd ?? 0),
+      agent_rate_usd: Number(existing.agent_rate_usd ?? resolved.agent_rate_usd ?? 0),
+      client_rate_pkr: Number(existing.client_rate_pkr ?? resolved.client_rate_pkr ?? 0),
+      fx_usd_to_pkr: Number(existing.fx_usd_to_pkr ?? resolved.fx_usd_to_pkr ?? resolverCtx.fxRate)
+    } : {
+      ...resolved,
+      range_name: (resolved.range_name && resolved.range_name !== 'Unmatched Range') ? resolved.range_name : (row.range_hint || resolved.range_name)
+    };
+
+    const fin = computeStatFinancials(row.sms_count, effOwner);
+    const clearsAt = (row.date_ymd >= monthlyCfg.start_date && row.date_ymd <= monthlyCfg.end_date)
+      ? `${monthlyCfg.clear_date}T00:00:00.000Z`
+      : computeMonthlyClearIso(`${row.date_ymd} 12:00:00`);
+
+    let action = 'new';
+    let prevCount = 0;
+    let deltaSms = row.sms_count;
+    let deltaOwnerRev = fin.owner_revenue_usd;
+    let deltaAgentPay = fin.agent_payout_usd;
+    let deltaClientPkr = fin.client_payout_pkr;
+    let deltaOwnerProfit = fin.owner_profit_usd;
+
+    if (existing) {
+      prevCount = Number(existing.sms_count) || 0;
+      const ownerUpgraded = !useLockedExisting && (
+        (effOwner.agent_id || null) !== (existing.agent_id || null) ||
+        (effOwner.client_id || null) !== (existing.client_id || null)
+      );
+      if (prevCount === row.sms_count && !ownerUpgraded) {
+        action = 'unchanged';
+        deltaSms = 0;
+        deltaOwnerRev = 0;
+        deltaAgentPay = 0;
+        deltaClientPkr = 0;
+        deltaOwnerProfit = 0;
+        unchangedRows++;
+      } else {
+        action = 'updated';
+        deltaSms = row.sms_count - prevCount;
+        deltaOwnerRev = round4(fin.owner_revenue_usd - (Number(existing.owner_revenue_usd) || 0));
+        deltaAgentPay = round4(fin.agent_payout_usd - (Number(existing.agent_payout_usd) || 0));
+        deltaClientPkr = round2(fin.client_payout_pkr - (Number(existing.client_payout_pkr) || 0));
+        deltaOwnerProfit = round4(fin.owner_profit_usd - (Number(existing.owner_profit_usd) || 0));
+        updatedRows++;
+      }
+    } else {
+      newRows++;
+    }
+
+    if (effOwner.match_status === 'matched_client') matchedClient++;
+    else if (effOwner.match_status === 'agent_pool') agentPool++;
+    else if (effOwner.match_status === 'unknown_number') unknownNumbers++;
+    else unassigned++;
+
+    netSmsDelta += deltaSms;
+    netOwnerRevDelta = round4(netOwnerRevDelta + deltaOwnerRev);
+    netAgentPayDelta = round4(netAgentPayDelta + deltaAgentPay);
+    netClientPkrDelta = round2(netClientPkrDelta + deltaClientPkr);
+    netOwnerProfitDelta = round4(netOwnerProfitDelta + deltaOwnerProfit);
+
+    evaluatedRows.push({
+      stat_key: row.stat_key,
+      action,
+      date_ymd: row.date_ymd,
+      number_digits: effOwner.number_digits,
+      number: effOwner.number,
+      service: row.service,
+      service_normalized: row.service_normalized,
+      range_id: effOwner.range_id,
+      range_name: effOwner.range_name,
+      country: effOwner.country,
+      match_status: effOwner.match_status,
+      resolved_via: effOwner.resolved_via,
+      agent_id: effOwner.agent_id,
+      agent_name: effOwner.agent_name,
+      client_id: effOwner.client_id,
+      client_name: effOwner.client_name,
+      owner_cost_usd: effOwner.owner_cost_usd,
+      agent_rate_usd: effOwner.agent_rate_usd,
+      client_rate_pkr: effOwner.client_rate_pkr,
+      fx_usd_to_pkr: fin.fx_usd_to_pkr,
+      prev_sms_count: prevCount,
+      sms_count: row.sms_count,
+      delta_sms: deltaSms,
+      owner_revenue_usd: fin.owner_revenue_usd,
+      agent_payout_usd: fin.agent_payout_usd,
+      client_payout_pkr: fin.client_payout_pkr,
+      client_payout_usd: fin.client_payout_usd,
+      owner_profit_usd: fin.owner_profit_usd,
+      agent_profit_usd: fin.agent_profit_usd,
+      clears_at: clearsAt,
+      existing_snapshot: existing ? { ...existing } : null
+    });
+  }
+
+  return {
+    parsed,
+    date_min: dateMin,
+    date_max: dateMax,
+    summary: {
+      total_rows: evaluatedRows.length,
+      new_rows: newRows,
+      updated_rows: updatedRows,
+      unchanged_rows: unchangedRows,
+      matched_client: matchedClient,
+      agent_pool: agentPool,
+      unassigned: unassigned + unknownNumbers,
+      unknown_numbers: unknownNumbers,
+      total_sms_in_file: totalSmsInFile,
+      net_sms_delta: netSmsDelta,
+      net_owner_revenue_delta_usd: netOwnerRevDelta,
+      net_agent_payout_delta_usd: netAgentPayDelta,
+      net_client_payout_delta_pkr: netClientPkrDelta,
+      net_owner_profit_delta_usd: netOwnerProfitDelta
+    },
+    evaluated_rows: evaluatedRows
+  };
+}
+
+function applyWhitenoiseBalanceDeltas(ownerDeltaUsd, agentDeltasMap, clientDeltasMap) {
+  if (Math.abs(ownerDeltaUsd) > 0.000001) {
+    const users = readDb('users') || [];
+    const oIdx = users.findIndex(u => normRole(u.role) === 'owner');
+    if (oIdx !== -1) {
+      users[oIdx].balance = round6((Number(users[oIdx].balance) || 0) + ownerDeltaUsd);
+      writeDb('users', users);
+    }
+  }
+  if (agentDeltasMap.size > 0) {
+    const agents = readDb('agents') || [];
+    let touched = false;
+    for (const [agId, delta] of agentDeltasMap.entries()) {
+      if (Math.abs(delta) < 0.000001) continue;
+      const idx = agents.findIndex(a => Number(a.id) === Number(agId));
+      if (idx !== -1) {
+        agents[idx].balance = round6((Number(agents[idx].balance) || 0) + delta);
+        touched = true;
+      }
+    }
+    if (touched) writeDb('agents', agents);
+  }
+  if (clientDeltasMap.size > 0) {
+    const clients = readDb('clients') || [];
+    let touched = false;
+    for (const [clId, d] of clientDeltasMap.entries()) {
+      if (Math.abs(d.usd) < 0.000001 && Math.abs(d.pkr) < 0.001) continue;
+      const idx = clients.findIndex(c => Number(c.id) === Number(clId));
+      if (idx !== -1) {
+        clients[idx].balance = round6((Number(clients[idx].balance) || 0) + d.usd);
+        clients[idx].balance_pkr = round2((Number(clients[idx].balance_pkr) || 0) + d.pkr);
+        touched = true;
+      }
+    }
+    if (touched) writeDb('clients', clients);
+  }
+}
+
+function commitWhitenoiseExcelEvaluation(evalRes, actorUsername = 'Owner') {
+  const stats = readDb('whitenoise_daily_stats') || [];
+  const statsByKey = new Map();
+  stats.forEach((st, idx) => { if (st && st.stat_key) statsByKey.set(st.stat_key, idx); });
+
+  const batches = readDb('whitenoise_upload_batches') || [];
+  const batchNumId = nextId(batches);
+  const batchId = `WN-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(batchNumId).padStart(4, '0')}`;
+  const nowIso = new Date().toISOString();
+
+  const insertedKeys = [];
+  const previousSnapshots = [];
+  let idCounter = nextId(stats);
+
+  let ownerDeltaUsd = 0;
+  const agentDeltas = new Map();
+  const clientDeltas = new Map();
+
+  const addAgentDelta = (agId, d) => {
+    if (!agId || !d) return;
+    agentDeltas.set(Number(agId), (agentDeltas.get(Number(agId)) || 0) + d);
+  };
+  const addClientDelta = (clId, dUsd, dPkr) => {
+    if (!clId || (!dUsd && !dPkr)) return;
+    const prev = clientDeltas.get(Number(clId)) || { usd: 0, pkr: 0 };
+    prev.usd += dUsd;
+    prev.pkr += dPkr;
+    clientDeltas.set(Number(clId), prev);
+  };
+
+  for (const r of evalRes.evaluated_rows) {
+    if (r.action === 'unchanged') continue;
+    const { action, prev_sms_count, delta_sms, existing_snapshot, ...cleanFields } = r;
+
+    if (action === 'new') {
+      const rec = {
+        id: idCounter++,
+        ...cleanFields,
+        payterm: 'Monthly',
+        payout_schedule: 'monthly30_5',
+        is_whitenoise: true,
+        source: 'whitenoise_excel',
+        batch_id: batchId,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      stats.push(rec);
+      statsByKey.set(rec.stat_key, stats.length - 1);
+      insertedKeys.push(rec.stat_key);
+
+      ownerDeltaUsd += Number(rec.owner_profit_usd) || 0;
+      addAgentDelta(rec.agent_id, Number(rec.agent_profit_usd) || 0);
+      addClientDelta(rec.client_id, Number(rec.client_payout_usd) || 0, Number(rec.client_payout_pkr) || 0);
+    } else if (action === 'updated') {
+      const idx = statsByKey.get(r.stat_key);
+      if (idx !== undefined && stats[idx]) {
+        const prevRec = { ...stats[idx] };
+        previousSnapshots.push(prevRec);
+
+        const nextRec = {
+          ...prevRec,
+          ...cleanFields,
+          batch_id: batchId,
+          updated_at: nowIso
+        };
+        stats[idx] = nextRec;
+
+        ownerDeltaUsd += (Number(nextRec.owner_profit_usd) || 0) - (Number(prevRec.owner_profit_usd) || 0);
+        addAgentDelta(prevRec.agent_id, -(Number(prevRec.agent_profit_usd) || 0));
+        addAgentDelta(nextRec.agent_id, Number(nextRec.agent_profit_usd) || 0);
+        addClientDelta(prevRec.client_id, -(Number(prevRec.client_payout_usd) || 0), -(Number(prevRec.client_payout_pkr) || 0));
+        addClientDelta(nextRec.client_id, Number(nextRec.client_payout_usd) || 0, Number(nextRec.client_payout_pkr) || 0);
+      }
+    }
+  }
+
+  writeDb('whitenoise_daily_stats', stats);
+  applyWhitenoiseBalanceDeltas(ownerDeltaUsd, agentDeltas, clientDeltas);
+
+  const batchRec = {
+    id: batchNumId,
+    batch_id: batchId,
+    filename: evalRes.parsed.filename,
+    sheet_name: evalRes.parsed.selected_sheet,
+    layout: evalRes.parsed.layout,
+    uploaded_by: actorUsername,
+    uploaded_at: nowIso,
+    date_min: evalRes.date_min,
+    date_max: evalRes.date_max,
+    total_rows: evalRes.summary.total_rows,
+    rows_inserted: evalRes.summary.new_rows,
+    rows_updated: evalRes.summary.updated_rows,
+    rows_unchanged: evalRes.summary.unchanged_rows,
+    matched_client: evalRes.summary.matched_client,
+    agent_pool: evalRes.summary.agent_pool,
+    unassigned: evalRes.summary.unassigned,
+    total_sms_in_file: evalRes.summary.total_sms_in_file,
+    net_sms_delta: evalRes.summary.net_sms_delta,
+    net_owner_revenue_delta_usd: evalRes.summary.net_owner_revenue_delta_usd,
+    net_agent_payout_delta_usd: evalRes.summary.net_agent_payout_delta_usd,
+    net_client_payout_delta_pkr: evalRes.summary.net_client_payout_delta_pkr,
+    net_owner_profit_delta_usd: evalRes.summary.net_owner_profit_delta_usd,
+    rolled_back: false,
+    rolled_back_at: null,
+    rolled_back_by: null,
+    inserted_keys: insertedKeys,
+    previous_snapshots: previousSnapshots
+  };
+
+  batches.unshift(batchRec);
+  writeDb('whitenoise_upload_batches', batches);
+
+  logAudit(
+    actorUsername,
+    'Whitenoise Excel Upload',
+    `${batchId} (${batchRec.filename}): +${batchRec.rows_inserted} new, ${batchRec.rows_updated} updated, ${batchRec.rows_unchanged} unchanged, SMS delta ${batchRec.net_sms_delta >= 0 ? '+' : ''}${batchRec.net_sms_delta}`,
+    'CDR 2'
+  );
+
+  const { inserted_keys, previous_snapshots, ...publicBatch } = batchRec;
+  return publicBatch;
+}
+
+function rollbackWhitenoiseBatchById(batchIdOrNum, actorUsername = 'Owner') {
+  const batches = readDb('whitenoise_upload_batches') || [];
+  const bIdx = batches.findIndex(b => String(b.id) === String(batchIdOrNum) || String(b.batch_id) === String(batchIdOrNum));
+  if (bIdx === -1) throw new Error('Upload batch not found.');
+  const batch = batches[bIdx];
+  if (batch.rolled_back) throw new Error('This upload batch has already been rolled back.');
+
+  let stats = readDb('whitenoise_daily_stats') || [];
+  const insertedSet = new Set(batch.inserted_keys || []);
+  const prevSnapMap = new Map();
+  for (const snap of (batch.previous_snapshots || [])) {
+    if (snap && snap.stat_key) prevSnapMap.set(snap.stat_key, snap);
+  }
+
+  let ownerDeltaUsd = 0;
+  const agentDeltas = new Map();
+  const clientDeltas = new Map();
+  const addAgentDelta = (agId, d) => { if (agId && d) agentDeltas.set(Number(agId), (agentDeltas.get(Number(agId)) || 0) + d); };
+  const addClientDelta = (clId, dUsd, dPkr) => {
+    if (!clId || (!dUsd && !dPkr)) return;
+    const prev = clientDeltas.get(Number(clId)) || { usd: 0, pkr: 0 };
+    prev.usd += dUsd; prev.pkr += dPkr;
+    clientDeltas.set(Number(clId), prev);
+  };
+
+  let removedCount = 0;
+  let restoredCount = 0;
+  const nextStats = [];
+
+  for (const st of stats) {
+    if (!st) continue;
+    if (insertedSet.has(st.stat_key)) {
+      removedCount++;
+      ownerDeltaUsd -= Number(st.owner_profit_usd) || 0;
+      addAgentDelta(st.agent_id, -(Number(st.agent_profit_usd) || 0));
+      addClientDelta(st.client_id, -(Number(st.client_payout_usd) || 0), -(Number(st.client_payout_pkr) || 0));
+      continue;
+    }
+    if (prevSnapMap.has(st.stat_key)) {
+      const restored = prevSnapMap.get(st.stat_key);
+      restoredCount++;
+      ownerDeltaUsd += (Number(restored.owner_profit_usd) || 0) - (Number(st.owner_profit_usd) || 0);
+      addAgentDelta(st.agent_id, -(Number(st.agent_profit_usd) || 0));
+      addAgentDelta(restored.agent_id, Number(restored.agent_profit_usd) || 0);
+      addClientDelta(st.client_id, -(Number(st.client_payout_usd) || 0), -(Number(st.client_payout_pkr) || 0));
+      addClientDelta(restored.client_id, Number(restored.client_payout_usd) || 0, Number(restored.client_payout_pkr) || 0);
+      nextStats.push(restored);
+      continue;
+    }
+    nextStats.push(st);
+  }
+
+  writeDb('whitenoise_daily_stats', nextStats);
+  applyWhitenoiseBalanceDeltas(ownerDeltaUsd, agentDeltas, clientDeltas);
+
+  batches[bIdx] = {
+    ...batch,
+    rolled_back: true,
+    rolled_back_at: new Date().toISOString(),
+    rolled_back_by: actorUsername
+  };
+  writeDb('whitenoise_upload_batches', batches);
+
+  logAudit(actorUsername, 'Whitenoise Batch Rollback', `Rolled back ${batch.batch_id} (${batch.filename}): removed ${removedCount}, restored ${restoredCount}`, 'CDR 2');
+  return {
+    batch_id: batch.batch_id,
+    removed_rows: removedCount,
+    restored_rows: restoredCount
+  };
+}
+
+function statRowToVirtualSms(st, fxFallback = 280) {
+  const C = Math.max(0, Math.round(Number(st.sms_count) || 0));
+  const fx = Number(st.fx_usd_to_pkr) || fxFallback;
+  const ownerRev = Number(st.owner_revenue_usd) || 0;
+  const agPay = Number(st.agent_payout_usd) || 0;
+  const clPkr = Number(st.client_payout_pkr) || 0;
+  const clUsd = Number(st.client_payout_usd) || (clPkr ? round4(clPkr / fx) : 0);
+  const ownerProfit = st.owner_profit_usd != null ? Number(st.owner_profit_usd) : (st.agent_id ? round4(Math.max(0, ownerRev - agPay)) : ownerRev);
+  const agProfit = st.agent_profit_usd != null ? Number(st.agent_profit_usd) : (st.agent_id ? round4(agPay - clUsd) : 0);
+
+  return {
+    id: `wns_${st.id || st.stat_key}`,
+    stat_key: st.stat_key,
+    record_type: 'excel_stat',
+    date_ymd: st.date_ymd,
+    date: st.date_ymd,
+    timestamp: `${st.date_ymd} 12:00:00`,
+    created: st.created_at || `${st.date_ymd}T12:00:00.000Z`,
+    provider: 'Whitenoise',
+    source: 'whitenoise_excel',
+    is_whitenoise: true,
+    payterm: 'Monthly',
+    payout_schedule: 'monthly30_5',
+    cycle_days: 30,
+    hold_days: 5,
+    range_id: st.range_id || null,
+    range_name: st.range_name || 'Whitenoise',
+    range_label: st.range_name || 'Whitenoise',
+    range: st.range_name || 'Whitenoise',
+    country: st.country || '',
+    number: st.number || st.number_digits || '',
+    number_digits: st.number_digits || normalizePhoneDigits(st.number),
+    cli: st.service || 'General',
+    app: st.service || 'General',
+    service: st.service || 'General',
+    message: '',
+    sms_count: C,
+    status: 'delivered',
+    cause: 'Excel Report',
+    match_status: st.match_status || (st.client_id ? 'matched_client' : (st.agent_id ? 'agent_pool' : 'unassigned')),
+    agent_id: st.agent_id || null,
+    agent: st.agent_name || '',
+    agent_name: st.agent_name || '',
+    agent_username: st.agent_name || '',
+    client_id: st.client_id || null,
+    client: st.client_name || '',
+    client_name: st.client_name || '',
+    client_username: st.client_name || '',
+    currency: 'USD',
+    unit_owner_rate_usd: Number(st.owner_cost_usd) || 0,
+    unit_agent_rate_usd: Number(st.agent_rate_usd) || 0,
+    unit_client_rate_pkr: Number(st.client_rate_pkr) || 0,
+    fx_usd_to_pkr: fx,
+    company_rate: ownerRev,
+    company_payout: ownerRev,
+    carrier_revenue: ownerRev,
+    owner_revenue_usd: ownerRev,
+    agent_rate: agPay,
+    agent_payout: agPay,
+    agent_payout_usd: agPay,
+    client_rate: clUsd,
+    client_payout: clUsd,
+    client_amount: clUsd,
+    client_amount_pkr: clPkr,
+    client_payout_pkr: clPkr,
+    agent_amount: agProfit,
+    owner_amount: ownerProfit,
+    profit: ownerProfit,
+    clears_at: st.clears_at || computeMonthlyClearIso(`${st.date_ymd} 12:00:00`),
+    batch_id: st.batch_id || ''
+  };
+}
+
+function getScopedWhitenoiseStatsAsVirtualSms(sessionUser, opts = {}) {
+  const stats = readDb('whitenoise_daily_stats') || [];
+  if (!stats.length) return [];
+  const sRole = normRole(sessionUser?.role);
+  const uid = Number(sessionUser?.id);
+  const uname = String(sessionUser?.username || '').trim().toLowerCase();
+  const fx = getUsdToPkrRate();
+
+  let filtered = stats;
+  if (sRole === 'client') {
+    filtered = stats.filter(st => Number(st.client_id) === uid || (uname && String(st.client_name || '').toLowerCase() === uname));
+  } else if (sRole === 'agent') {
+    filtered = stats.filter(st => Number(st.agent_id) === uid || (uname && String(st.agent_name || '').toLowerCase() === uname));
+    if (opts.client_id) {
+      filtered = filtered.filter(st => Number(st.client_id) === Number(opts.client_id));
+    }
+  } else if (sRole === 'owner') {
+    if (opts.agent_id) filtered = filtered.filter(st => Number(st.agent_id) === Number(opts.agent_id));
+    if (opts.client_id) filtered = filtered.filter(st => Number(st.client_id) === Number(opts.client_id));
+  } else {
+    return [];
+  }
+
+  return filtered.map(st => statRowToVirtualSms(st, fx));
+}
 
 // ── Middleware ───────────────────────────────────────────────
 // Enable high-efficiency gzip/deflate compression for fast responses over slow networks
@@ -4599,9 +5861,7 @@ app.get(['/health', '/ping'], (req, res) => {
   res.status(200).json({
     status: 'ok',
     uptime: Math.round(process.uptime()),
-    timestamp: new Date().toISOString(),
-    smpp_listening: Boolean(typeof smppServerState !== 'undefined' && smppServerState.listening && smppServerInstance),
-    smpp_port: (typeof smppServerState !== 'undefined' && smppServerState.port) || Number(process.env.SMPP_PORT) || 2775
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -4834,7 +6094,7 @@ function normRole(r) { r = String(r || '').toLowerCase(); return r === 'admin' ?
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // First matching rule wins. Roles are lower-case; 'owner' includes the legacy 'admin'.
 const API_RULES = [
-  { p: /^\/(backup|login-panels|cr-api-connections|whitenoise-connections|webhook|firewall|smpp)(\/|$)/, roles: ['owner'] },
+  { p: /^\/(backup|login-panels|cr-api-connections|whitenoise-connections|whitenoise-excel|firewall)(\/|$)/, roles: ['owner'] },
   { p: /^\/(reports|dashboard|cli-routes)(\/|$)/, roles: ['owner'] },
   { p: /^\/numbers\/(upload|import-to-range|bulk-range-import|bulk-delete-many|download|test|blacklist)(\/.*)?$/, roles: ['owner'] },
   { p: /^\/numbers\/(bulk-allocate|allocation-history)(\/.*)?$/, roles: ['owner', 'agent'] },
@@ -4876,9 +6136,7 @@ const CLIENT_ALLOW = [
 function ruleHit(list, p, method) { return list.some(r => (!r.m || r.m.has(method)) && r.p.test(p)); }
 
 function getInboundToken() {
-  if (process.env.INBOUND_TOKEN) return String(process.env.INBOUND_TOKEN);
-  const cfg = readDb('webhook_config');
-  return (cfg && !Array.isArray(cfg) && cfg.inbound_token) ? String(cfg.inbound_token) : '';
+  return process.env.INBOUND_TOKEN ? String(process.env.INBOUND_TOKEN) : '';
 }
 function safeEqual(a, b) {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b));
@@ -4894,9 +6152,7 @@ app.use('/api', (req, res, next) => {
     return res.status(200).json({
       status: 'ok',
       uptime: Math.round(process.uptime()),
-      timestamp: new Date().toISOString(),
-      smpp_listening: Boolean(typeof smppServerState !== 'undefined' && smppServerState.listening && smppServerInstance),
-      smpp_port: (typeof smppServerState !== 'undefined' && smppServerState.port) || Number(process.env.SMPP_PORT) || 2775
+      timestamp: new Date().toISOString()
     });
   }
 
@@ -4918,10 +6174,8 @@ app.use('/api', (req, res, next) => {
     if (!sent || !safeEqual(sent, expected)) return res.status(403).json({ status: 'error', error: 'Forbidden. Invalid inbound token.' });
     return next();
   }
-  // 4. Token-authenticated API routes (the route itself verifies the token)
-  if ((p === '/sms' && method === 'GET') || p === '/sms/viewstats' || p.startsWith('/crapi/')) return next();
 
-  // 5. Everything else needs a session
+  // 4. Everything else needs a session
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
 
@@ -5512,8 +6766,8 @@ function getScopedSmsList(req, fromDate = null) {
 app.get('/api/dashboard/stats', (req, res) => {
   const numbers = readDb('numbers') || [];
   const sms = readDb('sms_log') || [];
+  const wnStats = readDb('whitenoise_daily_stats') || [];
   const users = readDb('users') || [];
-  const sessions = readDb('smpp_sessions') || [];
   const reg_req = readDb('registration_requests') || [];
   const pay_req = readDb('payout_requests') || [];
   const blocked = readDb('blocked_ips') || [];
@@ -5526,6 +6780,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   let monthCount = 0;
   let yearCount = 0;
   let revenueToday = 0;
+  let wnTotalSms = 0;
 
   for (const s of sms) {
     const dStr = extractDateStr(s);
@@ -5541,8 +6796,28 @@ app.get('/api/dashboard/stats', (req, res) => {
     if (dStr >= yearStartStr) yearCount++;
   }
 
+  for (const st of wnStats) {
+    const c = Math.max(0, Math.round(Number(st.sms_count) || 0));
+    const dStr = String(st.date_ymd || '').slice(0, 10);
+    if (!c) continue;
+    wnTotalSms += c;
+    if (dStr) {
+      if (todaySet.has(dStr)) {
+        todayCount += c;
+        revenueToday += (Number(st.owner_profit_usd || st.owner_revenue_usd) || 0);
+      } else if (yesterdaySet.has(dStr)) {
+        yesterdayCount += c;
+      }
+      if (dStr >= weekStartStr) weekCount += c;
+      if (dStr >= monthStartStr) monthCount += c;
+      if (dStr >= yearStartStr) yearCount += c;
+    }
+  }
+
   const delivered = sms.filter(s => s.status === 'delivered');
-  const success_rate = sms.length ? Math.round((delivered.length / sms.length) * 1000) / 10 : 0;
+  const totalAllSms = sms.length + wnTotalSms;
+  const deliveredAll = delivered.length + wnTotalSms;
+  const success_rate = totalAllSms ? Math.round((deliveredAll / totalAllSms) * 1000) / 10 : 0;
 
   const trafficData = [];
   for (let i = 23; i >= 0; i--) {
@@ -5557,7 +6832,10 @@ app.get('/api/dashboard/stats', (req, res) => {
     const dayKey = d.toISOString().slice(0, 10);
     const daySum = sms
       .filter(s => extractDateStr(s) === dayKey)
-      .reduce((acc, s) => acc + (Number(s.profit || s.carrier_revenue) || 0), 0);
+      .reduce((acc, s) => acc + (Number(s.profit || s.carrier_revenue) || 0), 0) +
+      wnStats
+        .filter(st => String(st.date_ymd || '').slice(0, 10) === dayKey)
+        .reduce((acc, st) => acc + (Number(st.owner_profit_usd || st.owner_revenue_usd) || 0), 0);
     profitData.push(Math.round(daySum * 100) / 100);
   }
 
@@ -5582,7 +6860,7 @@ app.get('/api/dashboard/stats', (req, res) => {
     allocated: allocated.length,
     allocated_to_agents: allocated_to_agents.length,
     allocated_to_clients: allocated_to_clients.length,
-    total_sms: sms.length,
+    total_sms: totalAllSms,
     sms_today: todayCount,
     total_sms_today: todayCount,
     today_sms: todayCount,
@@ -5595,10 +6873,9 @@ app.get('/api/dashboard/stats', (req, res) => {
     this_year: yearCount,
     this_year_sms: yearCount,
     revenue_today: Math.round(revenueToday * 100) / 100,
-    delivered_sms: delivered.length,
+    delivered_sms: deliveredAll,
     success_rate: success_rate,
     total_users: users.length,
-    smpp_sessions: sessions.length,
     traffic_24h: trafficData,
     profit_30d: profitData,
     app_distribution: appCounts,
@@ -5872,7 +7149,7 @@ app.get('/api/providers', (req, res) => {
     const numbers = readDb('numbers') || [];
     const crConns = readDb('cr_api_connections') || [];
     const wnConns = readDb('whitenoise_connections') || [];
-    const smppAccs = readDb('smpp_accounts') || [];
+    const loginPanels = readDb('login_panels') || [];
     const provSet = new Set();
 
     // Dynamically add providers from connected CR API panels (panel_name is the provider)
@@ -5885,16 +7162,16 @@ app.get('/api/providers', (req, res) => {
       }
     });
 
+    // Dynamically add providers from Web Scraping Login Panels
+    loginPanels.forEach(lp => {
+      const name = (lp.panel_name || lp.name || '').trim();
+      if (name && name !== 'Manual' && name !== '—') provSet.add(name);
+    });
+
     // Dynamically add providers from Whitenoise connections
     wnConns.forEach(w => {
       const name = (w.provider_tag || w.name || 'Whitenoise').trim();
       if (name) provSet.add(name);
-    });
-
-    // Dynamically add providers from SMPP accounts (company or system_id is the provider)
-    smppAccs.forEach(s => {
-      const name = (s.company || s.system_id || '').trim();
-      if (name && name !== 'Manual' && name !== '—') provSet.add(name);
     });
 
     // Dynamically add providers from active SMS ranges
@@ -7015,13 +8292,17 @@ app.get('/api/finance/reconciliation', requireAuth, (req, res) => {
   const isOwner = normRole(sessionUser.role) === 'owner';
   if (!isOwner) return res.status(403).json({ error: 'Forbidden. Owner only.' });
 
-  const allSms = readSmsWithArchive();
+  const fxRate = getUsdToPkrRate();
+  const wnVirtual = (readDb('whitenoise_daily_stats') || []).map(st => statRowToVirtualSms(st, fxRate));
+  const allSms = [...readSmsWithArchive(), ...wnVirtual];
   let totalCompany = 0;
   let totalOwner = 0;
   let totalAgent = 0;
   let totalClient = 0;
+  let totalSmsCount = 0;
 
   for (const s of allSms) {
+    totalSmsCount += (Number(s.sms_count) > 0 ? Math.round(Number(s.sms_count)) : 1);
     totalCompany += (Number(s.company_rate) || 0);
     totalOwner += (Number(s.owner_amount) || 0);
     totalAgent += (Number(s.agent_amount) || 0);
@@ -7030,11 +8311,11 @@ app.get('/api/finance/reconciliation', requireAuth, (req, res) => {
 
   totalCompany = Math.round(totalCompany * 1000000) / 1000000;
   const totalDistributed = Math.round((totalOwner + totalAgent + totalClient) * 1000000) / 1000000;
-  const isReconciled = Math.abs(totalCompany - totalDistributed) < 0.0001;
+  const isReconciled = Math.abs(totalCompany - totalDistributed) < 0.001;
 
   res.json({
     success: true,
-    total_sms: allSms.length,
+    total_sms: totalSmsCount,
     company_revenue: totalCompany,
     owner_amount: Math.round(totalOwner * 1000000) / 1000000,
     agent_amount: Math.round(totalAgent * 1000000) / 1000000,
@@ -7051,6 +8332,7 @@ app.get(['/api/payments', '/api/payments/balance', '/api/payments/summary'], req
   const userId = Number(sessionUser.id);
   const myUsername = String(sessionUser.username || '').trim().toLowerCase();
   const allSms = readSmsWithArchive();
+  const wnStatsVirtual = getScopedWhitenoiseStatsAsVirtualSms(sessionUser);
   const allPayouts = readDb('payout_requests') || [];
 
   const fxRate = getUsdToPkrRate();
@@ -7058,15 +8340,21 @@ app.get(['/api/payments', '/api/payments/balance', '/api/payments/summary'], req
   let earnedPkr = 0;
   let scopedSms = [];
   if (sRole === 'client') {
-    scopedSms = allSms.filter(s => (s.client_username && s.client_username.toLowerCase() === myUsername) || Number(s.client_id) === userId);
+    scopedSms = [
+      ...allSms.filter(s => (s.client_username && s.client_username.toLowerCase() === myUsername) || Number(s.client_id) === userId),
+      ...wnStatsVirtual
+    ];
     earned = scopedSms.reduce((sum, s) => sum + (Number(s.client_amount) || 0), 0);
     earnedPkr = scopedSms.reduce((sum, s) => sum + (s.client_amount_pkr != null ? Number(s.client_amount_pkr) : (Number(s.client_amount) || 0) * (Number(s.fx_usd_to_pkr) || fxRate)), 0);
   } else if (sRole === 'agent') {
-    scopedSms = allSms.filter(s => (s.agent_username && s.agent_username.toLowerCase() === myUsername) || Number(s.agent_id) === userId);
+    scopedSms = [
+      ...allSms.filter(s => (s.agent_username && s.agent_username.toLowerCase() === myUsername) || Number(s.agent_id) === userId),
+      ...wnStatsVirtual
+    ];
     earned = scopedSms.reduce((sum, s) => sum + (Number(s.agent_amount) || 0), 0);
     earnedPkr = earned * fxRate;
   } else if (sRole === 'owner' || sRole === 'admin') {
-    scopedSms = allSms;
+    scopedSms = [...allSms, ...wnStatsVirtual];
     earned = scopedSms.reduce((sum, s) => sum + (Number(s.owner_amount) || 0), 0);
     earnedPkr = earned * fxRate;
   }
@@ -7292,7 +8580,9 @@ app.get('/api/statements', requireAuth, (req, res) => {
     }
   }
 
-  const allSms = readSmsWithArchive();
+  const fxRate = getUsdToPkrRate();
+  const wnStatsAll = (readDb('whitenoise_daily_stats') || []).map(st => statRowToVirtualSms(st, fxRate));
+  const allSms = [...readSmsWithArchive(), ...wnStatsAll];
   const allPayouts = readDb('payout_requests') || [];
 
   let relevantSms = [];
@@ -7309,8 +8599,9 @@ app.get('/api/statements', requireAuth, (req, res) => {
     const m = (s.date || (s.timestamp ? s.timestamp.slice(0, 7) : '')).slice(0, 7) || 'Current';
     if (!monthMap[m]) monthMap[m] = { month: m, credit: 0, debit: 0, count: 0, currency };
     const amt = reqClientId ? (Number(s.client_amount) || 0) : (reqAgentId ? (Number(s.agent_amount) || 0) : (Number(s.owner_amount) || 0));
+    const cnt = (Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
     monthMap[m].credit += amt;
-    monthMap[m].count++;
+    monthMap[m].count += cnt;
   }
 
   const payouts = allPayouts.filter(p => {
@@ -7556,86 +8847,6 @@ app.get('/api/numbers/allocation-history', (req, res) => {
   const limit = parseInt(req.query.limit) || 15;
   const start = (page - 1) * limit;
   res.json({ data: data.slice(start, start + limit), total: data.length });
-});
-
-// 6. Tokens (Array) — Scoped to Owner and Agent
-app.get('/api/tokens', requireAuth, (req, res) => {
-  const sessionUser = req.sessionUser;
-  const sRole = (sessionUser.role || '').toLowerCase();
-  const isOwner = sRole === 'owner' || sRole === 'admin';
-  const isAgent = sRole === 'agent';
-
-  if (!isOwner && !isAgent) {
-    return res.status(403).json({ error: 'Forbidden. Tokens are restricted to Owner and Agents.' });
-  }
-
-  let tokens = readDb('api_tokens') || [];
-  if (isAgent) {
-    tokens = tokens.filter(t => Number(t.agent_id) === Number(sessionUser.id));
-  } else if (req.query.agent_id) {
-    tokens = tokens.filter(t => Number(t.agent_id) === Number(req.query.agent_id));
-  }
-  res.json(tokens.map(publicTokenView));
-});
-
-app.post('/api/tokens', requireAuth, (req, res) => {
-  const sessionUser = req.sessionUser;
-  const sRole = (sessionUser.role || '').toLowerCase();
-  const isOwner = sRole === 'owner' || sRole === 'admin';
-  const isAgent = sRole === 'agent';
-
-  if (!isOwner && !isAgent) {
-    return res.status(403).json({ error: 'Forbidden. Only Owner and Agents can create API tokens.' });
-  }
-
-  const tokens = readDb('api_tokens') || [];
-  const agents = readDb('agents') || [];
-  const targetAgentId = isAgent ? Number(sessionUser.id) : (req.body.agent_id ? Number(req.body.agent_id) : null);
-  const agent = targetAgentId ? agents.find(a => Number(a.id) === targetAgentId) : null;
-
-  const rawToken = newSecretToken();
-  const token = {
-    id: nextId(tokens),
-    token_hash: sha256Hex(rawToken),
-    token_hint: rawToken.slice(-4),
-    name: req.body.name || 'API Key',
-    agent_id: agent ? agent.id : (isAgent ? Number(sessionUser.id) : null),
-    agent_username: agent ? agent.username : (isAgent ? sessionUser.username : ''),
-    role: isAgent ? 'Agent' : (agent ? 'Agent' : 'Owner'),
-    status: req.body.status || 'active',
-    calls: 0,
-    last_used: null,
-    created: new Date().toISOString()
-  };
-  tokens.unshift(token);
-  writeDb('api_tokens', tokens);
-  logAudit(sessionUser.username || 'Owner', 'Create API Token', `Created token '${token.name}' for agent '${token.agent_username || 'Owner'}'`, 'API Tokens');
-  res.json({ ...publicTokenView(token), token: rawToken, shown_once: true });
-});
-
-app.delete('/api/tokens/:id', requireAuth, (req, res) => {
-  const sessionUser = req.sessionUser;
-  const sRole = (sessionUser.role || '').toLowerCase();
-  const isOwner = sRole === 'owner' || sRole === 'admin';
-  const isAgent = sRole === 'agent';
-
-  if (!isOwner && !isAgent) {
-    return res.status(403).json({ error: 'Forbidden.' });
-  }
-
-  let tokens = readDb('api_tokens') || [];
-  const id = Number(req.params.id);
-  const targetToken = tokens.find(t => Number(t.id) === id);
-  if (!targetToken) {
-    return res.status(404).json({ error: 'Token not found' });
-  }
-
-  if (isAgent && Number(targetToken.agent_id) !== Number(sessionUser.id)) {
-    return res.status(403).json({ error: 'Forbidden. You can only delete your own tokens.' });
-  }
-
-  writeDb('api_tokens', tokens.filter(t => Number(t.id) !== id));
-  res.json({ success: true });
 });
 
 // 7. Services (Array - clean metadata tags without fixed auto rates)
@@ -7983,1427 +9194,6 @@ app.get('/api/hierarchy', requireAuth, (req, res) => {
     owner: safeUser(ownerRec),
     agents: agentNodes
   }]);
-});
-
-// 11. SMPP CORE ENGINE, ENCRYPTION, REAL SERVER & CLIENT MANAGERS
-
-function getSmppKey() {
-  if (process.env.SMPP_SECRET) {
-    return crypto.createHash('sha256').update(process.env.SMPP_SECRET).digest();
-  }
-  const keyPath = path.join(DATA_DIR, '.smpp.key');
-  try {
-    if (fs.existsSync(keyPath)) {
-      const raw = fs.readFileSync(keyPath);
-      if (raw.length === 32) return raw;
-    }
-    const newKey = crypto.randomBytes(32);
-    fs.writeFileSync(keyPath, newKey, { mode: 0o600 });
-    return newKey;
-  } catch (err) {
-    console.error('getSmppKey error: cannot access key file:', err);
-    throw new Error('SMPP encryption key unavailable');
-  }
-}
-
-function encryptSmppSecret(text) {
-  if (!text) return '';
-  try {
-    const key = getSmppKey();
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    const enc = Buffer.concat([cipher.update(String(text), 'utf8'), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return Buffer.concat([iv, tag, enc]).toString('base64');
-  } catch (err) {
-    console.error('encryptSmppSecret error:', err);
-    return '';
-  }
-}
-
-function decryptSmppSecret(b64) {
-  if (!b64) return '';
-  try {
-    const key = getSmppKey();
-    const buf = Buffer.from(b64, 'base64');
-    if (buf.length < 28) return '';
-    const iv = buf.subarray(0, 12);
-    const tag = buf.subarray(12, 28);
-    const ciphertext = buf.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-  } catch (err) {
-    return '';
-  }
-}
-
-function safeSmppAccount(acc) {
-  if (!acc) return null;
-  const copy = { ...acc };
-  delete copy.password;
-  delete copy.password_hash;
-  delete copy.password_enc;
-  return copy;
-}
-
-// ── SMPP Logging (data/smpp_logs.json, cap 5000) ─────────────────
-function logSmppEvent(event, ip, reason, extra = {}) {
-  try {
-    const logs = readDb('smpp_logs') || [];
-    const entry = {
-      id: nextId(logs),
-      event: String(event || ''),
-      ip: String(ip || '127.0.0.1').replace(/^::ffff:/, ''),
-      reason: String(reason || ''),
-      timestamp: new Date().toISOString(),
-      ...extra
-    };
-    logs.unshift(entry);
-    if (logs.length > 5000) logs.length = 5000;
-    writeDb('smpp_logs', logs);
-  } catch (e) {
-    console.error('logSmppEvent error:', e);
-  }
-}
-
-// ── Failed Binds Tracking (5 failed binds in 10m -> block + firewall) ──
-const failedSmppBinds = new Map(); // ip -> number[]
-
-function recordFailedSmppBind(ip, systemId = '') {
-  const cleanIp = String(ip || '127.0.0.1').trim().replace(/^::ffff:/, '');
-  const now = Date.now();
-  let list = (failedSmppBinds.get(cleanIp) || []).filter(t => now - t < 600000); // 10 min window
-  list.push(now);
-  failedSmppBinds.set(cleanIp, list);
-  logSmppEvent('bind_fail', cleanIp, `Bind failed for system_id '${systemId}'`, { system_id: systemId });
-
-  if (list.length >= 5) {
-    try {
-      const blocked = readDb('blocked_ips') || [];
-      if (!blocked.some(b => (b.ip || '').replace(/^::ffff:/, '') === cleanIp)) {
-        blocked.push({
-          id: nextId(blocked),
-          ip: cleanIp,
-          reason: 'SMPP 5 failed binds in 10 minutes',
-          created: new Date().toISOString()
-        });
-        writeDb('blocked_ips', blocked);
-      }
-    } catch (_) {}
-    logFirewallEvent(cleanIp, 'SMPP Brute Force Blocked (5 failed binds in 10m)', 'smpp:bind');
-    logSmppEvent('block', cleanIp, 'Blocked IP: 5 failed binds in 10 minutes', { system_id: systemId });
-  }
-}
-
-function clearFailedSmppBinds(ip) {
-  const cleanIp = String(ip || '127.0.0.1').trim().replace(/^::ffff:/i, '');
-  failedSmppBinds.delete(cleanIp);
-}
-
-function ipMatchesAllowlist(clientIp, allowlistStr) {
-  const cleanIp = String(clientIp || '').trim().replace(/^::ffff:/i, '');
-  if (!allowlistStr || !String(allowlistStr).trim()) return true;
-  const entries = String(allowlistStr).split(',').map(s => s.trim().replace(/^::ffff:/i, '')).filter(Boolean);
-  if (!entries.length) return true;
-
-  const ipToLong = (v) => {
-    const parts = v.split('.');
-    if (parts.length !== 4) return null;
-    let out = 0;
-    for (const p of parts) {
-      if (!/^\d+$/.test(p)) return null;
-      const n = Number(p);
-      if (n < 0 || n > 255) return null;
-      out = ((out << 8) | n) >>> 0;
-    }
-    return out;
-  };
-
-  for (const rule of entries) {
-    if (rule === '*' || rule === '0.0.0.0/0' || rule === cleanIp) return true;
-    if (rule.includes('/')) {
-      const [base, bitsStr] = rule.split('/');
-      const bits = parseInt(bitsStr, 10);
-      const ipNum = ipToLong(cleanIp);
-      const baseNum = ipToLong(base);
-      if (ipNum !== null && baseNum !== null && Number.isFinite(bits) && bits >= 0 && bits <= 32) {
-        const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-        if ((ipNum & mask) === (baseNum & mask)) return true;
-      }
-    } else if (rule.includes('*')) {
-      const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-      if (new RegExp('^' + escaped + '$').test(cleanIp)) return true;
-    }
-  }
-  return false;
-}
-
-function unblockSmppAccountIps(whitelistStr) {
-  if (!whitelistStr || !String(whitelistStr).trim()) return;
-  const ips = String(whitelistStr).split(',').map(s => s.trim().replace(/^::ffff:/i, '')).filter(Boolean);
-  for (const ip of ips) {
-    failedSmppBinds.delete(ip);
-  }
-  try {
-    const blocked = readDb('blocked_ips') || [];
-    const filtered = blocked.filter(b => {
-      const bIp = String(b?.ip || '').trim().replace(/^::ffff:/i, '');
-      const isAutoSmpp = String(b?.reason || '').includes('SMPP 5 failed binds');
-      return !(isAutoSmpp && ipMatchesAllowlist(bIp, whitelistStr));
-    });
-    if (filtered.length !== blocked.length) {
-      writeDb('blocked_ips', filtered);
-    }
-  } catch (_) {}
-}
-
-// ── Live SMPP Sessions State ────────────────────────────────────
-let nextSmppSessionId = 1;
-const liveSmppSessions = new Map(); // id -> session record & object
-
-function syncLiveSessionsToDb() {
-  try {
-    const list = [];
-    for (const s of liveSmppSessions.values()) {
-      list.push({
-        id: s.id,
-        account_id: s.account_id,
-        system_id: s.system_id,
-        ip: s.ip,
-        bind_type: s.bind_type,
-        direction: s.direction,
-        connected_at: s.connected_at,
-        last_activity: s.last_activity,
-        msgs_in: s.msgs_in || 0,
-        msgs_out: s.msgs_out || 0,
-        messages_sent: (s.msgs_in || 0) + (s.msgs_out || 0),
-        status: s.status || 'active'
-      });
-    }
-    writeDb('smpp_sessions', list);
-  } catch (err) {
-    console.error('syncLiveSessionsToDb error:', err);
-  }
-}
-
-// ── Rolling Throughput Tracking (60s MPS & peak) ────────────────
-const smppMpsHistory = []; // array of timestamps (ms)
-let smppPeakMps = 0;
-
-function recordSmppTrafficMessage() {
-  const now = Date.now();
-  smppMpsHistory.push(now);
-  const cutoff = now - 60000;
-  while (smppMpsHistory.length > 0 && smppMpsHistory[0] < cutoff) {
-    smppMpsHistory.shift();
-  }
-  const oneSecCutoff = now - 1000;
-  let countLastSec = 0;
-  for (let i = smppMpsHistory.length - 1; i >= 0; i--) {
-    if (smppMpsHistory[i] >= oneSecCutoff) countLastSec++;
-    else break;
-  }
-  if (countLastSec > smppPeakMps) {
-    smppPeakMps = countLastSec;
-  }
-}
-
-function getSmppThroughputStats() {
-  const now = Date.now();
-  const cutoff = now - 60000;
-  while (smppMpsHistory.length > 0 && smppMpsHistory[0] < cutoff) {
-    smppMpsHistory.shift();
-  }
-  const current_mps = Math.round((smppMpsHistory.length / 60) * 100) / 100;
-  if (current_mps > smppPeakMps) {
-    smppPeakMps = current_mps;
-  }
-  const settings = readDb('settings') || {};
-  const limit = Number(settings.smpp_max_mps) || Number(settings.smpp_global_max_mps) || 500;
-  return {
-    current_mps,
-    peak_mps: smppPeakMps,
-    limit
-  };
-}
-
-// ── SMPP SERVER LISTENER (Carriers connect to us) ───────────────
-let smppServerInstance = null;
-const smppServerState = {
-  listening: false,
-  host: '0.0.0.0',
-  port: 2775,
-  started_at: null,
-  last_error: null
-};
-
-function handleIncomingSmppSession(session) {
-  const remoteIp = (session.socket && session.socket.remoteAddress)
-    ? session.socket.remoteAddress.replace(/^::ffff:/i, '')
-    : '127.0.0.1';
-  session._ip = remoteIp;
-  logSmppEvent('tcp_connect', remoteIp, `Incoming TCP connection on SMPP port ${smppServerState.port}`);
-
-  session.on('error', (err) => {
-    // Prevent unhandled errors from ever crashing the server
-    const remote = session.socket ? `${session.socket.remoteAddress}:${session.socket.remotePort}` : 'unknown';
-    session._errLogged = true;
-    logSmppEvent('disconnect', session._ip || remoteIp, `Session error (${err.message}) on ${remote}`, { system_id: session._systemId || '' });
-  });
-
-  session.on('close', () => {
-    if (session._liveId) {
-      liveSmppSessions.delete(session._liveId);
-      syncLiveSessionsToDb();
-      logSmppEvent('disconnect', session._ip || remoteIp, `Session closed for ${session._systemId || 'unknown'}`, { system_id: session._systemId });
-    } else if (!session._bindFailedLogged && !session._errLogged) {
-      logSmppEvent('disconnect', session._ip || remoteIp, `TCP connection closed before completing SMPP bind`, { system_id: session._systemId || '' });
-    }
-  });
-
-  const bindCommands = ['bind_transceiver', 'bind_transmitter', 'bind_receiver'];
-  bindCommands.forEach(cmd => {
-    session.on(cmd, async (pdu) => {
-      if (session._binding || session._liveId) {
-        try { session.send(pdu.response({ command_status: smpp.ESME_RALYBND })); } catch (_) {}
-        return;
-      }
-      session._binding = true;
-
-      try {
-        session.pause();
-      } catch (_) {}
-
-      const ip = (session.socket && session.socket.remoteAddress)
-        ? session.socket.remoteAddress.replace(/^::ffff:/i, '')
-        : '127.0.0.1';
-
-      if (isIpBlocked(ip)) {
-        logFirewallEvent(ip, 'SMPP Blocked IP Connection Attempt', 'smpp:bind');
-        logSmppEvent('bind_fail', ip, `Rejected bind for '${pdu.system_id || ''}' (IP blocked in Firewall)`, { system_id: String(pdu.system_id || '') });
-        try {
-          session.send(pdu.response({ command_status: smpp.ESME_RBINDFAIL }));
-          session.destroy();
-        } catch (_) {}
-        session._binding = false;
-        return;
-      }
-
-      const cleanSysId = String(pdu.system_id || '').trim();
-      const cleanPass = String(pdu.password || '');
-
-      const accounts = readDb('smpp_accounts') || [];
-      const matchingAccounts = accounts.filter(a => (a.interconnect_type || 'smpp') === 'smpp' &&
-        String(a.system_id || '').trim().toLowerCase() === cleanSysId.toLowerCase());
-
-      let acc = null;
-      let authOk = false;
-      let failReason = '';
-      if (!matchingAccounts.length) {
-        failReason = `Unknown system_id '${cleanSysId}'`;
-      } else {
-        const activeMatches = matchingAccounts.filter(a => (a.status || 'active') === 'active');
-        if (!activeMatches.length) {
-          failReason = `Account '${matchingAccounts[0].company}' (${cleanSysId}) is inactive`;
-        } else {
-          for (const candidate of activeMatches) {
-            let passOk = false;
-            if (candidate.password_hash) {
-              try {
-                passOk = await bcrypt.compare(cleanPass, candidate.password_hash);
-              } catch (_) {
-                passOk = false;
-              }
-            } else if (candidate.password) {
-              passOk = safeEqual(cleanPass, candidate.password);
-            }
-            if (session.socket && session.socket.destroyed) {
-              session._binding = false;
-              return;
-            }
-            if (!passOk) {
-              if (!failReason) failReason = `Invalid password for system_id '${cleanSysId}'`;
-              continue;
-            }
-            if (candidate.whitelist_ip && String(candidate.whitelist_ip).trim() && !ipMatchesAllowlist(ip, candidate.whitelist_ip)) {
-              failReason = `IP ${ip} not in whitelist (${candidate.whitelist_ip}) for '${cleanSysId}'`;
-              continue;
-            }
-            acc = candidate;
-            authOk = true;
-            failReason = '';
-            break;
-          }
-        }
-
-        // Connection limits
-        if (authOk && acc) {
-          const settings = readDb('settings') || {};
-          const globalMax = Number(settings.smpp_max_connections) || 100;
-          if (liveSmppSessions.size >= globalMax) {
-            logSmppEvent('bind_fail', ip, `Global max_connections (${globalMax}) reached for '${cleanSysId}'`, { system_id: cleanSysId });
-            try {
-              session.send(pdu.response({ command_status: smpp.ESME_RALYBND }));
-              session.close();
-            } catch (_) {}
-            session._binding = false;
-            return;
-          }
-
-          const accountMax = Number(acc.max_connections || acc.limit || 10);
-          let currentAccConnections = 0;
-          for (const s of liveSmppSessions.values()) {
-            if (s.account_id === acc.id) currentAccConnections++;
-          }
-          if (currentAccConnections >= accountMax) {
-            logSmppEvent('bind_fail', ip, `Account max_connections (${accountMax}) reached for '${cleanSysId}'`, { system_id: cleanSysId });
-            try {
-              session.send(pdu.response({ command_status: smpp.ESME_RALYBND }));
-              session.close();
-            } catch (_) {}
-            session._binding = false;
-            return;
-          }
-        }
-      }
-
-      if (!authOk || (session.socket && session.socket.destroyed)) {
-        recordFailedSmppBind(ip, cleanSysId);
-        if (failReason) {
-          logSmppEvent('bind_fail', ip, failReason, { system_id: cleanSysId });
-        }
-        try {
-          session.send(pdu.response({ command_status: smpp.ESME_RBINDFAIL }));
-          session.close();
-        } catch (_) {}
-        session._binding = false;
-        return;
-      }
-
-      // Successful auth
-      clearFailedSmppBinds(ip);
-      const liveId = nextSmppSessionId++;
-      const bindType = cmd.replace('bind_', '');
-
-      session._liveId = liveId;
-      session._accountId = acc.id;
-      session._systemId = acc.system_id;
-      session._company = acc.company;
-      session._ip = ip;
-      session._bindType = bindType;
-      session._direction = 'inbound';
-      session._connectedAt = new Date().toISOString();
-      session._lastActivity = new Date().toISOString();
-      session._maxMps = Number(acc.max_mps || 500);
-
-      // Idle timeout: 120s
-      try {
-        if (session.socket && typeof session.socket.setTimeout === 'function') {
-          session.socket.setTimeout(120000);
-          session.socket.on('timeout', () => {
-            try { session.close(); } catch (_) {}
-          });
-        }
-      } catch (_) {}
-
-      liveSmppSessions.set(liveId, {
-        id: liveId,
-        account_id: acc.id,
-        system_id: acc.system_id,
-        ip,
-        bind_type: bindType,
-        direction: 'inbound',
-        connected_at: session._connectedAt,
-        last_activity: session._lastActivity,
-        msgs_in: 0,
-        msgs_out: 0,
-        messages_sent: 0,
-        status: 'active',
-        sessionObj: session,
-        max_mps: session._maxMps,
-        mps_window: []
-      });
-
-      syncLiveSessionsToDb();
-      logSmppEvent('bind_ok', ip, `Bound as ${bindType} for account ${acc.company} (${acc.system_id})`, { system_id: acc.system_id });
-
-      try {
-        session.send(pdu.response({ system_id: acc.system_id || 'HUMAX-SMS' }));
-        session.resume();
-      } catch (_) {}
-      session._binding = false;
-    });
-  });
-
-  session.on('submit_sm', (pdu) => {
-    const live = liveSmppSessions.get(session._liveId);
-    const now = Date.now();
-    if (live) {
-      live.last_activity = new Date().toISOString();
-      live.msgs_in = (live.msgs_in || 0) + 1;
-      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
-
-      // Enforce max_mps: reply ESME_RTHROTTLED (0x58) when exceeded
-      const oneSecAgo = now - 1000;
-      live.mps_window = (live.mps_window || []).filter(t => t > oneSecAgo);
-      if (live.mps_window.length >= live.max_mps) {
-        logSmppEvent('throttle', session._ip || '127.0.0.1', `Rate throttled (${live.mps_window.length}/${live.max_mps} mps) for ${session._systemId}`, { system_id: session._systemId });
-        session.send(pdu.response({ command_status: smpp.ESME_RTHROTTLED }));
-        return;
-      }
-      live.mps_window.push(now);
-    }
-    recordSmppTrafficMessage();
-
-    let text = '';
-    if (pdu.short_message) {
-      if (typeof pdu.short_message === 'string') text = pdu.short_message;
-      else if (Buffer.isBuffer(pdu.short_message)) text = pdu.short_message.toString('utf8');
-      else if (pdu.short_message.message) text = String(pdu.short_message.message);
-    }
-    if (!text && pdu.message_payload) {
-      if (typeof pdu.message_payload === 'string') text = pdu.message_payload;
-      else if (Buffer.isBuffer(pdu.message_payload)) text = pdu.message_payload.toString('utf8');
-    }
-
-    const dest = String(pdu.destination_addr || '').trim();
-    const src = String(pdu.source_addr || '').trim();
-
-    const result = ingestSms({
-      sender: src,
-      to_number: dest,
-      message: text,
-      sms_id: String(pdu.sequence_number || Date.now()),
-      company: session._company || '',
-      source: 'smpp_server'
-    });
-
-    const msgId = String(result?.entry?.sms_id || result?.entry?.id || Date.now());
-    session.send(pdu.response({ message_id: msgId }));
-    syncLiveSessionsToDb();
-  });
-
-  session.on('data_sm', (pdu) => {
-    const live = liveSmppSessions.get(session._liveId);
-    if (live) {
-      live.last_activity = new Date().toISOString();
-      live.msgs_in = (live.msgs_in || 0) + 1;
-      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
-    }
-    session.send(pdu.response({ message_id: String(Date.now()) }));
-  });
-
-  session.on('deliver_sm', (pdu) => {
-    const live = liveSmppSessions.get(session._liveId);
-    if (live) {
-      live.last_activity = new Date().toISOString();
-      live.msgs_in = (live.msgs_in || 0) + 1;
-      live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
-    }
-    session.send(pdu.response());
-  });
-
-  session.on('enquire_link', (pdu) => {
-    const live = liveSmppSessions.get(session._liveId);
-    if (live) live.last_activity = new Date().toISOString();
-    session.send(pdu.response());
-  });
-
-  session.on('unbind', (pdu) => {
-    logSmppEvent('unbind', session._ip || '127.0.0.1', `Unbind received for ${session._systemId || 'unknown'}`, { system_id: session._systemId });
-    session.send(pdu.response());
-    session.close();
-  });
-}
-
-function startSmppServerListener(host, port) {
-  stopSmppServerListener();
-
-  const bindHost = host || (host === '' ? '0.0.0.0' : (process.env.SMPP_HOST || '0.0.0.0'));
-  const bindPort = Number(port !== undefined && port !== null ? port : (process.env.SMPP_PORT || 2775));
-
-  smppServerState.host = bindHost;
-  smppServerState.port = bindPort;
-  smppServerState.last_error = null;
-
-  try {
-    const serverInstance = smpp.createServer(handleIncomingSmppSession);
-
-    serverInstance.on('error', (err) => {
-      // The listener must never crash the app
-      console.error('[SMPP Server Error]:', err.message);
-      smppServerState.listening = false;
-      smppServerState.last_error = err.code || err.message;
-      logSmppEvent('server_error', bindHost, `SMPP server error: ${err.message}`);
-    });
-
-    serverInstance.listen(bindPort, bindHost, () => {
-      smppServerState.listening = true;
-      smppServerState.started_at = new Date().toISOString();
-      smppServerState.last_error = null;
-      console.log(`[HUMEX SMS] SMPP server listening on ${bindHost}:${bindPort}`);
-      logSmppEvent('server_start', bindHost, `SMPP Server listening on ${bindHost}:${bindPort}`);
-    });
-
-    smppServerInstance = serverInstance;
-  } catch (err) {
-    console.error('Failed to start SMPP server:', err.message);
-    smppServerState.listening = false;
-    smppServerState.last_error = err.message;
-  }
-}
-
-function stopSmppServerListener() {
-  if (smppServerInstance) {
-    try {
-      smppServerInstance.close();
-    } catch (_) {}
-    smppServerInstance = null;
-  }
-  smppServerState.listening = false;
-
-  // Drop inbound server sessions
-  for (const [id, s] of liveSmppSessions.entries()) {
-    if (s.direction === 'inbound') {
-      try {
-        if (s.sessionObj) {
-          s.sessionObj.unbind();
-          s.sessionObj.close();
-        }
-      } catch (_) {}
-      liveSmppSessions.delete(id);
-    }
-  }
-  syncLiveSessionsToDb();
-}
-
-// ── SMPP CLIENT MODE (We connect to a carrier) ──────────────────
-const clientAccountManagers = new Map(); // accountId -> { session, reconnectTimer, backoff }
-
-function handleDlrDeliveryReceipt(text, pdu) {
-  try {
-    const idMatch = text.match(/\bid:([^\s]+)/i);
-    const statMatch = text.match(/\bstat:([^\s]+)/i);
-    const receiptMsgId = idMatch ? idMatch[1] : (pdu.receipted_message_id || '');
-    const receiptStat = statMatch ? statMatch[1].toUpperCase() : '';
-
-    if (!receiptMsgId) return;
-
-    let targetStatus = 'delivered';
-    if (['UNDELIV', 'REJECTD', 'EXPIRED', 'DELETED', 'UNKNOWN'].includes(receiptStat)) {
-      targetStatus = 'failed';
-    } else if (['ACCEPTD', 'ENROUTE'].includes(receiptStat)) {
-      targetStatus = 'pending';
-    }
-
-    const smsLog = readDb('sms_log') || [];
-    let updated = false;
-    for (const item of smsLog) {
-      if (String(item.sms_id) === receiptMsgId || String(item.id) === receiptMsgId) {
-        item.status = targetStatus;
-        item.dlr_status = receiptStat || targetStatus;
-        item.dlr_timestamp = new Date().toISOString();
-        updated = true;
-        break;
-      }
-    }
-    if (updated) {
-      writeDb('sms_log', smsLog);
-    }
-  } catch (err) {
-    console.error('handleDlrDeliveryReceipt error:', err);
-  }
-}
-
-function normalizeSmppHostPort(rawHost, rawPort) {
-  let raw = String(rawHost || '').trim();
-  let useTls = false;
-  if (/^ssmpp:\/\//i.test(raw)) {
-    useTls = true;
-    raw = raw.replace(/^ssmpp:\/\//i, '');
-  } else {
-    raw = raw.replace(/^(?:smpp|tcp|https?):\/\//i, '');
-  }
-  raw = raw.split('/')[0].trim();
-  let host = raw;
-  let portNum = Number(rawPort);
-  // Extract embedded :port when host isn't an IPv6 bracketed/multi-colon literal
-  const colonCount = (raw.match(/:/g) || []).length;
-  if (colonCount === 1) {
-    const parts = raw.split(':');
-    host = parts[0].trim();
-    const embeddedPort = parseInt(parts[1], 10);
-    if (!Number.isFinite(portNum) || portNum <= 0 || portNum === 2775) {
-      if (embeddedPort >= 1 && embeddedPort <= 65535) portNum = embeddedPort;
-    }
-  } else if (raw.startsWith('[')) {
-    const m = raw.match(/^\[([^\]]+)\](?::(\d+))?$/);
-    if (m) {
-      host = m[1];
-      const embeddedPort = m[2] ? parseInt(m[2], 10) : NaN;
-      if ((!Number.isFinite(portNum) || portNum <= 0) && embeddedPort >= 1 && embeddedPort <= 65535) {
-        portNum = embeddedPort;
-      }
-    }
-  }
-  if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
-    portNum = useTls ? 3550 : 2775;
-  }
-  return { host, port: portNum, useTls };
-}
-
-function startClientAccountConnection(acc) {
-  stopClientAccountConnection(acc.id);
-  if ((acc.status || 'active') !== 'active') return;
-
-  const plainPass = decryptSmppSecret(acc.password_enc) || acc.password || '';
-  const { host: cleanHost, port: cleanPort, useTls } = normalizeSmppHostPort(acc.host, acc.port);
-  if (!cleanHost || !acc.system_id) return;
-
-  const mgr = { backoff: 5000, reconnectTimer: null, session: null };
-  clientAccountManagers.set(acc.id, mgr);
-
-  function connectToCarrier() {
-    try {
-      const proto = (useTls || acc.tls === true) ? 'ssmpp' : 'smpp';
-      const url = `${proto}://${cleanHost}:${cleanPort}`;
-      const session = smpp.connect({
-        url,
-        auto_enquire_link_period: 30000 // enquire_link every 30s
-      });
-      mgr.session = session;
-
-      session.on('error', (err) => {
-        logSmppEvent('disconnect', acc.host, `Client connection error (${err.message}) for ${acc.company}`);
-      });
-
-      session.on('close', () => {
-        if (session._liveId) {
-          liveSmppSessions.delete(session._liveId);
-          syncLiveSessionsToDb();
-        }
-        // Auto-reconnect with exponential backoff up to 60s
-        mgr.backoff = Math.min(60000, mgr.backoff * 1.5);
-        if (clientAccountManagers.has(acc.id) && (acc.status || 'active') === 'active') {
-          mgr.reconnectTimer = setTimeout(connectToCarrier, mgr.backoff);
-        }
-      });
-
-      const bindMethod = session['bind_' + (acc.bind_type || 'transceiver')] || session.bind_transceiver;
-      bindMethod.call(session, {
-        system_id: acc.system_id,
-        password: plainPass
-      }, (pdu) => {
-        if (pdu.command_status === 0) {
-          mgr.backoff = 5000; // reset backoff
-          const liveId = nextSmppSessionId++;
-          session._liveId = liveId;
-          session._accountId = acc.id;
-          session._systemId = acc.system_id;
-          session._company = acc.company;
-          session._ip = acc.host;
-          session._bindType = acc.bind_type || 'transceiver';
-
-          liveSmppSessions.set(liveId, {
-            id: liveId,
-            account_id: acc.id,
-            system_id: acc.system_id,
-            ip: acc.host,
-            bind_type: acc.bind_type || 'transceiver',
-            direction: 'outbound',
-            connected_at: new Date().toISOString(),
-            last_activity: new Date().toISOString(),
-            msgs_in: 0,
-            msgs_out: 0,
-            messages_sent: 0,
-            status: 'active',
-            sessionObj: session
-          });
-          syncLiveSessionsToDb();
-          logSmppEvent('bind_ok', acc.host, `Client bound to carrier ${acc.company} (${acc.system_id})`, { system_id: acc.system_id });
-        } else {
-          logSmppEvent('bind_fail', acc.host, `Client bind failed (status 0x${pdu.command_status.toString(16)}) with ${acc.company}`);
-          session.close();
-        }
-      });
-
-      session.on('deliver_sm', (pdu) => {
-        const live = liveSmppSessions.get(session._liveId);
-        if (live) {
-          live.last_activity = new Date().toISOString();
-          live.msgs_in = (live.msgs_in || 0) + 1;
-          live.messages_sent = (live.msgs_in || 0) + (live.msgs_out || 0);
-        }
-        recordSmppTrafficMessage();
-
-        const isDlr = (pdu.esm_class & 0x04) !== 0;
-        let text = '';
-        if (pdu.short_message) {
-          if (typeof pdu.short_message === 'string') text = pdu.short_message;
-          else if (Buffer.isBuffer(pdu.short_message)) text = pdu.short_message.toString('utf8');
-          else if (pdu.short_message.message) text = String(pdu.short_message.message);
-        }
-
-        if (isDlr) {
-          handleDlrDeliveryReceipt(text, pdu);
-        } else {
-          ingestSms({
-            sender: pdu.source_addr,
-            to_number: pdu.destination_addr,
-            message: text,
-            sms_id: String(pdu.sequence_number || ''),
-            company: acc.company,
-            source: 'smpp_client'
-          });
-        }
-        session.send(pdu.response());
-        syncLiveSessionsToDb();
-      });
-    } catch (err) {
-      logSmppEvent('disconnect', acc.host, `Client connection exception: ${err.message}`);
-    }
-  }
-
-  connectToCarrier();
-}
-
-function stopClientAccountConnection(accountId) {
-  const mgr = clientAccountManagers.get(accountId);
-  if (mgr) {
-    if (mgr.reconnectTimer) clearTimeout(mgr.reconnectTimer);
-    if (mgr.session) {
-      try {
-        mgr.session.unbind();
-        mgr.session.close();
-      } catch (_) {}
-    }
-    clientAccountManagers.delete(accountId);
-  }
-}
-
-// ── SMPP Startup & Migration ────────────────────────────────────
-function initSmppEngine() {
-  try {
-    // 1. Clear stale sessions file at boot
-    writeDb('smpp_sessions', []);
-
-    // 2. Ensure smpp_logs.json exists
-    const logs = readDb('smpp_logs');
-    if (!Array.isArray(logs)) writeDb('smpp_logs', []);
-
-    // 3. Migrate plaintext passwords in smpp_accounts.json
-    const accounts = readDb('smpp_accounts') || [];
-    let modified = false;
-    for (const acc of accounts) {
-      if (acc.interconnect_type === 'smpp') {
-        if (acc.password) {
-          acc.password_hash = bcrypt.hashSync(String(acc.password), 10);
-          delete acc.password;
-          modified = true;
-        }
-      } else if (acc.interconnect_type === 'smpp-client') {
-        if (acc.password) {
-          acc.password_enc = encryptSmppSecret(String(acc.password));
-          delete acc.password;
-          modified = true;
-        }
-      }
-      if (!acc.bind_type) {
-        acc.bind_type = 'transceiver';
-        modified = true;
-      }
-      if (acc.max_connections === undefined) {
-        acc.max_connections = Number(acc.limit || 10);
-        modified = true;
-      }
-      if (acc.max_mps === undefined) {
-        acc.max_mps = 500;
-        modified = true;
-      }
-    }
-    if (modified) {
-      writeDb('smpp_accounts', accounts);
-    }
-
-    // 4. Start listener if settings.smpp_enabled is true
-    const settings = readDb('settings') || {};
-    if (settings.smpp_enabled === true || process.env.SMPP_ENABLED === 'true') {
-      const host = process.env.SMPP_HOST || settings.smpp_host || '0.0.0.0';
-      const port = Number(process.env.SMPP_PORT || settings.smpp_port || 2775);
-      startSmppServerListener(host, port);
-    }
-
-    // 5. Connect active client accounts
-    for (const acc of accounts) {
-      if (acc.interconnect_type === 'smpp-client' && (acc.status || 'active') === 'active') {
-        startClientAccountConnection(acc);
-      }
-    }
-  } catch (err) {
-    console.error('initSmppEngine error:', err);
-  }
-}
-
-function syncSmppServerFromSettings(updatedSettings) {
-  try {
-    const isEnabled = updatedSettings.smpp_enabled === true;
-    const host = (updatedSettings.smpp_host !== undefined && updatedSettings.smpp_host !== null) ? updatedSettings.smpp_host : (process.env.SMPP_HOST || '0.0.0.0');
-    const port = Number(updatedSettings.smpp_port !== undefined && updatedSettings.smpp_port !== null ? updatedSettings.smpp_port : (process.env.SMPP_PORT || 2775));
-
-    if (!isEnabled) {
-      if (smppServerState.listening || smppServerInstance) {
-        console.log('[HUMEX SMS] Stopping SMPP server listener per settings toggle');
-        stopSmppServerListener();
-      }
-    } else {
-      if (!smppServerState.listening || smppServerState.host !== host || smppServerState.port !== port) {
-        console.log('[HUMEX SMS] (Re)starting SMPP server listener per settings update');
-        startSmppServerListener(host, port);
-      }
-    }
-  } catch (err) {
-    console.error('syncSmppServerFromSettings error:', err);
-  }
-}
-
-// ── SMPP HTTP API ENDPOINTS ─────────────────────────────────────
-app.get('/api/smpp/accounts', (req, res) => {
-  const accounts = readDb('smpp_accounts') || [];
-  const smsLog = readDb('sms_log') || [];
-  const today = new Date().toISOString().slice(0, 10);
-  const enriched = accounts.map(rawAcc => {
-    const acc = safeSmppAccount(rawAcc);
-    const company = (acc.company || '').toLowerCase();
-    const systemId = (acc.system_id || '').toLowerCase();
-    const matched = smsLog.filter(s => {
-      const sComp = (s.company || '').toLowerCase();
-      const sSys = (s.system_id || '').toLowerCase();
-      return (company && (sComp === company || sSys === company)) ||
-             (systemId && (sComp === systemId || sSys === systemId));
-    });
-    return {
-      ...acc,
-      total_otp: matched.length,
-      otp_today: matched.filter(s => (s.timestamp || '').slice(0, 10) === today).length
-    };
-  });
-  res.json(enriched);
-});
-
-app.get('/api/smpp/accounts/:id', (req, res) => {
-  const accounts = readDb('smpp_accounts') || [];
-  const idStr = String(req.params.id);
-  const acc = accounts.find(a => String(a.id) === idStr);
-  if (!acc) {
-    return res.status(404).json({ error: 'SMPP account not found' });
-  }
-  res.json(safeSmppAccount(acc));
-});
-
-app.post('/api/smpp/accounts', (req, res) => {
-  try {
-    const data = readDb('smpp_accounts') || [];
-    const payload = req.body || {};
-
-    if (!payload.company || !String(payload.company).trim()) {
-      return res.status(400).json({ error: 'Company name is required' });
-    }
-
-    const company = String(payload.company).trim();
-    const icType = payload.interconnect_type || 'smpp';
-
-    if (icType === 'smpp') {
-      if (!payload.system_id || !String(payload.system_id).trim()) {
-        return res.status(400).json({ error: 'System ID is required' });
-      }
-      const sysLower = String(payload.system_id).trim().toLowerCase();
-      if (data.some(a => (a.interconnect_type || 'smpp') === 'smpp' && String(a.system_id || '').trim().toLowerCase() === sysLower)) {
-        return res.status(400).json({ error: `System ID '${String(payload.system_id).trim()}' already exists. Edit the existing account or use a different System ID.` });
-      }
-    } else if (icType === 'smpp-client') {
-      if (!payload.host || !String(payload.host).trim()) {
-        return res.status(400).json({ error: 'Host/IP is required' });
-      }
-      if (!payload.system_id || !String(payload.system_id).trim()) {
-        return res.status(400).json({ error: 'System ID is required' });
-      }
-    }
-
-    let passwordHash = undefined;
-    let passwordEnc = undefined;
-    if (payload.password) {
-      if (icType === 'smpp') {
-        passwordHash = bcrypt.hashSync(String(payload.password), 10);
-      } else {
-        passwordEnc = encryptSmppSecret(String(payload.password));
-      }
-    }
-
-    const cleanPayload = { ...payload };
-    delete cleanPayload.password;
-
-    if (icType === 'smpp-client') {
-      const norm = normalizeSmppHostPort(payload.host, payload.port);
-      cleanPayload.host = norm.host;
-      cleanPayload.port = norm.port;
-      if (norm.useTls) cleanPayload.tls = true;
-    }
-
-    const newAccount = {
-      ...cleanPayload,
-      id: nextId(data),
-      company,
-      interconnect_type: icType,
-      bind_type: payload.bind_type || 'transceiver',
-      max_connections: Number(payload.max_connections || payload.limit || 10),
-      max_mps: Number(payload.max_mps || 500),
-      password_hash: passwordHash,
-      password_enc: passwordEnc,
-      status: payload.status || 'active',
-      limit: Number(payload.limit) || 500,
-      total_otp: 0,
-      otp_today: 0,
-      messages_today: 0,
-      created: new Date().toISOString()
-    };
-
-    data.push(newAccount);
-    writeDb('smpp_accounts', data);
-    if (newAccount.whitelist_ip) unblockSmppAccountIps(newAccount.whitelist_ip);
-
-    if (newAccount.interconnect_type === 'smpp-client' && newAccount.status === 'active') {
-      startClientAccountConnection(newAccount);
-    }
-
-    try {
-      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
-      logAudit(actor, 'SMPP Account Added', `Added SMPP account for ${company} (${icType})`, 'SMPP');
-    } catch (e) {}
-
-    return res.status(201).json(safeSmppAccount(newAccount));
-  } catch (err) {
-    console.error('Add SMPP account error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
-
-const handleUpdateSmppAccount = (req, res) => {
-  try {
-    const data = readDb('smpp_accounts') || [];
-    const idStr = String(req.params.id);
-    const idx = data.findIndex(a => String(a.id) === idStr);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'SMPP account not found' });
-    }
-
-    const current = data[idx];
-    const updates = { ...(req.body || {}) };
-
-    if (updates.password) {
-      if ((current.interconnect_type || updates.interconnect_type) === 'smpp') {
-        current.password_hash = bcrypt.hashSync(String(updates.password), 10);
-      } else {
-        current.password_enc = encryptSmppSecret(String(updates.password));
-      }
-      delete updates.password;
-    }
-    delete current.password;
-
-    Object.assign(current, updates);
-    if ((current.interconnect_type || 'smpp') === 'smpp-client' && current.host) {
-      const norm = normalizeSmppHostPort(current.host, current.port);
-      current.host = norm.host;
-      current.port = norm.port;
-      if (norm.useTls) current.tls = true;
-    }
-    current.id = Number(idStr) || current.id;
-    current.updated_at = new Date().toISOString();
-
-    data[idx] = current;
-    writeDb('smpp_accounts', data);
-    if (current.whitelist_ip) unblockSmppAccountIps(current.whitelist_ip);
-
-    if (current.interconnect_type === 'smpp-client') {
-      if (current.status === 'active') {
-        startClientAccountConnection(current);
-      } else {
-        stopClientAccountConnection(current.id);
-      }
-    }
-
-    try {
-      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
-      logAudit(actor, 'SMPP Account Updated', `Updated SMPP account #${idStr} (${current.company || ''})`, 'SMPP');
-    } catch (e) {}
-
-    return res.json(safeSmppAccount(current));
-  } catch (err) {
-    console.error('Update SMPP account error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-};
-
-app.patch('/api/smpp/accounts/:id', handleUpdateSmppAccount);
-app.put('/api/smpp/accounts/:id', handleUpdateSmppAccount);
-
-app.delete('/api/smpp/accounts/:id', (req, res) => {
-  try {
-    const data = readDb('smpp_accounts') || [];
-    const idStr = String(req.params.id);
-    const idx = data.findIndex(a => String(a.id) === idStr);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'SMPP account not found' });
-    }
-
-    const removed = data.splice(idx, 1)[0];
-    writeDb('smpp_accounts', data);
-
-    if (removed.interconnect_type === 'smpp-client') {
-      stopClientAccountConnection(removed.id);
-    } else {
-      // Unbind and drop live sessions for this account
-      for (const [sessId, live] of liveSmppSessions.entries()) {
-        if (Number(live.account_id) === Number(removed.id) || (live.system_id && live.system_id === removed.system_id)) {
-          if (live.sessionObj) {
-            try { live.sessionObj.unbind(); live.sessionObj.close(); } catch (_) {}
-          }
-          liveSmppSessions.delete(sessId);
-        }
-      }
-      syncLiveSessionsToDb();
-    }
-
-    try {
-      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
-      logAudit(actor, 'SMPP Account Deleted', `Deleted SMPP account #${idStr} (${removed.company || ''})`, 'SMPP');
-    } catch (e) {}
-
-    return res.json({ success: true, message: 'SMPP account deleted' });
-  } catch (err) {
-    console.error('Delete SMPP account error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
-
-app.post('/api/smpp/accounts/:id/test', async (req, res) => {
-  try {
-    const data = readDb('smpp_accounts') || [];
-    const idStr = String(req.params.id);
-    const acc = data.find(a => String(a.id) === idStr);
-    if (!acc) {
-      return res.status(404).json({ success: false, error: 'SMPP account not found' });
-    }
-
-    const start = Date.now();
-    const icType = acc.interconnect_type || 'smpp';
-
-    if (icType === 'smpp-client') {
-      const { host: cleanHost, port: cleanPort, useTls } = normalizeSmppHostPort(acc.host || '127.0.0.1', acc.port || 2775);
-      const plainPass = decryptSmppSecret(acc.password_enc) || acc.password || '';
-      const bindType = acc.bind_type || 'transceiver';
-
-      // If this client account already has an active live session, verify it via enquire_link
-      // instead of opening a 2nd simultaneous connection (many carriers limit max_connections=1).
-      let existingLive = null;
-      for (const s of liveSmppSessions.values()) {
-        if (s.direction === 'outbound' && Number(s.account_id) === Number(acc.id) && s.sessionObj?.socket?.writable) {
-          existingLive = s;
-          break;
-        }
-      }
-
-      if (existingLive) {
-        const liveCheck = await new Promise((resolve) => {
-          let done = false;
-          const t = setTimeout(() => {
-            if (done) return;
-            done = true;
-            resolve(null);
-          }, 4000);
-          try {
-            existingLive.sessionObj.enquire_link((pdu) => {
-              if (done) return;
-              done = true;
-              clearTimeout(t);
-              if (pdu && pdu.command_status === 0) {
-                resolve({
-                  success: true,
-                  response_time: Date.now() - start,
-                  message: `SMPP live session active & verified (enquire_link 0x0) to ${cleanHost}:${cleanPort}`,
-                  system_id: acc.system_id,
-                  interconnect_type: icType
-                });
-              } else {
-                resolve(null);
-              }
-            });
-          } catch (_) {
-            clearTimeout(t);
-            resolve(null);
-          }
-        });
-        if (liveCheck) {
-          return res.json(liveCheck);
-        }
-      }
-
-      const testResult = await new Promise((resolve) => {
-        let finished = false;
-        let tcpConnected = false;
-        let testSession = null;
-        const finish = (payload) => {
-          if (finished) return;
-          finished = true;
-          clearTimeout(timer);
-          resolve(payload);
-        };
-
-        const timer = setTimeout(() => {
-          try { if (testSession) testSession.destroy(); } catch (_) {}
-          const errMsg = tcpConnected
-            ? `TCP connected to ${cleanHost}:${cleanPort}, but carrier did not reply to ${bindType} bind within 8s (check System ID/Password or TLS)`
-            : `TCP connect timed out after 8s to ${cleanHost}:${cleanPort} (carrier IP/port unreachable or firewall/IP whitelist blocking)`;
-          logSmppEvent('test_timeout', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort, tcp_connected: tcpConnected });
-          finish({ success: false, response_time: Date.now() - start, error: errMsg });
-        }, 8000);
-
-        const proto = (useTls || acc.tls === true) ? 'ssmpp' : 'smpp';
-        try {
-          testSession = smpp.connect({ url: `${proto}://${cleanHost}:${cleanPort}` });
-        } catch (e) {
-          logSmppEvent('test_error', cleanHost, e.message, { system_id: acc.system_id, port: cleanPort });
-          return finish({ success: false, response_time: Date.now() - start, error: e.message });
-        }
-
-        testSession.on('connect', () => {
-          tcpConnected = true;
-        });
-        testSession.on('secureConnect', () => {
-          tcpConnected = true;
-        });
-
-        testSession.on('error', (err) => {
-          try { testSession.destroy(); } catch (_) {}
-          const errMsg = `${err.message || 'Connection failed'} (${cleanHost}:${cleanPort})`;
-          logSmppEvent('test_error', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
-          finish({ success: false, response_time: Date.now() - start, error: errMsg });
-        });
-
-        testSession.on('close', () => {
-          const errMsg = tcpConnected
-            ? `Carrier ${cleanHost}:${cleanPort} closed socket during ${bindType} bind (check IP whitelist, System ID/Password, or max_connections limit)`
-            : `TCP connection to ${cleanHost}:${cleanPort} closed before handshake`;
-          logSmppEvent('test_close', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
-          finish({ success: false, response_time: Date.now() - start, error: errMsg });
-        });
-
-        const bindFn = testSession['bind_' + bindType] || testSession.bind_transceiver;
-        bindFn.call(testSession, {
-          system_id: acc.system_id || '',
-          password: plainPass
-        }, (pdu) => {
-          const latency = Date.now() - start;
-          if (pdu.command_status === 0) {
-            try {
-              testSession.unbind(() => {
-                try { testSession.close(); } catch (_) {}
-              });
-            } catch (_) {
-              try { testSession.close(); } catch (_) {}
-            }
-            finish({
-              success: true,
-              response_time: latency,
-              message: `SMPP bind succeeded (status 0x0) to ${acc.company} (${cleanHost}:${cleanPort})`,
-              system_id: acc.system_id,
-              interconnect_type: icType
-            });
-          } else {
-            try { testSession.close(); } catch (_) {}
-            const errMsg = `SMPP bind rejected by ${cleanHost}:${cleanPort} (command_status 0x${pdu.command_status.toString(16)})`;
-            logSmppEvent('bind_fail', cleanHost, errMsg, { system_id: acc.system_id, port: cleanPort });
-            finish({
-              success: false,
-              response_time: latency,
-              error: errMsg,
-              system_id: acc.system_id,
-              interconnect_type: icType
-            });
-          }
-        });
-      });
-
-      return res.json(testResult);
-    } else {
-      // Server account: carrier connects to us.
-      // If host or whitelist_ip is specified, really test TCP connectivity with 8s timeout
-      const targetHost = acc.host || (acc.whitelist_ip ? acc.whitelist_ip.split(',')[0].trim() : '');
-      const targetPort = Number(acc.port) || 2775;
-
-      if (targetHost) {
-        const tcpResult = await new Promise((resolve) => {
-          const socket = new net.Socket();
-          let finished = false;
-          socket.setTimeout(8000);
-
-          socket.on('connect', () => {
-            if (finished) return;
-            finished = true;
-            socket.destroy();
-            resolve({
-              success: true,
-              response_time: Date.now() - start,
-              message: `TCP connect succeeded to ${targetHost}:${targetPort}`,
-              system_id: acc.system_id,
-              interconnect_type: icType
-            });
-          });
-
-          socket.on('timeout', () => {
-            if (finished) return;
-            finished = true;
-            socket.destroy();
-            resolve({
-              success: false,
-              response_time: Date.now() - start,
-              error: `TCP connect timed out after 8s to ${targetHost}:${targetPort}`,
-              system_id: acc.system_id,
-              interconnect_type: icType
-            });
-          });
-
-          socket.on('error', (err) => {
-            if (finished) return;
-            finished = true;
-            socket.destroy();
-            resolve({
-              success: false,
-              response_time: Date.now() - start,
-              error: err.message || 'TCP connect failed',
-              system_id: acc.system_id,
-              interconnect_type: icType
-            });
-          });
-
-          socket.connect(targetPort, targetHost);
-        });
-
-        return res.json(tcpResult);
-      } else {
-        const latency = Date.now() - start;
-        return res.json({
-          success: true,
-          response_time: latency,
-          message: `Server account ${acc.system_id} configured. SMPP listener is ${smppServerState.listening ? 'online' : 'offline'}.`,
-          system_id: acc.system_id,
-          interconnect_type: icType
-        });
-      }
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/api/smpp/accounts/:id/reconnect', (req, res) => {
-  try {
-    const data = readDb('smpp_accounts') || [];
-    const idStr = String(req.params.id);
-    const acc = data.find(a => String(a.id) === idStr);
-    if (!acc) {
-      return res.status(404).json({ error: 'SMPP account not found' });
-    }
-
-    acc.status = 'active';
-    acc.last_reconnect = new Date().toISOString();
-    writeDb('smpp_accounts', data);
-
-    if (acc.interconnect_type === 'smpp-client') {
-      stopClientAccountConnection(acc.id);
-      startClientAccountConnection(acc);
-      return res.json({ success: true, message: `Client account ${acc.company} reconnecting` });
-    } else {
-      let dropped = 0;
-      for (const [sessId, live] of liveSmppSessions.entries()) {
-        if (Number(live.account_id) === Number(acc.id) || (live.system_id && live.system_id === acc.system_id)) {
-          if (live.sessionObj) {
-            try {
-              live.sessionObj.unbind();
-              live.sessionObj.close();
-            } catch (_) {}
-          }
-          liveSmppSessions.delete(sessId);
-          dropped++;
-        }
-      }
-      syncLiveSessionsToDb();
-      return res.json({ success: true, message: `Dropped ${dropped} active session(s) for ${acc.company}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/smpp/sessions', (req, res) => {
-  const list = [];
-  for (const s of liveSmppSessions.values()) {
-    list.push({
-      id: s.id,
-      account_id: s.account_id,
-      system_id: s.system_id,
-      ip: s.ip,
-      bind_type: s.bind_type,
-      direction: s.direction,
-      connected_at: s.connected_at,
-      last_activity: s.last_activity,
-      msgs_in: s.msgs_in || 0,
-      msgs_out: s.msgs_out || 0,
-      messages_sent: (s.msgs_in || 0) + (s.msgs_out || 0),
-      status: s.status || 'active'
-    });
-  }
-  res.json(list);
-});
-
-app.delete('/api/smpp/sessions/:id', (req, res) => {
-  try {
-    const idStr = String(req.params.id);
-    let target = null;
-    for (const [sid, s] of liveSmppSessions.entries()) {
-      if (String(s.id) === idStr) {
-        target = s;
-        liveSmppSessions.delete(sid);
-        break;
-      }
-    }
-
-    if (target && target.sessionObj) {
-      try {
-        target.sessionObj.unbind();
-        target.sessionObj.close();
-      } catch (_) {}
-    }
-    syncLiveSessionsToDb();
-
-    if (target) {
-      logSmppEvent('unbind', target.ip || '127.0.0.1', `Admin disconnected session #${idStr} (${target.system_id})`, { system_id: target.system_id });
-    }
-
-    try {
-      const actor = (req.sessionUser && req.sessionUser.username) ? req.sessionUser.username : 'Admin';
-      logAudit(actor, 'SMPP Session Disconnected', `Disconnected session #${idStr}`, 'SMPP');
-    } catch (e) {}
-
-    res.json({ success: true, message: 'Session disconnected' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/smpp/connection-logs', (req, res) => {
-  const logs = readDb('smpp_logs') || [];
-  res.json(logs);
 });
 
 function hasAccountHistory(tableName, targetId, username) {
@@ -14267,152 +14057,6 @@ app.get('/api/sms/client-logs', requireAuth, (req, res) => {
   res.json({ data: data.slice(start, start + limit), total: data.length });
 });
 
-// ── Token API /api/sms (Fix 6: Token-Only, Deny Missing/Invalid, Scoped by Token Owner) ──
-app.get('/api/sms', (req, res) => {
-  const authHeader = req.headers.authorization || '';
-  const apiKeyHeader = req.headers['x-api-key'] || '';
-  let tokenStr = '';
-  if (authHeader.startsWith('Bearer ')) {
-    tokenStr = authHeader.slice(7).trim();
-  } else if (apiKeyHeader) {
-    tokenStr = String(apiKeyHeader).trim();
-  } else if (req.query.token) {
-    tokenStr = String(req.query.token).trim();
-  }
-
-  if (!tokenStr) {
-    return res.status(401).json({ status: 'error', error: 'Authentication required. Missing API token.' });
-  }
-
-  const tokens = readDb('api_tokens') || [];
-  if (!Array.isArray(tokens) || tokens.length === 0) {
-    return res.status(401).json({ status: 'error', error: 'Unauthorized. No active API tokens found.' });
-  }
-
-  const tokenRec = findTokenRecord(tokens, tokenStr);
-  if (tokenRec && (tokenRec.status === 'revoked' || tokenRec.status === 'inactive')) {
-    return res.status(401).json({ status: 'error', error: 'Unauthorized. Invalid API token.' });
-  }
-  if (!tokenRec) {
-    return res.status(401).json({ status: 'error', error: 'Unauthorized. Invalid API token.' });
-  }
-
-  // Update token stats
-  tokenRec.calls = (tokenRec.calls || 0) + 1;
-  tokenRec.last_used = new Date().toISOString();
-  writeDb('api_tokens', tokens);
-
-  let list = readDb('sms_log') || [];
-
-  // Scope results by token owner's role and chain
-  if (tokenRec.client_id) {
-    const cid = Number(tokenRec.client_id);
-    list = list.filter(s => Number(s.client_id) === cid);
-  } else if (tokenRec.agent_id) {
-    const aid = Number(tokenRec.agent_id);
-    list = list.filter(s => Number(s.agent_id) === aid);
-  } else if (tokenRec.role && tokenRec.role.toLowerCase() !== 'owner' && tokenRec.role.toLowerCase() !== 'admin') {
-    list = [];
-  }
-  // Owner level token has no agent/client restriction
-
-  if (req.query.number) {
-    const numDigits = String(req.query.number).replace(/\D/g, '');
-    list = list.filter(s => String(s.number || '').replace(/\D/g, '').includes(numDigits));
-  }
-  if (req.query.cli) {
-    const qCli = String(req.query.cli).toLowerCase();
-    list = list.filter(s => String(s.cli || '').toLowerCase().includes(qCli));
-  }
-  if (req.query.from_date) {
-    list = list.filter(s => (s.timestamp || s.date || '').slice(0, 10) >= String(req.query.from_date));
-  }
-  if (req.query.to_date) {
-    list = list.filter(s => (s.timestamp || s.date || '').slice(0, 10) <= String(req.query.to_date));
-  }
-
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit, 10) || 100));
-  const start = (page - 1) * limit;
-
-  res.json({
-    status: 'success',
-    total: list.length,
-    page,
-    limit,
-    data: list.slice(start, start + limit)
-  });
-});
-
-app.all(['/crapi/viewstats', '/crapi/:user/viewstats', '/api/sms/viewstats'], (req, res) => {
-  const p = { ...(req.query || {}), ...(req.body || {}) };
-  const authHeader = req.headers.authorization || '';
-  const token = p.token || (authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '');
-
-  const tokens = readDb('api_tokens') || [];
-  let currentToken = null;
-  {
-    // A valid token is ALWAYS required (previously this was open when no tokens existed)
-    currentToken = findTokenRecord(tokens, token);
-    if (!currentToken || currentToken.status !== 'active') {
-      return res.status(401).json({ status: 'error', msg: 'Not Authorized' });
-    }
-    currentToken.calls = (currentToken.calls || 0) + 1;
-    currentToken.last_used = new Date().toISOString();
-    writeDb('api_tokens', tokens);
-  }
-
-  let sms = readDb('sms_log') || [];
-
-  if (currentToken.client_id) {
-    const cid = Number(currentToken.client_id);
-    sms = sms.filter(s => Number(s.client_id) === cid);
-  } else if (currentToken.agent_id) {
-    const aid = Number(currentToken.agent_id);
-    const clients = readDb('clients') || [];
-    const myUsernames = new Set(
-      clients.filter(c => Number(c.agent_id) === aid && c.username)
-             .map(c => c.username.toLowerCase())
-    );
-    sms = sms.filter(s => Number(s.agent_id) === aid || myUsernames.has((s.user || '').toLowerCase()));
-  } else if (currentToken.role && currentToken.role.toLowerCase() !== 'owner' && currentToken.role.toLowerCase() !== 'admin') {
-    sms = [];
-  }
-
-  const dt1 = p.dt1 ? p.dt1.replace(' ', 'T').replace('%20', 'T') : '';
-  const dt2 = p.dt2 ? p.dt2.replace(' ', 'T').replace('%20', 'T') : '';
-  if (dt1) sms = sms.filter(s => (s.timestamp || '') >= dt1);
-  if (dt2) sms = sms.filter(s => (s.timestamp || '') <= dt2);
-
-  if (p.filternum) {
-    const fn = String(p.filternum).trim();
-    sms = sms.filter(s => (s.number || '').includes(fn));
-  }
-
-  if (p.filtercli) {
-    const fc = String(p.filtercli).trim().toLowerCase();
-    sms = sms.filter(s => (s.cli || s.sender || '').toLowerCase().includes(fc));
-  }
-
-  const records = Math.min(Math.max(1, parseInt(p.records) || 25), 200);
-  sms.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-  const sliced = sms.slice(0, records);
-
-  const data = sliced.map(s => ({
-    dt: (s.timestamp || '').replace('T', ' ').slice(0, 19),
-    num: s.number || '',
-    cli: s.cli || s.sender || '',
-    message: s.message || '',
-    payout: String(s.profit || s.payout || 0)
-  }));
-
-  res.json({
-    status: 'success',
-    total: data.length,
-    data
-  });
-});
-
 function serverMaskCli(v) {
   const s = String(v ?? '').trim();
   if (!s || s === '—') return '—';
@@ -14576,6 +14220,13 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     const wnRangesMap = buildRangesLookupMap();
     const wnTags = getWhitenoiseProviderTags();
     list = list.filter(s => isWhitenoiseRecord(s, wnRangesMap, wnTags));
+    const wnExcelRows = getScopedWhitenoiseStatsAsVirtualSms(sessionUser, {
+      agent_id: isOwner ? req.query.agent_id : null,
+      client_id: (isOwner || isAgent) ? req.query.client_id : null
+    });
+    if (wnExcelRows.length > 0) {
+      list = [...wnExcelRows, ...list];
+    }
   }
 
   const {
@@ -14766,7 +14417,9 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
       ? group_by
       : String(group_by).split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
 
-    const validKeys = rawKeys.filter(k => ['hour', 'date', 'daily', 'day', 'month', 'year', 'provider', 'range', 'agent', 'client', 'number', 'cli'].includes(k));
+    const validKeys = rawKeys
+      .map(k => (k === 'service' ? 'cli' : k))
+      .filter(k => ['hour', 'date', 'daily', 'day', 'month', 'year', 'provider', 'range', 'agent', 'client', 'number', 'cli'].includes(k));
 
     if (validKeys.length > 0) {
       const groups = new Map();
@@ -14795,7 +14448,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
           } else if (k === 'number') {
             keyParts.number = s.number || '';
           } else if (k === 'cli') {
-            keyParts.cli = s.cli || '';
+            keyParts.cli = s.cli || s.service || '';
           }
         }
 
@@ -14819,11 +14472,12 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
           groups.set(mapKey, grp);
         }
 
-        grp.sms_count++;
+        const rowSmsWeight = (s.sms_count != null && Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
+        grp.sms_count += rowSmsWeight;
         if (s.status === 'delivered' || s.status === 'success') {
-          grp.delivered_count++;
+          grp.delivered_count += rowSmsWeight;
         } else if (s.status === 'failed') {
-          grp.failed_count++;
+          grp.failed_count += rowSmsWeight;
         }
 
         const agp = parseFloat(s.agent_payout ?? s.agent_rate ?? 0) || 0;
@@ -14962,7 +14616,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
   }
 
   // ── Ungrouped Summary Totals across full matched list (Multi-Currency Breakdown) ──
-  let totalSms = list.length, totalDelivered = 0, totalFailed = 0, totalPayout = 0, totalAgentPayout = 0, totalClientPayout = 0, totalClientPayoutPkr = 0, totalProfit = 0;
+  let totalSms = 0, totalDelivered = 0, totalFailed = 0, totalPayout = 0, totalAgentPayout = 0, totalClientPayout = 0, totalClientPayoutPkr = 0, totalProfit = 0;
   const currencies = {
     USD: { in: 0, out: 0, profit: 0, count: 0 },
     EUR: { in: 0, out: 0, profit: 0, count: 0 },
@@ -14970,8 +14624,10 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
   };
 
   for (const s of list) {
-    if (s.status === 'delivered' || s.status === 'success') totalDelivered++;
-    else if (s.status === 'failed') totalFailed++;
+    const rowSmsWeight = (s.sms_count != null && Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
+    totalSms += rowSmsWeight;
+    if (s.status === 'delivered' || s.status === 'success') totalDelivered += rowSmsWeight;
+    else if (s.status === 'failed') totalFailed += rowSmsWeight;
     const agp = parseFloat(s.agent_payout ?? s.agent_rate ?? 0) || 0;
     const cp = parseFloat(s.client_payout ?? s.client_amount ?? 0) || 0;
     const cpPkr = getSmsClientPkr(s);
@@ -15000,7 +14656,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     currencies[cur].in += rolePayout;
     currencies[cur].out += isOwner ? agp : cp;
     currencies[cur].profit += pr;
-    currencies[cur].count++;
+    currencies[cur].count += rowSmsWeight;
   }
 
   // Format multi-currency stats for easy frontend consumption
@@ -15037,26 +14693,45 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-cache');
-    const headers = isOwner
-      ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Agent', 'Client', 'Currency', 'My Payout', 'Agent Payout', 'Profit', 'Cause']
-      : isAgent
-      ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Client', 'Currency', 'My Payout', 'Client Payout', 'My Profit']
-      : ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Currency', 'My Payout (PKR)', 'Cause'];
+    const useExcelCsv = whitenoiseOnly && list.some(s => s.record_type === 'excel_stat');
+    const headers = useExcelCsv
+      ? (isOwner
+        ? ['Date', 'Range', 'Number', 'Service / CLI', 'SMS Count', 'Agent', 'Client', 'Rate (USD)', 'Owner Revenue (USD)', 'Agent Payout (USD)', 'Owner Profit (USD)', 'Status']
+        : isAgent
+        ? ['Date', 'Range', 'Number', 'Service / CLI', 'SMS Count', 'Client', 'Rate (USD)', 'My Payout (USD)', 'Client Payout (USD)', 'My Profit (USD)']
+        : ['Date', 'Range', 'Number', 'Service / CLI', 'SMS Count', 'Rate (PKR)', 'My Earnings (PKR)', 'Payterm'])
+      : (isOwner
+        ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Agent', 'Client', 'Currency', 'My Payout', 'Agent Payout', 'Profit', 'Cause']
+        : isAgent
+        ? ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Client', 'Currency', 'My Payout', 'Client Payout', 'My Profit']
+        : ['Date Time', 'Provider', 'Range', 'Number', 'CLI', 'SMS', 'Currency', 'My Payout (PKR)', 'Cause']);
     res.write(headers.map(h => `"${h}"`).join(',') + '\r\n');
     for (const s of list) {
       const safeMsg = String(s.message || '');
       const sanitizedMsg = /^[=\+\-@\t\r]/.test(safeMsg) ? "'" + safeMsg : safeMsg;
-      const dtStr = (s.timestamp || '').replace('T', ' ').slice(0, 19);
+      const dtStr = useExcelCsv ? (s.date_ymd || extractDateStr(s) || '') : (s.timestamp || '').replace('T', ' ').slice(0, 19);
       const provStr = maskProviderLabel(s.provider || '—', isOwner, wnTags) || '—';
       const rngStr = scrubWhitenoiseName(s.range_name || s.range_label || s.range || s.country || '—', isOwner);
-      const cliStr = isOwner ? (s.cli || '') : serverMaskCli(s.cli || '');
+      const cliStr = isOwner ? (s.cli || s.service || '') : serverMaskCli(s.cli || s.service || '');
+      const smsCnt = (s.sms_count != null && Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
       const agpVal = Number(s.agent_payout ?? s.agent_rate ?? 0);
       const cpVal = Number(s.client_payout ?? s.client_amount ?? 0);
       const cpPkrVal = getSmsClientPkr(s);
       const curStr = isClient ? 'PKR' : (s.currency || 'USD');
       const causeStr = s.cause || (s.status === 'delivered' || s.status === 'success' ? 'Success' : (s.status || '—'));
       let row;
-      if (isOwner) {
+      if (useExcelCsv) {
+        if (isOwner) {
+          const myP = Number(s.company_rate ?? s.owner_revenue_usd ?? 0);
+          const prof = Number(s.owner_amount ?? s.profit ?? Math.max(0, myP - agpVal));
+          row = [dtStr, rngStr, s.number || '', cliStr, smsCnt, s.agent || '', s.client || '', cleanMoneyStr(Number(s.unit_owner_rate_usd || 0), 4), cleanMoneyStr(myP, 4), cleanMoneyStr(agpVal, 4), cleanMoneyStr(prof, 4), causeStr];
+        } else if (isAgent) {
+          const prof = Number(s.agent_amount ?? Math.max(0, agpVal - cpVal));
+          row = [dtStr, rngStr, s.number || '', cliStr, smsCnt, s.client || '', cleanMoneyStr(Number(s.unit_agent_rate_usd || 0), 4), cleanMoneyStr(agpVal, 4), cleanMoneyStr(cpVal, 4), cleanMoneyStr(prof, 4)];
+        } else {
+          row = [dtStr, rngStr, s.number || '', cliStr, smsCnt, cleanMoneyStr(Number(s.unit_client_rate_pkr || 0), 2), cleanMoneyStr(cpPkrVal, 2), 'Monthly (30/5) {W}'];
+        }
+      } else if (isOwner) {
         const myP = Number(s.company_rate ?? s.company_payout ?? s.carrier_revenue ?? 0);
         const prof = Number(s.owner_amount ?? s.profit ?? Math.max(0, myP - agpVal));
         row = [dtStr, provStr, rngStr, s.number || '', cliStr, sanitizedMsg, s.agent || '', s.client || '', curStr, cleanMoneyStr(myP, 4), cleanMoneyStr(agpVal, 4), cleanMoneyStr(prof, 4), causeStr];
@@ -15068,11 +14743,17 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
       }
       res.write(row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
     }
-    const footRow = isOwner
-      ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.agent_payout, 4), cleanMoneyStr(summary.profit, 4), `Delivered: ${summary.delivered_count}`]
-      : isAgent
-      ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.client_payout, 4), cleanMoneyStr(summary.profit, 4)]
-      : [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', 'PKR', cleanMoneyStr(summary.client_payout_pkr, 4), `Delivered: ${summary.delivered_count}`];
+    const footRow = useExcelCsv
+      ? (isOwner
+        ? [`Total Rows: ${list.length}`, '', '', '', summary.total_sms, '', '', '', cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.agent_payout, 4), cleanMoneyStr(summary.profit, 4), '']
+        : isAgent
+        ? [`Total Rows: ${list.length}`, '', '', '', summary.total_sms, '', '', cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.client_payout, 4), cleanMoneyStr(summary.profit, 4)]
+        : [`Total Rows: ${list.length}`, '', '', '', summary.total_sms, '', cleanMoneyStr(summary.client_payout_pkr, 2), 'Monthly (30/5) {W}'])
+      : (isOwner
+        ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.agent_payout, 4), cleanMoneyStr(summary.profit, 4), `Delivered: ${summary.delivered_count}`]
+        : isAgent
+        ? [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', '', summary.currency, cleanMoneyStr(summary.payout, 4), cleanMoneyStr(summary.client_payout, 4), cleanMoneyStr(summary.profit, 4)]
+        : [`Total SMS: ${summary.total_sms}`, '', '', '', '', '', 'PKR', cleanMoneyStr(summary.client_payout_pkr, 4), `Delivered: ${summary.delivered_count}`]);
     res.write(footRow.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',') + '\r\n');
     return res.end();
   }
@@ -15093,6 +14774,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
 
     if (!isOwner) {
       item.cli = serverMaskCli(item.cli || item.app || item.sender);
+      if (item.service) item.service = serverMaskCli(item.service);
       item.provider = maskProviderLabel(item.provider || '', false, wnTags);
       if (item.company) item.company = maskProviderLabel(item.company, false, wnTags);
       if (item.source && isWhitenoiseText(item.source)) item.source = 'monthly_route';
@@ -15105,6 +14787,9 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
       delete item.company_rate;
       delete item.company_cost;
       delete item.owner_amount;
+      delete item.owner_revenue_usd;
+      delete item.owner_profit_usd;
+      delete item.unit_owner_rate_usd;
       delete item.profit;
       delete item.admin_profit;
       delete item.gross_margin;
@@ -15112,6 +14797,9 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
         delete item.agent_amount;
         delete item.agent_rate;
         delete item.agent_payout;
+        delete item.agent_payout_usd;
+        delete item.agent_profit_usd;
+        delete item.unit_agent_rate_usd;
         item.my_payout = Number(item.client_amount != null ? item.client_amount : (item.client_payout || 0));
         item.payout = item.my_payout;
         item.client_amount_pkr = getSmsClientPkr(item);
@@ -15126,12 +14814,20 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     }
     if (whitenoiseOnly) {
       item.payterm = 'Monthly';
-      item.is_whitenoise = true;
       item.payout_schedule = 'monthly30_5';
       item.cycle_days = 30;
       item.hold_days = 5;
-      item.conversion_sent = Boolean(item.conversion_sent);
-      item.whitenoise_sms_id = item.whitenoise_sms_id ?? null;
+      item.sms_count = (item.sms_count != null && Number(item.sms_count) > 0) ? Math.round(Number(item.sms_count)) : 1;
+      if (isOwner) {
+        item.is_whitenoise = true;
+        item.conversion_sent = Boolean(item.conversion_sent);
+        item.whitenoise_sms_id = item.whitenoise_sms_id ?? null;
+      } else {
+        delete item.is_whitenoise;
+        delete item.whitenoise_sms_id;
+        delete item.conversion_sent;
+        delete item.batch_id;
+      }
     }
     return item;
   });
@@ -15151,7 +14847,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     has_next: page < totalPages,
     has_prev: page > 1,
     grouped: false,
-    whitenoise_only: whitenoiseOnly,
+    ...(isOwner ? { whitenoise_only: whitenoiseOnly } : { monthly_only: whitenoiseOnly }),
     summary: safeSummary
   });
 }
@@ -15172,6 +14868,192 @@ app.get('/api/cdr2/export', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
   }
   return handleSmsLogsQuery(req, res, { whitenoiseOnly: true });
+});
+
+// ── Whitenoise Excel-Only Daily Stats Endpoints (Owner Only) ────────────────
+function pruneWhitenoisePreviewCache() {
+  const now = Date.now();
+  for (const [tok, item] of WHITENOISE_PREVIEW_CACHE.entries()) {
+    if (now - item.createdAt > WHITENOISE_PREVIEW_TTL_MS) {
+      WHITENOISE_PREVIEW_CACHE.delete(tok);
+    }
+  }
+  while (WHITENOISE_PREVIEW_CACHE.size > 25) {
+    const oldestKey = WHITENOISE_PREVIEW_CACHE.keys().next().value;
+    if (oldestKey) WHITENOISE_PREVIEW_CACHE.delete(oldestKey);
+    else break;
+  }
+}
+
+app.post('/api/whitenoise-excel/preview', requireAuth, upload.single('file'), (req, res) => {
+  try {
+    if (normRole(req.sessionUser?.role) !== 'owner') {
+      return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+    }
+    pruneWhitenoisePreviewCache();
+
+    let buffer = null;
+    let filename = 'stats.xlsx';
+    let previewToken = String(req.body?.preview_token || '').trim();
+
+    if (req.file && req.file.buffer) {
+      buffer = req.file.buffer;
+      filename = req.file.originalname || 'stats.xlsx';
+      previewToken = 'wnp_' + crypto.randomBytes(16).toString('hex');
+      WHITENOISE_PREVIEW_CACHE.set(previewToken, {
+        buffer,
+        filename,
+        createdAt: Date.now(),
+        ownerId: req.sessionUser.id
+      });
+    } else if (previewToken && WHITENOISE_PREVIEW_CACHE.has(previewToken)) {
+      const cached = WHITENOISE_PREVIEW_CACHE.get(previewToken);
+      buffer = cached.buffer;
+      filename = cached.filename;
+      cached.createdAt = Date.now();
+    } else {
+      return res.status(400).json({ error: 'Please upload an Excel (.xlsx / .xls / .csv) file.' });
+    }
+
+    const sheetName = req.body?.sheet_name ? String(req.body.sheet_name) : undefined;
+    let colMap = undefined;
+    if (req.body?.col_map) {
+      colMap = typeof req.body.col_map === 'string' ? JSON.parse(req.body.col_map) : req.body.col_map;
+    }
+
+    const evalRes = evaluateWhitenoiseExcelUpload(buffer, filename, { sheetName, colMap });
+    const previewLimit = 500;
+    const rowsPreview = evalRes.evaluated_rows.slice(0, previewLimit).map(r => {
+      const { existing_snapshot, ...clean } = r;
+      return clean;
+    });
+
+    res.json({
+      success: true,
+      preview_token: previewToken,
+      filename: evalRes.parsed.filename,
+      sheets: evalRes.parsed.sheets,
+      selected_sheet: evalRes.parsed.selected_sheet,
+      layout: evalRes.parsed.layout,
+      headers: evalRes.parsed.headers,
+      col_map: evalRes.parsed.col_map,
+      date_min: evalRes.date_min,
+      date_max: evalRes.date_max,
+      warnings: evalRes.parsed.warnings,
+      summary: evalRes.summary,
+      total_preview_rows: evalRes.evaluated_rows.length,
+      truncated: evalRes.evaluated_rows.length > previewLimit,
+      rows: rowsPreview
+    });
+  } catch (err) {
+    console.error('POST /api/whitenoise-excel/preview error:', err);
+    res.status(400).json({ error: err.message || 'Failed to parse Excel workbook.' });
+  }
+});
+
+app.post('/api/whitenoise-excel/commit', requireAuth, upload.single('file'), (req, res) => {
+  try {
+    if (normRole(req.sessionUser?.role) !== 'owner') {
+      return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+    }
+    pruneWhitenoisePreviewCache();
+
+    let buffer = null;
+    let filename = 'stats.xlsx';
+    const previewToken = String(req.body?.preview_token || '').trim();
+
+    if (req.file && req.file.buffer) {
+      buffer = req.file.buffer;
+      filename = req.file.originalname || 'stats.xlsx';
+    } else if (previewToken && WHITENOISE_PREVIEW_CACHE.has(previewToken)) {
+      const cached = WHITENOISE_PREVIEW_CACHE.get(previewToken);
+      buffer = cached.buffer;
+      filename = cached.filename;
+    } else {
+      return res.status(400).json({ error: 'Preview expired or missing file. Please re-upload your Excel sheet.' });
+    }
+
+    const sheetName = req.body?.sheet_name ? String(req.body.sheet_name) : undefined;
+    let colMap = undefined;
+    if (req.body?.col_map) {
+      colMap = typeof req.body.col_map === 'string' ? JSON.parse(req.body.col_map) : req.body.col_map;
+    }
+
+    const evalRes = evaluateWhitenoiseExcelUpload(buffer, filename, { sheetName, colMap });
+    if (evalRes.evaluated_rows.length === 0) {
+      return res.status(400).json({ error: 'No valid stats rows found in the selected sheet/columns.' });
+    }
+
+    const batch = commitWhitenoiseExcelEvaluation(evalRes, req.sessionUser.username || 'Owner');
+    if (previewToken) WHITENOISE_PREVIEW_CACHE.delete(previewToken);
+
+    res.json({
+      success: true,
+      batch,
+      summary: evalRes.summary
+    });
+  } catch (err) {
+    console.error('POST /api/whitenoise-excel/commit error:', err);
+    res.status(400).json({ error: err.message || 'Failed to commit Excel stats.' });
+  }
+});
+
+app.get('/api/whitenoise-excel/batches', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const batches = readDb('whitenoise_upload_batches') || [];
+  const list = batches.map(b => {
+    const { inserted_keys, previous_snapshots, ...pub } = b;
+    return {
+      ...pub,
+      can_rollback: !b.rolled_back && ((inserted_keys?.length || 0) > 0 || (previous_snapshots?.length || 0) > 0)
+    };
+  });
+  res.json({ success: true, total: list.length, data: list });
+});
+
+app.post('/api/whitenoise-excel/batches/:id/rollback', requireAuth, (req, res) => {
+  try {
+    if (normRole(req.sessionUser?.role) !== 'owner') {
+      return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+    }
+    const result = rollbackWhitenoiseBatchById(req.params.id, req.sessionUser.username || 'Owner');
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Rollback failed.' });
+  }
+});
+
+app.get('/api/whitenoise-excel/ownership-ledger', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  let ledger = readDb('number_ownership_ledger') || [];
+  const numQ = normalizePhoneDigits(req.query.number || '');
+  if (numQ) {
+    ledger = ledger.filter(e => String(e.number_digits || '').includes(numQ));
+  }
+  const sorted = ledger.slice().sort((a, b) => {
+    if (a.event_date !== b.event_date) return String(b.event_date || '').localeCompare(String(a.event_date || ''));
+    return (Number(b.event_seq) || 0) - (Number(a.event_seq) || 0);
+  });
+  res.json({ success: true, total: sorted.length, data: sorted.slice(0, 500) });
+});
+
+app.post('/api/whitenoise-excel/ownership-event', requireAuth, (req, res) => {
+  try {
+    if (normRole(req.sessionUser?.role) !== 'owner') {
+      return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+    }
+    const evt = recordExplicitOwnershipEvent({
+      ...(req.body || {}),
+      actor: req.sessionUser.username || 'Owner'
+    });
+    res.json({ success: true, event: evt });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to record ownership event.' });
+  }
 });
 
 app.post('/api/cdr2/sync', requireAuth, async (req, res) => {
@@ -15613,7 +15495,6 @@ app.post('/api/settings', (req, res) => {
   const updated = { ...settings, ...req.body };
   delete updated.theme_catalog;
   writeDb('settings', updated);
-  syncSmppServerFromSettings(updated);
   const responseSettings = {
     ...updated,
     theme_catalog: getThemeCatalog(updated),
@@ -15918,21 +15799,6 @@ app.post('/api/permissions', (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/webhook/config', (req, res) => {
-  res.json(readDb('webhook_config') || {});
-});
-
-app.post('/api/webhook/config', (req, res) => {
-  const current = readDb('webhook_config') || {};
-  const updated = { ...current, ...req.body };
-  writeDb('webhook_config', updated);
-  res.json({ success: true, data: updated });
-});
-
-app.post('/api/webhook/test', (req, res) => {
-  res.json({ success: true, message: 'Webhook test received' });
-});
-
 // ── System Backup & Restore ──────────────────────────────────
 app.get('/api/backup/export', (req, res) => {
   try {
@@ -16235,56 +16101,6 @@ app.get('/api/firewall/stats', (req, res) => {
     blocked_count: blocked.length,
     events_count: events.length,
     active_threats: events.filter(e => e.severity === 'high').length
-  });
-});
-
-app.get('/api/smpp/server-info', (req, res) => {
-  const settings = readDb('settings') || {};
-  const sessions = readDb('smpp_sessions') || [];
-  const listening = Boolean(smppServerState.listening && smppServerInstance);
-  res.json({
-    host: smppServerState.host || settings.smpp_host || '0.0.0.0',
-    port: smppServerState.port || settings.smpp_port || 2775,
-    status: listening ? 'online' : (smppServerState.last_error ? 'error' : 'offline'),
-    listening,
-    started_at: smppServerState.started_at,
-    last_error: smppServerState.last_error,
-    bound_connections: sessions.length,
-    accounts_count: (readDb('smpp_accounts') || []).length,
-    active_sessions: sessions.length
-  });
-});
-
-app.get('/api/smpp/throughput', (req, res) => {
-  res.json(getSmppThroughputStats());
-});
-
-app.get('/api/smpp/dlr', (req, res) => {
-  const sms = readDb('sms_log') || [];
-  const delivered = sms.filter(s => (s.status || '').toLowerCase() === 'delivered').length;
-  const pending = sms.filter(s => (s.status || '').toLowerCase() === 'pending').length;
-  const failed = sms.filter(s => (s.status || '').toLowerCase() === 'failed').length;
-
-  const now = Date.now();
-  const hourlyData = [];
-  for (let i = 23; i >= 0; i--) {
-    const startHour = now - (i + 1) * 3600000;
-    const endHour = now - i * 3600000;
-    const inHour = sms.filter(s => {
-      const t = new Date(s.timestamp || s.date || 0).getTime();
-      return t >= startHour && t < endHour;
-    });
-    const delivInHour = inHour.filter(s => (s.status || '').toLowerCase() === 'delivered').length;
-    const rate = inHour.length > 0 ? Math.round((delivInHour / inHour.length) * 100) : 0;
-    hourlyData.push(rate);
-  }
-
-  res.json({
-    dlr_rate: sms.length ? Math.round((delivered / sms.length) * 100) : 0,
-    delivered,
-    pending,
-    failed,
-    data: hourlyData
   });
 });
 
@@ -17334,7 +17150,7 @@ app.get('/api/reports/orphans', requireAuth, (req, res) => {
 });
 
 // ── CRITICAL: Safe API 404 handler (Must ALWAYS return JSON, never HTML) ─────
-app.all('/api/*', (req, res) => {
+app.all(['/api/*', '/crapi/*'], (req, res) => {
   console.warn(`[404 NOT FOUND] ${req.method} ${req.originalUrl || req.url || req.path}`);
   res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
 });
@@ -17367,8 +17183,8 @@ function cleanupOrphanedNumbers() {
 
 const BIND_HOST = process.env.HOST || '0.0.0.0';
 server.listen(PORT, BIND_HOST, () => {
-  initSmppEngine();
   runPaytermMigration();
+  seedOwnershipLedgerIfEmpty();
   cleanupOrphanedNumbers();
   console.log(`[HUMEX SMS] Server running on http://${BIND_HOST}:${PORT}`);
   console.log(`  ➜  Local:   http://localhost:${PORT}/`);

@@ -230,13 +230,19 @@ body.rmsui.dark table.zy-dt tr:hover td, body.rmsui.dark table.zy-dt2-table tr:h
 }
 
 .zy-side, .adminui .zy-side {
-  position: fixed; top: 0; left: 0; bottom: 0; width: 215px; z-index: 1050;
+  position: fixed; top: 0; left: 0; bottom: 0; width: 256px; z-index: 1050;
   background: var(--theme-struct-side-bg, #ffffff) !important;
   border-right: 1px solid var(--theme-struct-border, #e2e8f0) !important;
   color: var(--theme-struct-text, #0f172a) !important;
   display: flex !important; flex-direction: column !important;
   overflow-y: auto !important; overflow-x: hidden !important;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
+.zy-side::-webkit-scrollbar { width: 5px; }
+.zy-side::-webkit-scrollbar-track { background: transparent; }
+.zy-side::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.32); border-radius: 999px; }
+.zy-side::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.55); }
 .zy-sidenav, .adminui .zy-sidenav {
   background: var(--theme-struct-side-bg, #ffffff) !important;
 }
@@ -288,63 +294,72 @@ body.sidebar-open {
   color: #111;
 }
 .zy-side-head {
-  background: var(--theme-struct-side-bg, #ffffff) !important; padding: 18px 12px 14px; text-align: center;
-  border-bottom: 1.5px solid var(--theme-struct-border, #e2e8f0) !important;
+  background: var(--theme-struct-side-bg, #ffffff) !important; padding: 14px 14px 12px; text-align: center;
+  border-bottom: 1px solid var(--theme-struct-border, #e2e8f0) !important;
   position: relative;
 }
 .zy-side-head::after {
   display: none !important;
 }
 .zy-avatar-lg {
-  width: 54px; height: 54px; border-radius: 50%; margin: 0 auto 8px;
+  width: 46px; height: 46px; border-radius: 50%; margin: 0 auto 7px;
   background: #ffffff !important;
   background-color: #ffffff !important;
   border: 2px solid var(--theme-btn-primary, #2563eb); display: flex; align-items: center; justify-content: center;
-  overflow: hidden; box-shadow: 0 3px 10px var(--theme-focus-ring, rgba(37, 99, 235, 0.22));
-  color: #0f172a !important; font-weight: 800 !important; font-size: 22px !important;
+  overflow: hidden; box-shadow: 0 2px 8px var(--theme-focus-ring, rgba(37, 99, 235, 0.16));
+  color: #0f172a !important; font-weight: 800 !important; font-size: 19px !important;
 }
 .zy-avatar-lg img {
   width: 100%; height: 100%; object-fit: cover;
   background-color: #ffffff !important;
 }
-.zy-welcome { font-size: 13px !important; color: var(--theme-struct-text, #1e293b) !important; font-weight: 800 !important; text-align: center; }
-.zy-role    { font-size: 11.5px !important; font-weight: 700 !important; color: var(--theme-btn-primary, #2563eb) !important; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; text-align: center; }
-.zy-clock   { font-size: 11px !important; color: var(--theme-struct-muted, #64748b) !important; margin-top: 3px; font-weight: 600; font-style: normal; }
+.zy-welcome { font-size: 13px !important; color: var(--theme-struct-text, #1e293b) !important; font-weight: 700 !important; text-align: center; letter-spacing: -0.01em; }
+.zy-role    { font-size: 10.5px !important; font-weight: 700 !important; color: var(--theme-btn-primary, #2563eb) !important; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.6px; text-align: center; }
+.zy-clock   { font-size: 11px !important; color: var(--theme-struct-muted, #64748b) !important; margin-top: 3px; font-weight: 500; font-style: normal; font-variant-numeric: tabular-nums; }
 
-.zy-sidenav { padding-bottom: 24px; }
+.zy-sidenav { padding: 10px 0 20px; flex: 1 1 auto; }
 .zy-sidenav .zy-snav {
-  display: flex !important; align-items: center !important; gap: 9px !important; cursor: pointer !important;
-  width: calc(100% - 16px) !important; box-sizing: border-box !important;
-  padding: 10px 14px !important; min-height: 42px !important; margin: 4px 8px !important;
-  color: var(--theme-struct-item-text, #334155) !important; font-size: 12.5px !important; font-weight: 700 !important;
-  letter-spacing: .25px !important;
-  background: var(--theme-struct-item-bg, #f1f5f9) !important;
-  border: 1px solid var(--theme-struct-border, #e2e8f0) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02) !important;
+  display: flex !important; align-items: center !important; gap: 10px !important; cursor: pointer !important;
+  width: calc(100% - 20px) !important; box-sizing: border-box !important;
+  padding: 8px 11px !important; min-height: 40px !important; margin: 2px 10px !important;
+  color: var(--theme-struct-item-text, #334155) !important; font-size: 12.5px !important; font-weight: 600 !important;
+  letter-spacing: 0.15px !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
   text-shadow: none !important;
-  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition: background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 0.18s ease !important;
   position: relative !important;
+  user-select: none;
+}
+.zy-sidenav .zy-snav .zy-snav-txt {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 .zy-sidenav .zy-snav:hover {
-  background: var(--theme-struct-item-hover, #eff6ff) !important;
-  color: var(--theme-btn-primary, #2563eb) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
-  padding-left: 17px !important;
-  transform: translateX(2px) !important;
-  box-shadow: 0 2px 8px var(--theme-focus-ring, rgba(37, 99, 235, 0.12)) !important;
+  background: var(--theme-struct-item-hover, rgba(15, 23, 42, 0.045)) !important;
+  color: var(--theme-struct-text, #0f172a) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
 }
 .zy-sidenav .zy-snav.open {
-  background: var(--theme-struct-item-hover, #ffffff) !important;
+  background: var(--theme-struct-item-hover, rgba(37, 99, 235, 0.06)) !important;
   color: var(--theme-btn-primary, #2563eb) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
-  box-shadow: 0 2px 8px var(--theme-focus-ring, rgba(37, 99, 235, 0.08)) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
 }
 .zy-sidenav .zy-snav.active {
   background: var(--theme-btn-primary, #2563eb) !important;
   color: var(--theme-btn-primary-text, #ffffff) !important;
-  border: 1px solid var(--theme-btn-primary, #2563eb) !important;
-  box-shadow: 0 4px 14px var(--theme-focus-ring, rgba(37, 99, 235, 0.28)) !important;
+  border: 1px solid transparent !important;
+  box-shadow: 0 3px 10px var(--theme-focus-ring, rgba(37, 99, 235, 0.24)) !important;
   text-shadow: none !important;
 }
 .zy-sidenav .zy-snav.active span,
@@ -354,79 +369,135 @@ body.sidebar-open {
   color: var(--theme-btn-primary-text, #ffffff) !important;
   filter: none !important;
 }
-.zy-sidenav .zy-snav .zy-ic { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
-.zy-sidenav .zy-snav .zy-ic .zy-icimg { width: 16px; height: 16px; object-fit: contain; display: block; }
-.zy-sidenav .zy-snav .zy-caret { margin-left: auto; font-size: 11px; opacity: .9; color: var(--theme-struct-muted, #64748b); transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+.zy-sidenav .zy-snav .zy-ic {
+  width: 26px; height: 26px; min-width: 26px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(148, 163, 184, 0.11);
+  font-size: 12.5px;
+  flex-shrink: 0;
+  transition: background-color 0.18s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.zy-sidenav .zy-snav:hover .zy-ic { transform: scale(1.04); }
+.zy-sidenav .zy-snav.active .zy-ic { background: rgba(255, 255, 255, 0.18) !important; }
+.zy-sidenav .zy-snav .zy-ic .zy-icimg { width: 15px; height: 15px; object-fit: contain; display: block; }
+.zy-sidenav .zy-snav .zy-caret {
+  margin-left: auto; font-size: 10px; opacity: 0.55; flex-shrink: 0;
+  color: var(--theme-struct-muted, #64748b);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.18s ease;
+}
+.zy-sidenav .zy-snav:hover .zy-caret { opacity: 0.9; }
 .zy-sidenav .zy-snav.open .zy-caret,
-.zy-sidenav .zy-snav[aria-expanded="true"] .zy-caret { transform: rotate(180deg); color: var(--theme-btn-primary, #2563eb); }
+.zy-sidenav .zy-snav[aria-expanded="true"] .zy-caret { transform: rotate(180deg); opacity: 1; color: var(--theme-btn-primary, #2563eb); }
 .zy-sidenav .zy-snav:focus-visible,
 .zy-sidenav .zy-ssub div:focus-visible {
   outline: 2px solid var(--theme-btn-primary, #2563eb) !important;
   outline-offset: -2px !important;
 }
 
-/* Opened Group Sub-menu: Soft Rounded Sub-items with Bullets */
-.zy-sidenav .zy-ssub { display: none; }
-.zy-sidenav .zy-ssub.open {
+/* Smooth Animated Sub-menu Drawer with Subtle Guide Rail */
+.zy-sidenav .zy-ssub {
   display: block !important;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding: 0 10px 0 22px !important;
+  margin: 0 !important;
+  pointer-events: none;
+  visibility: hidden;
+  transition: max-height 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.18s ease,
+              padding 0.2s ease,
+              visibility 0s linear 0.24s !important;
+}
+.zy-sidenav .zy-ssub.open {
+  max-height: 460px;
+  opacity: 1;
+  padding: 3px 10px 7px 22px !important;
+  pointer-events: auto;
+  visibility: visible;
   background: transparent !important;
   position: relative !important;
   border: none !important;
   border-radius: 0px !important;
   box-shadow: none !important;
-  padding: 2px 4px 6px 8px !important;
-  animation: zySubDropOpen 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  transition: max-height 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.2s ease 0.03s,
+              padding 0.2s ease,
+              visibility 0s linear 0s !important;
 }
-@keyframes zySubDropOpen {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
+.zy-sidenav .zy-ssub::before {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 4px;
+  bottom: 10px;
+  width: 1.5px;
+  border-radius: 999px;
+  background: var(--theme-struct-border, #e2e8f0);
+  opacity: 0.75;
 }
 .zy-sidenav .zy-ssub div {
   display: flex !important;
   align-items: center !important;
-  gap: 8px !important;
+  gap: 9px !important;
   background: transparent !important;
   color: var(--theme-struct-sub-text, #475569) !important;
   font-size: 12.5px !important;
-  font-weight: 600 !important;
-  letter-spacing: 0.15px !important;
-  padding: 8px 12px 8px 16px !important;
-  margin: 3px 6px 3px 12px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.1px !important;
+  padding: 7px 11px !important;
+  margin: 2px 0 2px 10px !important;
   border: 1px solid transparent !important;
-  border-radius: 10px !important;
+  border-radius: 8px !important;
   box-shadow: none !important;
   cursor: pointer !important;
   text-shadow: none !important;
-  transition: all 0.16s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition: background-color 0.16s cubic-bezier(0.16, 1, 0.3, 1),
+              color 0.16s ease !important;
   position: relative !important;
+  user-select: none;
 }
 .zy-sidenav .zy-ssub div::before {
-  content: "•";
-  font-size: 16px;
-  color: var(--theme-struct-muted, #94a3b8);
-  line-height: 1;
+  display: none !important;
+  content: none !important;
+}
+.zy-sidenav .zy-ssub div .zy-sub-ic {
+  width: 14px;
+  text-align: center;
+  font-size: 11.5px;
+  opacity: 0.62;
+  flex-shrink: 0;
+  transition: opacity 0.16s ease, color 0.16s ease;
+}
+.zy-sidenav .zy-ssub div .zy-sub-txt {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 .zy-sidenav .zy-ssub div:hover {
-  background: var(--theme-struct-item-hover, #eff6ff) !important;
-  color: var(--theme-btn-primary, #2563eb) !important;
-  border-color: var(--theme-struct-border, #cbd5e1) !important;
-  padding-left: 20px !important;
-  box-shadow: 0 2px 6px var(--theme-focus-ring, rgba(37, 99, 235, 0.08)) !important;
-  transform: translateX(2px) !important;
+  background: var(--theme-struct-item-hover, rgba(15, 23, 42, 0.045)) !important;
+  color: var(--theme-struct-text, #0f172a) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
   text-shadow: none !important;
 }
-.zy-sidenav .zy-ssub div:hover::before {
-  color: var(--theme-btn-primary, #2563eb) !important;
+.zy-sidenav .zy-ssub div:hover .zy-sub-ic {
+  opacity: 0.95;
+  color: var(--theme-btn-primary, #2563eb);
 }
 .zy-sidenav .zy-ssub div.active {
-  background: var(--theme-btn-primary-tint, rgba(37, 99, 235, 0.12)) !important;
+  background: var(--theme-btn-primary-tint, rgba(37, 99, 235, 0.11)) !important;
   color: var(--theme-btn-primary, #2563eb) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
-  font-weight: 800 !important;
-  box-shadow: 0 2px 6px var(--theme-focus-ring, rgba(37, 99, 235, 0.12)) !important;
+  border-color: transparent !important;
+  font-weight: 700 !important;
+  box-shadow: none !important;
 }
-.zy-sidenav .zy-ssub div.active::before {
-  color: var(--theme-btn-primary, #2563eb) !important;
+.zy-sidenav .zy-ssub div.active .zy-sub-ic {
+  opacity: 1;
+  color: var(--theme-btn-primary, #2563eb);
 }
 .zy-side-foot {
   flex-shrink: 0 !important;
@@ -9211,42 +9282,40 @@ input#cdr2-search,
 
 /* ── Client Panel Flattened Direct Sidebar Navigation & Custom Icon Tiles ── */
 .zy-sidenav.zy-sidenav-flat {
-  padding: 6px 0 24px !important;
+  padding: 10px 0 20px !important;
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct {
-  padding: 7px 12px 7px 9px !important;
-  min-height: 44px !important;
-  margin: 5px 10px !important;
+  padding: 7px 11px 7px 9px !important;
+  min-height: 42px !important;
+  margin: 3px 10px !important;
   width: calc(100% - 20px) !important;
   gap: 11px !important;
-  border-radius: 12px !important;
+  border-radius: 10px !important;
   font-size: 13px !important;
   font-weight: 600 !important;
   letter-spacing: 0.1px !important;
-  background: var(--sp-bg-card, #ffffff) !important;
-  border: 1px solid var(--sp-border, #e2e8f0) !important;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03) !important;
-  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-              background-color 0.18s ease,
-              border-color 0.18s ease,
-              box-shadow 0.18s ease,
-              color 0.18s ease !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  transition: background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              color 0.18s ease,
+              box-shadow 0.18s ease !important;
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover {
   padding-left: 9px !important;
-  transform: translateX(3px) !important;
-  background: var(--theme-struct-item-hover, #f8fafc) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
-  box-shadow: 0 3px 10px rgba(37, 99, 235, 0.09) !important;
+  transform: none !important;
+  background: var(--theme-struct-item-hover, rgba(15, 23, 42, 0.045)) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct .zy-cl-ic-box {
-  width: 30px !important;
-  height: 30px !important;
-  min-width: 30px !important;
-  border-radius: 9px !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  border-radius: 8px !important;
   background: var(--ic-bg, rgba(37, 99, 235, 0.12)) !important;
   color: var(--ic-fg, #2563eb) !important;
   display: inline-flex !important;
@@ -9257,13 +9326,13 @@ input#cdr2-search,
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct .zy-cl-ic-box svg {
-  width: 18px !important;
-  height: 18px !important;
+  width: 17px !important;
+  height: 17px !important;
   display: block !important;
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover .zy-cl-ic-box {
-  transform: scale(1.06);
+  transform: scale(1.05);
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct .zy-snav-lbl {
@@ -9276,20 +9345,20 @@ input#cdr2-search,
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct .zy-caret-direct {
   font-size: 10px !important;
-  opacity: 0.45 !important;
+  opacity: 0.38 !important;
   transition: transform 0.18s ease, opacity 0.18s ease !important;
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover .zy-caret-direct {
-  opacity: 0.9 !important;
+  opacity: 0.85 !important;
   transform: translateX(2px);
 }
 
 .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.active {
   background: var(--theme-btn-primary, #2563eb) !important;
   color: var(--theme-btn-primary-text, #ffffff) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
-  box-shadow: 0 4px 14px var(--theme-focus-ring, rgba(37, 99, 235, 0.28)) !important;
+  border-color: transparent !important;
+  box-shadow: 0 3px 10px var(--theme-focus-ring, rgba(37, 99, 235, 0.24)) !important;
   transform: none !important;
 }
 
@@ -9306,16 +9375,16 @@ input#cdr2-search,
 body.rmsui.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct,
 body.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct,
 [data-theme="dark"] .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct {
-  background: rgba(30, 41, 59, 0.65) !important;
-  border-color: rgba(148, 163, 184, 0.16) !important;
+  background: transparent !important;
+  border-color: transparent !important;
   color: #e2e8f0 !important;
 }
 
 body.rmsui.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover,
 body.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover,
 [data-theme="dark"] .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct:hover {
-  background: rgba(51, 65, 85, 0.85) !important;
-  border-color: var(--theme-btn-primary, #3b82f6) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: transparent !important;
   color: #ffffff !important;
 }
 
@@ -9323,8 +9392,69 @@ body.rmsui.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.active,
 body.dark .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.active,
 [data-theme="dark"] .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.active {
   background: var(--theme-btn-primary, #2563eb) !important;
-  border-color: var(--theme-btn-primary, #2563eb) !important;
+  border-color: transparent !important;
   color: #ffffff !important;
+}
+
+/* Dark mode polish for grouped Owner & Agent smooth sidebars */
+body.rmsui.dark .zy-sidenav .zy-snav,
+body.dark .zy-sidenav .zy-snav,
+[data-theme="dark"] .zy-sidenav .zy-snav {
+  background: transparent !important;
+  color: #e2e8f0 !important;
+}
+body.rmsui.dark .zy-sidenav .zy-snav:hover,
+body.dark .zy-sidenav .zy-snav:hover,
+[data-theme="dark"] .zy-sidenav .zy-snav:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #ffffff !important;
+}
+body.rmsui.dark .zy-sidenav .zy-snav .zy-ic,
+body.dark .zy-sidenav .zy-snav .zy-ic,
+[data-theme="dark"] .zy-sidenav .zy-snav .zy-ic {
+  background: rgba(96, 165, 250, 0.14) !important;
+  color: #93c5fd !important;
+}
+body.rmsui.dark .zy-sidenav .zy-snav.open,
+body.dark .zy-sidenav .zy-snav.open,
+[data-theme="dark"] .zy-sidenav .zy-snav.open {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #ffffff !important;
+}
+body.rmsui.dark .zy-sidenav .zy-snav.active,
+body.dark .zy-sidenav .zy-snav.active,
+[data-theme="dark"] .zy-sidenav .zy-snav.active {
+  background: var(--theme-btn-primary, #2563eb) !important;
+  color: #ffffff !important;
+}
+body.rmsui.dark .zy-sidenav .zy-snav.active .zy-ic,
+body.dark .zy-sidenav .zy-snav.active .zy-ic,
+[data-theme="dark"] .zy-sidenav .zy-snav.active .zy-ic {
+  background: rgba(255, 255, 255, 0.2) !important;
+  color: #ffffff !important;
+}
+body.rmsui.dark .zy-sidenav .zy-ssub::before,
+body.dark .zy-sidenav .zy-ssub::before,
+[data-theme="dark"] .zy-sidenav .zy-ssub::before {
+  background: rgba(148, 163, 184, 0.24) !important;
+}
+body.rmsui.dark .zy-sidenav .zy-ssub div,
+body.dark .zy-sidenav .zy-ssub div,
+[data-theme="dark"] .zy-sidenav .zy-ssub div {
+  background: transparent !important;
+  color: #cbd5e1 !important;
+}
+body.rmsui.dark .zy-sidenav .zy-ssub div:hover,
+body.dark .zy-sidenav .zy-ssub div:hover,
+[data-theme="dark"] .zy-sidenav .zy-ssub div:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #ffffff !important;
+}
+body.rmsui.dark .zy-sidenav .zy-ssub div.active,
+body.dark .zy-sidenav .zy-ssub div.active,
+[data-theme="dark"] .zy-sidenav .zy-ssub div.active {
+  background: rgba(59, 130, 246, 0.2) !important;
+  color: #93c5fd !important;
 }
 
 

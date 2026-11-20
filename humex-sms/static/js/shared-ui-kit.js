@@ -3438,6 +3438,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         </div>
       </div>
 
+      ${shortcuts.length ? `
       <!-- Row 2: Quick Access Grid (Desktop 6-col, Mobile 3x2) -->
       <div class="zy-ud-card">
         <div class="zy-ud-card-head">
@@ -3447,7 +3448,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <div class="zy-ud-quick-grid">
           ${quickTilesHtml}
         </div>
-      </div>
+      </div>` : ''}
 
       <!-- Row 3: Volume Overview (2x2) + 7-Day Area Chart -->
       <div class="zy-ud-mid-row">

@@ -287,25 +287,13 @@ function renderManagementTabs(activeTab = 'agents') {
   `;
 }
 
-function renderApiWebhooksTabs(activeTab = 'webhook') {
-  return `
-    <div class="tabs" style="margin-bottom:16px;display:flex;gap:8px;border-bottom:1px solid var(--border);padding-bottom:12px;overflow-x:auto;">
-      <button class="btn ${activeTab === 'webhook' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderWebhookConfig()"><i class="fas fa-share-nodes"></i> Webhook Settings</button>
-      <button class="btn ${activeTab === 'mapping' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderFieldMapping()"><i class="fas fa-layer-group"></i> Field Mapping Guide</button>
-      <button class="btn ${activeTab === 'simulator' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderLiveTest()"><i class="fas fa-paper-plane"></i> Live Test Simulator</button>
-      <button class="btn ${activeTab === 'playground' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderApiPlayground()"><i class="fas fa-terminal"></i> API Playground</button>
-      <button class="btn ${activeTab === 'tokens' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderApiTokens()"><i class="fas fa-key"></i> API Tokens</button>
-      <button class="btn ${activeTab === 'docs' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderDocumentation()"><i class="fas fa-book"></i> Documentation</button>
-    </div>
-  `;
-}
-
 function renderSecurityTabs(activeTab = 'firewall') {
   return `
-    <div class="tabs" style="margin-bottom:16px;display:flex;gap:8px;border-bottom:1px solid var(--border);padding-bottom:12px;overflow-x:auto;">
-      <button class="btn ${activeTab === 'audit-logs' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('audit-logs')"><i class="fas fa-clipboard-list"></i> Audit Logs</button>
+    <div class="tabs" style="margin-bottom:16px;display:flex;gap:8px;border-bottom:1px solid var(--border);padding-bottom:12px;overflow-x:auto;flex-wrap:wrap;">
+      <button class="btn ${activeTab === 'firewall' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('firewall-dashboard')"><i class="fas fa-shield-halved"></i> Security Overview</button>
+      <button class="btn ${activeTab === 'blocked-ips' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('blocked-ips')"><i class="fas fa-ban"></i> Blocked IPs</button>
+      <button class="btn ${activeTab === 'firewall-events' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('firewall-events')"><i class="fas fa-file-shield"></i> Firewall Events</button>
       <button class="btn ${activeTab === 'login-activity' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('login-activity')"><i class="fas fa-clock-rotate-left"></i> Login Activity</button>
-      <button class="btn ${activeTab === 'firewall' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('firewall-dashboard')"><i class="fas fa-shield-halved"></i> Security &amp; Firewall</button>
       <button class="btn ${activeTab === 'ratelimits' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('rate-limits')"><i class="fas fa-lock"></i> Rate Limits</button>
       <button class="btn ${activeTab === 'permissions' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="loadPage('permissions')"><i class="fas fa-user-lock"></i> Permissions</button>
     </div>
@@ -328,11 +316,6 @@ function renderOwnerHubTabs(hub, activePage) {
       ['allocation-history', 'fa-clock-rotate-left', 'Allocation History'],
       ['number-transfers-log', 'fa-right-left', 'Transfer History']
     ],
-    cdr: [
-      ['my-sms', 'fa-table-list', 'All CDR Reports'],
-      ['cdr2', 'fa-tower-cell', 'CDR 2 (Whitenoise)'],
-      ['failed-sms', 'fa-triangle-exclamation', 'Failed SMS']
-    ],
     live: [
       ['live-otp-feed', 'fa-tower-broadcast', 'Live OTP Feed'],
       ['live-traffic', 'fa-wave-square', 'Live Traffic MPS']
@@ -342,33 +325,9 @@ function renderOwnerHubTabs(hub, activePage) {
       ['profit-stats', 'fa-coins', 'Profit Stats'],
       ['business-reports', 'fa-briefcase', 'Business Reports']
     ],
-    smpp: [
-      ['smpp-dashboard', 'fa-gauge-high', 'SMPP Overview'],
-      ['smpp-sessions', 'fa-plug', 'SMPP Sessions'],
-      ['connected-clients', 'fa-users-viewfinder', 'Connected Clients'],
-      ['dlr-monitor', 'fa-check-double', 'DLR Monitor'],
-      ['throughput-monitor', 'fa-tachograph-digital', 'Throughput'],
-      ['connection-logs', 'fa-file-shield', 'Connection Logs'],
-      ['smpp-security', 'fa-shield-halved', 'SMPP Security']
-    ],
-    providers: [
-      ['smpp-accounts', 'fa-server', 'SMPP Accounts'],
-      ['login-panels', 'fa-arrow-right-to-bracket', 'Login Panels'],
-      ['cr-api-panels', 'fa-link', 'CR API Panels'],
-      ['whitenoise-panels', 'fa-tower-cell', 'Whitenoise API']
-    ],
-    finance: [
-      ['payout-requests', 'fa-hand-holding-dollar', 'Payout Requests'],
-      ['statements', 'fa-file-invoice-dollar', 'Statements (USD/EUR/GBP)'],
-      ['credit-notes', 'fa-receipt', 'Credit Notes'],
-      ['account-balances', 'fa-wallet', 'Account Balances'],
-      ['my-payouts', 'fa-sack-dollar', 'Payouts Overview']
-    ],
     settings: [
       ['general-settings', 'fa-sliders', 'General Settings'],
       ['security-settings', 'fa-user-shield', 'Security Settings'],
-      ['smpp-settings', 'fa-plug-circle-bolt', 'SMPP Settings'],
-      ['api-tokens', 'fa-code', 'API & Webhooks'],
       ['services-manager', 'fa-mobile-screen-button', 'Services & CLI'],
       ['backup-restore', 'fa-database', 'Backup & Restore']
     ],
@@ -662,17 +621,9 @@ function loadPage(page) {
     'delivery-logs': renderMySms,
     'failed-sms': renderFailedSms,
     'live-traffic': renderLiveTraffic,
-    'smpp-dashboard': renderSmppDashboard,
-    'smpp-accounts': renderSmppAccounts,
     'login-panels': renderLoginPanels,
     'cr-api-panels': renderCrApiPanels,
     'whitenoise-panels': renderWhitenoisePanels,
-    'smpp-sessions': renderSmppSessions,
-    'connected-clients': renderConnectedClients,
-    'dlr-monitor': renderDlrMonitor,
-    'throughput-monitor': renderThroughputMonitor,
-    'smpp-security': renderSmppSecurity,
-    'connection-logs': renderConnectionLogs,
     'registration-requests': renderRegistrationRequests,
     'payout-requests': renderPayoutRequests,
     'agent-requests': renderAgentRequests,
@@ -691,16 +642,6 @@ function loadPage(page) {
     'login-activity': renderLoginActivity,
     'business-reports': renderBusinessReports,
     'permissions': renderPermissions,
-    'http-overview': renderHttpOverview,
-    'standard-webhook': renderStandardWebhook,
-    'custom-postback': renderCustomPostback,
-    'field-mapping': renderFieldMapping,
-    'test-endpoint': renderTestEndpoint,
-    'api-tokens': renderApiTokens,
-    'api-playground': renderApiPlayground,
-    'live-test': renderLiveTest,
-    'webhook-config': renderWebhookConfig,
-    'documentation': renderDocumentation,
     'announcements': renderAnnouncements,
     'notifications': () => window.HumexNotifications && window.HumexNotifications.renderPage('page-content'),
     'live-chat': () => window.HumexLiveChat && window.HumexLiveChat.renderPage('page-content'),
@@ -717,7 +658,6 @@ function loadPage(page) {
     'firewall-rates': renderRateLimits,
     'general-settings': renderGeneralSettings,
     'security-settings': renderSecuritySettings,
-    'smpp-settings': renderSmppSettings,
     'backup-restore': renderBackupRestore,
     'cli-manager': renderCliManager,
     'services-manager': renderServicesManager,
@@ -746,7 +686,7 @@ function loadPage(page) {
 })();
 
 // ════════════════════════════════════════════════════════════════════
-//  SMPP ACCOUNTS — COMPLETE WITH TEST CONNECTION
+//  PROVIDERS — CR API, WEB SCRAPING PANELS & WHITENOISE EXCEL REPORTS
 // ════════════════════════════════════════════════════════════════════
 
 async function renderCrApiPanels() {
@@ -765,7 +705,6 @@ async function renderCrApiPanels() {
           <button class="btn btn-primary btn-sm" onclick="openAddCrApiModal()"><i class="fas fa-plus"></i> Add Connection</button>
         </div>
       </div>
-      ${renderOwnerHubTabs('providers', 'cr-api-panels')}
       <div class="card">
         ${connections.length ? buildTable(
           ['#', 'Panel Name', 'Panel URL', 'Token', 'Auto-Pull', 'Last Pull', 'Status', 'Total Pulled', 'Active', 'Actions'],
@@ -879,44 +818,34 @@ let _whitenoiseCache = [];
 
 async function renderWhitenoisePanels() {
   try {
-    const [raw, mcRes, ipRes] = await Promise.all([
-      apiFetch('/api/whitenoise-connections'),
-      apiFetch('/api/monthly-cycle').catch(() => null),
-      apiFetch('/api/whitenoise-connections/server-ip').catch(() => null)
+    const [raw, mcRes] = await Promise.all([
+      apiFetch('/api/whitenoise-connections').catch(() => []),
+      apiFetch('/api/monthly-cycle').catch(() => null)
     ]);
     const connections = Array.isArray(raw) ? raw : (raw?.data || []);
     _whitenoiseCache = connections;
     const mc = mcRes?.monthly_cycle || { start_date: '', end_date: '', clear_date: '' };
-    const serverIp = ipRes?.ip || '';
-
-    const modeBadge = (m) => {
-      if (m === 'web_login') return '<span class="badge badge-green">Web Auto-Login</span>';
-      if (m === 'hybrid') return '<span class="badge badge-purple">Hybrid (Web+API)</span>';
-      return '<span class="badge badge-blue">API Key</span>';
-    };
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
-      <div class="page-header">
+      <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
         <div>
-          <div class="page-title"><i class="fas fa-tower-cell" style="color:#4f46e5;"></i> Whitenoise API Connections</div>
-          <div class="page-subtitle">Direct pure-Node integration for Whitenoise Web Auto-Login, API SMS fetching, conditional conversion registration, and Monthly (30/5) {W} payouts.</div>
+          <div class="page-title" style="display:flex;align-items:center;gap:8px;">
+            <i class="fas fa-file-excel" style="color:#2563eb;"></i>
+            <span>Whitenoise Excel Reports &amp; Monthly Cycle</span>
+          </div>
+          <div class="page-subtitle">Excel-Only Daily Stats mode · Background polling disabled · Monthly (30/5) {W} settlement window &amp; batch history.</div>
         </div>
         <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn btn-outline btn-sm" onclick="loadPage('cdr2')"><i class="fas fa-table-list"></i> Open CDR 2</button>
-          <button class="btn btn-primary btn-sm" onclick="openAddWhitenoiseModal()"><i class="fas fa-plus"></i> Add Whitenoise Connection</button>
+          <button class="btn btn-primary btn-sm" onclick="if(typeof openWhitenoiseExcelUploadModal==='function')openWhitenoiseExcelUploadModal()"><i class="fas fa-cloud-arrow-up"></i> Upload Excel Stats</button>
         </div>
       </div>
-      ${renderOwnerHubTabs('providers', 'whitenoise-panels')}
-      <div class="card" style="margin-bottom:14px;background:#eef2ff;border-color:#c7d2fe;padding:12px 16px;">
-        <div style="font-size:12.5px;color:#312e81;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
-          <div><strong><i class="fas fa-calendar-check"></i> Payment Rule:</strong> All Whitenoise numbers, ranges, and CDR 2 logs are locked to <b>Monthly (30/5) {W}</b> (5-day hold).</div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span><strong>Modes:</strong> <code>Web Auto-Login</code> (whitenoise.one email+pass) · <code>Hybrid</code> · <code>API Key</code></span>
-            ${serverIp ? `<span class="badge badge-blue" style="cursor:pointer;" onclick="navigator.clipboard?.writeText('${escapeHtml(serverIp)}');toast('Server IP copied: ${escapeHtml(serverIp)}','success')" title="Click to copy Server IP for Whitenoise API IP Whitelist"><i class="fas fa-network-wired"></i> Server IP: ${escapeHtml(serverIp)} <i class="fas fa-copy"></i></span>` : ''}
-          </div>
+      <div class="card" style="margin-bottom:14px;border:1px solid #e2e8f0;padding:14px 16px;">
+        <div style="font-size:12.5px;color:#334155;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <div><strong><i class="fas fa-calendar-check" style="color:#2563eb;"></i> Monthly (30/5) {W} Settlement Rule:</strong> All Whitenoise ranges and daily Excel stats clear on the configured company clear date.</div>
+          <div style="font-size:12px;color:#059669;font-weight:600;">Zero VPS Polling · Date-Dependent Ownership Active</div>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;background:#ffffff;border:1px solid #c7d2fe;border-radius:8px;padding:10px 12px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;">
           <div>
             <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Monthly Cycle Start</label>
             <input type="date" id="wn-mc-start" value="${escapeHtml(mc.start_date || '')}" style="width:100%;height:34px;">
@@ -936,34 +865,50 @@ async function renderWhitenoisePanels() {
           </div>
         </div>
       </div>
-      <div class="card">
-        ${connections.length ? buildTable(
-          ['#', 'Panel Name', 'Endpoints', 'Mode', 'Conversion', 'Credentials', 'Sweep (Client / Pool)', 'Status', 'Pulled / Conv.', 'Actions'],
-          connections.map(cn => [
-            cn.id,
-            `<strong>${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}</strong>`,
-            `<div class="fs-12 text-muted">Login: ${escapeHtml(cn.web_login_url || cn.web_url || 'https://whitenoise.one')}<br>SMS: ${escapeHtml(cn.web_sms_url || ((cn.web_url || 'https://whitenoise.one').replace(/\/+$/, '') + '/sms'))}</div>`,
-            modeBadge(cn.mode),
-            `<span class="badge badge-outline">${escapeHtml(cn.conversion_mode || 'on_client_match')}</span>`,
-            `<div class="fs-12 monospace">Key: ${escapeHtml(cn.api_key_masked || '—')}<br>Web: ${cn.web_email ? escapeHtml(cn.web_email) : escapeHtml(cn.cookie_masked || 'None')}</div>`,
-            `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${cn.poll_interval_sec || cn.interval || 240}s / ${Math.round((cn.pool_interval_sec || 540) / 60)}m</span>`,
-            `<div class="fs-12 ${String(cn.last_status || '').startsWith('Error') ? 'text-danger' : 'text-success'}">${statusBadge(cn.active ? 'active' : 'paused')}<div style="margin-top:2px;">${escapeHtml(cn.last_status || 'Ready')}</div></div>`,
-            `<b>${cn.total_pulled || 0}</b> SMS<br><small class="text-muted">${cn.total_conversions || 0} conv.</small>`,
-            `<div style="display:inline-flex;gap:4px;flex-wrap:wrap;">
-              <button class="btn btn-outline btn-sm" onclick="verifyWhitenoiseConn(${cn.id})" title="Verify Connection & Login"><i class="fas fa-plug-circle-check"></i> Verify</button>
-              <button class="btn btn-outline btn-sm" onclick="openTestWhitenoiseModal(${cn.id}, '${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}')" title="Test Number"><i class="fas fa-vial"></i> Test</button>
-              <button class="btn btn-outline btn-sm" onclick="pullWhitenoiseNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
-              <button class="btn btn-outline btn-sm" onclick="openEditWhitenoiseModal(${cn.id})" title="Edit Connection"><i class="fas fa-pen"></i></button>
-              <button class="btn btn-outline btn-sm" onclick="toggleWhitenoiseConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Pause' : 'Resume'}"><i class="fas fa-${cn.active ? 'pause' : 'play'}"></i></button>
-              <button class="btn btn-danger btn-sm" onclick="deleteWhitenoiseConn(${cn.id})" title="Remove"><i class="fas fa-trash"></i></button>
-            </div>`
-          ])
-        ) : `<div class="empty-state"><i class="fas fa-tower-cell"></i><p>No Whitenoise connections yet — click "Add Whitenoise Connection" to integrate your Whitenoise account using Email/Password or API Key.</p></div>`}
+
+      <div class="card" style="margin-bottom:14px;padding:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <div>
+            <div style="font-size:14.5px;font-weight:700;color:#0f172a;">Daily Excel Upload History</div>
+            <div style="font-size:12px;color:#64748b;">Re-uploading cumulative reports is 100% idempotent; 1-click rollback restores exact pre-batch state.</div>
+          </div>
+        </div>
+        <div id="wn-panel-batches-body">
+          <div style="padding:20px;text-align:center;color:#64748b;">Loading batches…</div>
+        </div>
       </div>
+
+      <details style="border:1px solid #e2e8f0;border-radius:8px;background:#fff;padding:12px 14px;">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#64748b;">
+          Legacy Whitenoise API / Web Connections (${connections.length}) — Background Polling Retired
+        </summary>
+        <div style="margin-top:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:#64748b;">Automatic background polling is permanently disabled to keep VPS load at zero.</span>
+            <button class="btn btn-outline btn-sm" onclick="openAddWhitenoiseModal()"><i class="fas fa-plus"></i> Add Legacy Connection</button>
+          </div>
+          ${connections.length ? buildTable(
+            ['#', 'Panel Name', 'Mode', 'Status', 'Actions'],
+            connections.map(cn => [
+              cn.id,
+              `<strong>${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}</strong>`,
+              escapeHtml(cn.mode || 'api_key'),
+              escapeHtml(cn.last_status || 'Polling Retired'),
+              `<div style="display:inline-flex;gap:4px;">
+                <button class="btn btn-outline btn-sm" onclick="openEditWhitenoiseModal(${cn.id})"><i class="fas fa-pen"></i></button>
+                <button class="btn btn-danger btn-sm" onclick="deleteWhitenoiseConn(${cn.id})"><i class="fas fa-trash"></i></button>
+              </div>`
+            ])
+          ) : `<div style="font-size:12.5px;color:#94a3b8;padding:8px 0;">No legacy API connections configured (recommended for Excel-only mode).</div>`}
+        </div>
+      </details>
     `;
+    if (typeof window.zyLoadWhitenoiseBatches === 'function') {
+      window.zyLoadWhitenoiseBatches('wn-panel-batches-body');
+    }
   } catch (err) {
     console.error('Whitenoise panels error:', err);
-    toast('Failed to load Whitenoise connections', 'error');
+    toast('Failed to load Whitenoise Excel hub', 'error');
   }
 }
 
@@ -1293,699 +1238,6 @@ async function deleteWhitenoiseConn(id) {
   }
 }
 
-async function renderSmppAccounts() {
-  try {
-    const [data, serverInfo] = await Promise.all([
-      apiFetch('/api/smpp/accounts') || [],
-      apiFetch('/api/smpp/server-info')
-    ]);
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div>
-          <div class="page-title">SMPP Accounts</div>
-          <div class="page-subtitle">External SMS provider connections</div>
-        </div>
-        <div class="page-actions">
-          <button class="btn btn-primary btn-sm" onclick="openAddSmppModal()">
-            <i class="fas fa-plus"></i> Add Account
-          </button>
-        </div>
-      </div>
-      ${renderOwnerHubTabs('providers', 'smpp-accounts')}
-
-      <div class="card" style="margin-bottom:16px;background:${serverInfo?.listening ? 'rgba(46,160,67,0.08)' : 'rgba(218,54,51,0.08)'};border-color:${serverInfo?.listening ? 'rgba(46,160,67,0.25)' : 'rgba(218,54,51,0.25)'};">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span class="status-indicator ${serverInfo?.listening ? 'online' : 'offline'}"></span>
-          <strong>${serverInfo?.listening ? `SMPP Server is listening on port ${serverInfo.port}` : 'SMPP Server is NOT running'}</strong>
-          ${serverInfo?.listening ? `<span class="text-muted fs-12">— ${serverInfo.bound_connections} carrier(s) currently bound</span>` : `<span class="fs-12">— check your server logs, another process may be using port ${serverInfo?.port || 2775}</span>`}
-        </div>
-      </div>
-
-      <div class="card" style="margin-bottom:16px;background:rgba(210,153,34,0.08);border-color:rgba(210,153,34,0.25);">
-        <div style="display:flex;align-items:flex-start;gap:10px;">
-          <i class="fas fa-shield-halved" style="color:var(--yellow-light);margin-top:2px;"></i>
-          <div style="font-size:12px;color:var(--text-secondary);">
-            <strong>For SMPP:</strong> most carriers connect <em>to you</em> — give them your server's IP, port <span class="monospace">${serverInfo?.port || 2775}</span>, and the System ID/Password you set when adding the connection below.
-            Whitelist any IPs they ask for on your own firewall so their connection isn't blocked —
-            <span class="monospace">130.117.83.34</span> and <span class="monospace">130.117.83.32</span> are common examples, but always use what your specific provider gives you.<br>
-            <strong>For HTTP delivery:</strong> share your inbound URL: <span class="monospace">/api/sms/inbound</span> (fields: from, to, message, sms_id).
-          </div>
-        </div>
-      </div>
-
-      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
-        ${statCard('Total Accounts', 'fas fa-users', data.length, 'blue', 'All accounts')}
-        ${statCard('Active Accounts', 'fas fa-circle-check', data.filter(a => a.status === 'active').length, 'green', 'Connected')}
-        ${statCard('Inactive Accounts', 'fas fa-circle-xmark', data.filter(a => a.status !== 'active').length, 'red', 'Disconnected')}
-      </div>
-
-      <div class="card">
-        ${buildTable(
-          ['#', 'Company', 'Type', 'Host/URL', 'System ID', 'OTP Today', 'Total OTP', 'Status', 'Actions'],
-          data.map(a => [
-            a.id || '—',
-            `<strong>${a.company || '—'}</strong>`,
-            badge(a.interconnect_type === 'http' ? 'HTTP' : (a.interconnect_type === 'smpp-client' ? 'SMPP Client' : 'SMPP Server'), a.interconnect_type === 'http' ? 'purple' : (a.interconnect_type === 'smpp-client' ? 'cyan' : 'blue')),
-            `<span class="monospace" style="font-size:11px;">${
-              a.interconnect_type === 'http' ? (a.forward_url || '—') :
-              a.interconnect_type === 'smpp-client' ? (a.host || '—') + ':' + (a.port || '') :
-              'carrier connects to you'
-            }</span>`,
-            `<span class="monospace">${a.system_id || '—'}</span>`,
-            `<span class="badge badge-green">${a.otp_today || 0}</span>`,
-            `<strong class="text-success">${a.total_otp || 0}</strong>`,
-            `<span class="status-indicator ${a.status === 'active' ? 'online' : 'offline'}"></span> ${statusBadge(a.status)}`,
-            `<button class="btn btn-success btn-sm" onclick="testSmppConnection(${a.id})" title="Test Connection">
-              <i class="fas fa-plug"></i> Test
-            </button>
-            ${a.interconnect_type === 'smpp-client' ? `<button class="btn btn-outline btn-sm" onclick="reconnectSmppAccount(${a.id})" title="Reconnect"><i class="fas fa-rotate"></i></button>` : ''}
-            <button class="btn btn-outline btn-sm" onclick="openEditSmppModal(${a.id})" title="Edit">
-              <i class="fas fa-pen"></i>
-            </button>
-            <button class="btn btn-${a.status === 'active' ? 'warning' : 'success'} btn-sm" onclick="toggleSmppAccount(${a.id},'${a.status}')" title="Toggle Status">
-              <i class="fas fa-${a.status === 'active' ? 'pause' : 'play'}"></i>
-            </button>
-            <button class="btn btn-danger btn-sm" onclick="deleteSmppAccount(${a.id})" title="Delete">
-              <i class="fas fa-trash"></i>
-            </button>`
-          ])
-        )}
-      </div>
-    `;
-  } catch (err) {
-    console.error('SMPP Accounts error:', err);
-    toast('Failed to load SMPP accounts: ' + err.message, 'error');
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="empty-state">
-        <i class="fas fa-plug-circle-xmark" style="color:var(--red-light);font-size:40px;"></i>
-        <p>Failed to load SMPP accounts. Please try again.</p>
-        <button class="btn btn-primary btn-sm mt-4" onclick="renderSmppAccounts()">Retry</button>
-      </div>
-    `;
-  }
-}
-
-async function openAddSmppModal() {
-  const info = await apiFetch('/api/smpp/server-info');
-  const serverPort = info?.port || 2775;
-
-  openModal('Add Provider Connection', `
-    <form id="add-smpp-form" onsubmit="submitSmppAccount(event)">
-      <div style="background:rgba(76,110,245,0.08);border:1px solid rgba(76,110,245,0.2);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--text-secondary);">
-        <i class="fas fa-circle-info" style="color:var(--accent);margin-right:6px;"></i>
-        Enter your provider's connection details. Each company's incoming OTPs are tracked separately once connected.
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Interconnect Type</label>
-        <select id="smpp-ic-type" onchange="toggleSmppTypeFields()">
-          <option value="smpp">SMPP Server — carrier connects to you (Recommended)</option>
-          <option value="smpp-client">SMPP Client — you connect to carrier</option>
-          <option value="http">HTTP (GET/POST forward)</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Company Name <span class="text-danger">*</span></label>
-        <input id="smpp-company" placeholder="e.g. Twilio, Vonage" required>
-      </div>
-
-      <div id="smpp-type-smpp">
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">System ID / Username <span class="text-danger">*</span></label>
-            <input id="smpp-server-sid" placeholder="Give this to the carrier">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Password <span class="text-danger">*</span></label>
-            <input type="password" id="smpp-server-pass" placeholder="Max 8 ASCII chars" maxlength="8">
-            <small class="text-muted">Max 8 ASCII characters (per SMPP spec)</small>
-          </div>
-        </div>
-        <div style="background:var(--bg-hover);border-radius:8px;padding:12px 14px;font-size:12px;">
-          <strong>Give the carrier these details</strong> (to enter into their own SMPP client config):
-          <table style="width:100%;margin-top:8px;">
-            <tr><td class="text-muted">Host</td><td class="monospace" id="smpp-info-host">your server's public IP</td></tr>
-            <tr><td class="text-muted">Port</td><td class="monospace">${serverPort}</td></tr>
-            <tr><td class="text-muted">Bind Type</td><td>Transceiver (TRX)</td></tr>
-            <tr><td class="text-muted">System ID</td><td class="monospace" id="smpp-info-sid">—</td></tr>
-            <tr><td class="text-muted">Password</td><td class="monospace" id="smpp-info-pass">—</td></tr>
-          </table>
-        </div>
-      </div>
-
-      <div id="smpp-type-client" style="display:none;">
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Host/IP <span class="text-danger">*</span></label>
-            <input id="smpp-host" placeholder="smpp.provider.com or 192.168.1.100">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Port <span class="text-danger">*</span></label>
-            <input type="number" id="smpp-port" value="2775" min="1" max="65535">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">System ID / Username <span class="text-danger">*</span></label>
-            <input id="smpp-sid" placeholder="Your SMPP username">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Password <span class="text-danger">*</span></label>
-            <input type="password" id="smpp-pass" placeholder="Max 8 ASCII chars" maxlength="8">
-            <small class="text-muted">Max 8 ASCII characters (per SMPP spec)</small>
-          </div>
-        </div>
-      </div>
-
-      <div id="smpp-type-http" style="display:none;">
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Method</label>
-            <select id="smpp-http-method">
-              <option value="POST">POST</option>
-              <option value="GET">GET</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Their Forward URL (they push messages here)</label>
-            <input id="smpp-forward-url" placeholder="Auto-filled below" readonly>
-          </div>
-        </div>
-        <p class="text-muted fs-12">Give this provider your inbound URL: <span class="monospace">https://yourdomain/api/sms/inbound</span> — fields: from, to, message, sms_id.</p>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Whitelist IP (optional)</label>
-        <input id="smpp-whitelist" placeholder="130.117.83.32, 130.117.83.34">
-        <small class="text-muted">Comma separated IPs or CIDR ranges</small>
-      </div>
-
-      <div class="form-actions">
-        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button type="submit" class="btn btn-primary" id="smpp-submit-btn">
-          <i class="fas fa-plus"></i> Add Connection
-        </button>
-      </div>
-    </form>
-  `);
-  setTimeout(() => {
-    const urlField = document.getElementById('smpp-forward-url');
-    if (urlField) urlField.value = window.location.origin + '/api/sms/inbound';
-    const hostInfo = document.getElementById('smpp-info-host');
-    if (hostInfo) hostInfo.textContent = window.location.hostname;
-    const sidInput = document.getElementById('smpp-server-sid');
-    const passInput = document.getElementById('smpp-server-pass');
-    const sidInfo = document.getElementById('smpp-info-sid');
-    const passInfo = document.getElementById('smpp-info-pass');
-    if (sidInput) sidInput.addEventListener('input', () => sidInfo.textContent = sidInput.value || '—');
-    if (passInput) passInput.addEventListener('input', () => passInfo.textContent = passInput.value || '—');
-  }, 0);
-}
-
-function toggleSmppTypeFields() {
-  const type = document.getElementById('smpp-ic-type')?.value;
-  document.getElementById('smpp-type-smpp').style.display = type === 'smpp' ? 'block' : 'none';
-  document.getElementById('smpp-type-client').style.display = type === 'smpp-client' ? 'block' : 'none';
-  document.getElementById('smpp-type-http').style.display = type === 'http' ? 'block' : 'none';
-}
-
-async function submitSmppAccount(event) {
-  event.preventDefault();
-
-  try {
-    const icType = document.getElementById('smpp-ic-type')?.value || 'smpp';
-    const company = document.getElementById('smpp-company').value.trim();
-    const whitelist = document.getElementById('smpp-whitelist').value.trim();
-
-    if (!company) { toast('Company name is required', 'error'); return; }
-
-    let payload = { company, interconnect_type: icType, whitelist_ip: whitelist || '', status: 'active' };
-
-    if (icType === 'smpp') {
-      const systemId = document.getElementById('smpp-server-sid').value.trim();
-      const password = document.getElementById('smpp-server-pass').value;
-
-      if (!systemId) { toast('System ID is required', 'error'); return; }
-      if (!password || password.length < 4) { toast('Password must be at least 4 characters', 'error'); return; }
-      if (password.length > 8) { toast('Password must be max 8 ASCII characters', 'error'); return; }
-
-      payload = { ...payload, system_id: systemId, password: password, bind_type: 'transceiver' };
-    } else if (icType === 'smpp-client') {
-      const host = document.getElementById('smpp-host').value.trim();
-      const port = parseInt(document.getElementById('smpp-port').value) || 2775;
-      const systemId = document.getElementById('smpp-sid').value.trim();
-      const password = document.getElementById('smpp-pass').value;
-
-      if (!host) { toast('Host/IP is required', 'error'); return; }
-      if (!systemId) { toast('System ID is required', 'error'); return; }
-      if (!password || password.length < 4) { toast('Password must be at least 4 characters', 'error'); return; }
-      if (password.length > 8) { toast('Password must be max 8 ASCII characters', 'error'); return; }
-      if (port < 1 || port > 65535) { toast('Port must be between 1 and 65535', 'error'); return; }
-
-      payload = { ...payload, host, port, system_id: systemId, password: password, bind_type: 'transceiver' };
-    } else {
-      const method = document.getElementById('smpp-http-method').value;
-      payload = { ...payload, http_method: method, forward_url: window.location.origin + '/api/sms/inbound' };
-    }
-
-    const btn = document.getElementById('smpp-submit-btn');
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<div class="spinner"></div> Adding...';
-    }
-
-    const result = await apiFetch('/api/smpp/accounts', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
-
-    if (result && result.id) {
-      closeModal();
-      toast(`✅ Connection for "${company}" added successfully!`, 'success');
-
-      if (icType === 'smpp-client') {
-        setTimeout(() => {
-          testSmppConnection(result.id);
-        }, 500);
-      }
-
-      renderSmppAccounts();
-    } else {
-      toast(result?.error || 'Failed to add connection', 'error');
-    }
-  } catch (err) {
-    console.error('Add SMPP account error:', err);
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    const btn = document.getElementById('smpp-submit-btn');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-plus"></i> Add Account';
-    }
-  }
-}
-
-async function testSmppConnection(accountId) {
-  try {
-    toast('Testing SMPP connection...', 'info');
-
-    const result = await apiFetch(`/api/smpp/accounts/${accountId}/test`, {
-      method: 'POST'
-    });
-
-    if (result && result.success) {
-      toast(`✅ SMPP Connection successful! Response time: ${result.response_time || '—'}ms`, 'success');
-    } else {
-      toast(`❌ SMPP Connection failed: ${result?.error || 'Unknown error'}`, 'error');
-    }
-  } catch (err) {
-    console.error('Test SMPP connection error:', err);
-    toast('Error testing connection: ' + err.message, 'error');
-  }
-}
-
-async function reconnectSmppAccount(id) {
-  toast('Reconnecting...', 'info');
-  const result = await apiFetch(`/api/smpp/accounts/${id}/reconnect`, { method: 'POST' });
-  if (!result) return;
-  toast('✅ Reconnecting to carrier...', 'success');
-  setTimeout(() => renderSmppAccounts(), 1500);
-}
-
-async function toggleSmppAccount(id, status) {
-  try {
-    const newStatus = status === 'active' ? 'inactive' : 'active';
-
-    const result = await apiFetch(`/api/smpp/accounts/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status: newStatus })
-    });
-
-    if (result && result.id) {
-      toast(`SMPP account ${newStatus}`, 'info');
-      renderSmppAccounts();
-    } else {
-      toast('Failed to toggle account status', 'error');
-    }
-  } catch (err) {
-    console.error('Toggle SMPP account error:', err);
-    toast('Error: ' + err.message, 'error');
-  }
-}
-
-async function deleteSmppAccount(id) {
-  if (!confirm('Delete this SMPP account? This action cannot be undone.')) return;
-
-  try {
-    const result = await apiFetch(`/api/smpp/accounts/${id}`, {
-      method: 'DELETE'
-    });
-
-    if (result && result.success) {
-      toast('SMPP account deleted', 'warning');
-      renderSmppAccounts();
-    } else {
-      toast('Failed to delete account', 'error');
-    }
-  } catch (err) {
-    console.error('Delete SMPP account error:', err);
-    toast('Error: ' + err.message, 'error');
-  }
-}
-
-async function openEditSmppModal(id) {
-  try {
-    const data = await apiFetch(`/api/smpp/accounts/${id}`);
-    if (!data) {
-      toast('Account not found', 'error');
-      return;
-    }
-
-    openModal(`Edit SMPP Account — ${data.company || 'Unknown'}`, `
-      <form id="edit-smpp-form" onsubmit="submitEditSmppAccount(event, ${id})">
-        <div style="background:rgba(76,110,245,0.08);border:1px solid rgba(76,110,245,0.2);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--text-secondary);">
-          <i class="fas fa-circle-info" style="color:var(--accent);margin-right:6px;"></i>
-          Update your SMPP provider credentials. Leave password blank to keep current.
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Company Name <span class="text-danger">*</span></label>
-            <input id="esmpp-company" value="${data.company || ''}" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Host/IP <span class="text-danger">*</span></label>
-            <input id="esmpp-host" value="${data.host || ''}" required>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Port <span class="text-danger">*</span></label>
-            <input type="number" id="esmpp-port" value="${data.port || 2775}" min="1" max="65535" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Message Limit (MPS)</label>
-            <input type="number" id="esmpp-limit" value="${data.limit || 500}" min="1">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">System ID <span class="text-danger">*</span></label>
-            <input id="esmpp-sid" value="${data.system_id || ''}" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Password (optional)</label>
-            <input type="password" id="esmpp-pass" placeholder="Leave blank to keep current" maxlength="8">
-            <small class="text-muted">Max 8 ASCII characters</small>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Bind Type</label>
-          <select id="esmpp-bind-type">
-            <option value="transceiver" ${data.bind_type === 'transceiver' ? 'selected' : ''}>Transceiver (TX/RX)</option>
-            <option value="transmitter" ${data.bind_type === 'transmitter' ? 'selected' : ''}>Transmitter (TX Only)</option>
-            <option value="receiver" ${data.bind_type === 'receiver' ? 'selected' : ''}>Receiver (RX Only)</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Whitelist IP (optional)</label>
-          <input id="esmpp-whitelist" value="${data.whitelist_ip || ''}" placeholder="130.117.83.32, 130.117.83.34">
-        </div>
-
-        <div class="form-actions">
-          <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary" id="esmpp-submit-btn">
-            <i class="fas fa-save"></i> Save Changes
-          </button>
-        </div>
-      </form>
-    `);
-  } catch (err) {
-    console.error('Edit SMPP account error:', err);
-    toast('Failed to load account details', 'error');
-  }
-}
-
-async function submitEditSmppAccount(event, id) {
-  event.preventDefault();
-
-  try {
-    const company = document.getElementById('esmpp-company').value.trim();
-    const host = document.getElementById('esmpp-host').value.trim();
-    const port = parseInt(document.getElementById('esmpp-port').value) || 2775;
-    const limit = parseInt(document.getElementById('esmpp-limit').value) || 500;
-    const systemId = document.getElementById('esmpp-sid').value.trim();
-    const password = document.getElementById('esmpp-pass').value;
-    const whitelist = document.getElementById('esmpp-whitelist').value.trim();
-    const bindType = document.getElementById('esmpp-bind-type').value;
-
-    if (!company) { toast('Company name is required', 'error'); return; }
-    if (!host) { toast('Host/IP is required', 'error'); return; }
-    if (!systemId) { toast('System ID is required', 'error'); return; }
-    if (port < 1 || port > 65535) { toast('Port must be between 1 and 65535', 'error'); return; }
-
-    const btn = document.getElementById('esmpp-submit-btn');
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<div class="spinner"></div> Saving...';
-    }
-
-    const payload = {
-      company,
-      host,
-      port,
-      limit,
-      system_id: systemId,
-      whitelist_ip: whitelist || '',
-      bind_type: bindType || 'transceiver'
-    };
-
-    if (password && password.length >= 4 && password.length <= 8) {
-      payload.password = password;
-    }
-
-    const result = await apiFetch(`/api/smpp/accounts/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload)
-    });
-
-    if (result && result.id) {
-      closeModal();
-      toast(`✅ SMPP Account "${company}" updated successfully!`, 'success');
-      renderSmppAccounts();
-    } else {
-      toast(result?.error || 'Failed to update account', 'error');
-    }
-  } catch (err) {
-    console.error('Edit SMPP account error:', err);
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    const btn = document.getElementById('esmpp-submit-btn');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
-    }
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  STANDARD WEBHOOK — HTTP INTERCONNECT
-// ════════════════════════════════════════════════════════════════════
-
-async function renderStandardWebhook() {
-  try {
-    const cfg = await apiFetch('/api/webhook/config') || {};
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div>
-          <div class="page-title">Standard Webhook</div>
-          <div class="page-subtitle">HTTP interconnect for SMS forwarding</div>
-        </div>
-      </div>
-      ${renderOwnerHubTabs('settings', 'api-tokens')}
-      ${renderApiWebhooksTabs('webhook')}
-
-      <div class="card" style="margin-bottom:20px;background:rgba(76,110,245,0.05);border-left:4px solid var(--accent);">
-        <div style="padding:16px;">
-          <h4 style="margin-bottom:8px;">📋 HTTP Interconnect Setup</h4>
-          <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">
-            Method can be <strong>GET</strong> or <strong>POST</strong>. Please confirm which one is preferred with your provider.
-          </p>
-          <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">
-            <strong>IP Whitelist:</strong> Please allow following IP addresses on your firewall:
-            <code>130.117.83.34</code> and <code>130.117.83.32</code>
-          </p>
-          <p style="font-size:13px;color:var(--text-secondary);">
-            <strong>Message Format:</strong> <code>from</code> (sender CLI), <code>to</code> (recipient number),
-            <code>message</code> (SMS body), <code>sms_id</code> (unique ID)
-          </p>
-        </div>
-      </div>
-
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header"><div class="card-title">Webhook Configuration</div></div>
-          <form id="webhook-form" onsubmit="saveWebhook(event)">
-            <div class="form-group">
-              <label class="form-label">Webhook URL <span class="text-danger">*</span></label>
-              <input value="${cfg.url || ''}" id="wh-url" placeholder="https://your-server.com/webhook" required>
-              <small class="text-muted">Provide this URL to your upstream provider</small>
-            </div>
-            <div class="form-group">
-              <label class="form-label">HTTP Method</label>
-              <select id="wh-method">
-                <option ${cfg.method === 'POST' ? 'selected' : ''}>POST</option>
-                <option ${cfg.method === 'GET' ? 'selected' : ''}>GET</option>
-              </select>
-              <small class="text-muted">Confirm with provider which method is preferred</small>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Secret Key</label>
-              <input value="${cfg.secret || ''}" id="wh-secret" placeholder="Webhook secret for validation">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Retry Count</label>
-              <input type="number" value="${cfg.retry || 3}" id="wh-retry" min="1" max="10">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Timeout (seconds)</label>
-              <input type="number" value="${cfg.timeout || 30}" id="wh-timeout" min="5" max="120">
-            </div>
-            <div class="form-actions">
-              <button type="submit" class="btn btn-primary" id="wh-submit-btn">
-                <i class="fas fa-save"></i> Save
-              </button>
-              <button type="button" class="btn btn-outline" onclick="testWebhook()">
-                <i class="fas fa-paper-plane"></i> Test
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">Sample Payload</div>
-            <button class="btn btn-outline btn-sm" onclick="copySamplePayload()">
-              <i class="fas fa-copy"></i> Copy
-            </button>
-          </div>
-          <div class="code-block" style="font-size:13px;">
-            <pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;">
-{
-  "from": "+1234567890",
-  "to": "+12025551234",
-  "message": "Your verification code is 123456",
-  "sms_id": "sms_abc123xyz"
-}</pre>
-          </div>
-          <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:8px;">
-            <p style="font-size:12px;color:var(--text-muted);">
-              <strong>GET Example:</strong>
-              <code style="display:block;margin-top:4px;word-break:break-all;font-size:11px;">
-                https://your-server.com/webhook?from=+1234567890&to=+12025551234&message=Your+code+is+123456&sms_id=sms_abc123
-              </code>
-            </p>
-          </div>
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    console.error('Webhook error:', err);
-    toast('Failed to load webhook config', 'error');
-  }
-}
-
-function copySamplePayload() {
-  const payload = JSON.stringify({
-    from: "+1234567890",
-    to: "+12025551234",
-    message: "Your verification code is 123456",
-    sms_id: "sms_abc123xyz"
-  }, null, 2);
-
-  navigator.clipboard.writeText(payload).then(() => {
-    toast('Sample payload copied to clipboard', 'success');
-  }).catch(() => {
-    toast('Failed to copy', 'error');
-  });
-}
-
-async function saveWebhook(event) {
-  event.preventDefault();
-
-  try {
-    const url = document.getElementById('wh-url').value.trim();
-    if (!url) {
-      toast('Webhook URL is required', 'error');
-      return;
-    }
-
-    const btn = document.getElementById('wh-submit-btn');
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<div class="spinner"></div> Saving...';
-    }
-
-    const payload = {
-      url: url,
-      method: document.getElementById('wh-method').value,
-      secret: document.getElementById('wh-secret').value,
-      retry: parseInt(document.getElementById('wh-retry').value) || 3,
-      timeout: parseInt(document.getElementById('wh-timeout').value) || 30
-    };
-
-    const result = await apiFetch('/api/webhook/config', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
-
-    if (result && result.success) {
-      toast('Webhook saved successfully', 'success');
-    } else {
-      toast(result?.error || 'Failed to save webhook', 'error');
-    }
-  } catch (err) {
-    console.error('Save webhook error:', err);
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    const btn = document.getElementById('wh-submit-btn');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-save"></i> Save';
-    }
-  }
-}
-
-async function testWebhook() {
-  try {
-    toast('Testing webhook...', 'info');
-
-    const result = await apiFetch('/api/webhook/test', {
-      method: 'POST',
-      body: JSON.stringify({ test: true, event: 'otp_received' })
-    });
-
-    if (result && result.success) {
-      toast(`✅ Webhook OK — ${result.response_time_ms || '—'}ms`, 'success');
-    } else {
-      toast('❌ Webhook test failed', 'error');
-    }
-  } catch (err) {
-    console.error('Test webhook error:', err);
-    toast('Error: ' + err.message, 'error');
-  }
-}
-
 // ════════════════════════════════════════════════════════════════════
 //  MY NUMBERS
 // ════════════════════════════════════════════════════════════════════
@@ -2019,9 +1271,6 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
             </button>
             <button type="button" class="apx-btn apx-btn-success apx-btn-small" onclick="openAuraAddNumberModal()" data-apx-tooltip="Add Virtual Numbers">
               <i class="fas fa-plus"></i> Add
-            </button>
-            <button type="button" class="apx-btn apx-btn-small" onclick="loadPage('upload-numbers')" data-apx-tooltip="Upload CSV File">
-              <i class="fas fa-cloud-arrow-up"></i> CSV
             </button>
             <button type="button" class="apx-btn apx-btn-danger apx-btn-small" onclick="zyOwnerDeleteSelected()" data-apx-tooltip="Delete Selected">
               <i class="fas fa-trash"></i> Delete
@@ -3090,9 +2339,6 @@ async function renderAllocationHistory(page = 1) {
     c.innerHTML = `
       <div class="page-header">
         <div><div class="page-title">Allocation History</div><div class="page-subtitle">Complete log of number allocations</div></div>
-        <div class="page-actions">
-          <button class="btn btn-outline btn-sm" onclick="loadPage('bulk-allocation')"><i class="fas fa-plus"></i> New Allocation</button>
-        </div>
       </div>
       ${renderOwnerHubTabs('history', 'allocation-history')}
       <div class="card">
@@ -4399,7 +3645,7 @@ function renderLiveOtpFeed() {
       <div id="otp-feed" class="live-feed" style="max-height:500px;">
         <div class="empty-state" style="padding:40px 20px;">
           <i class="fas fa-satellite-dish" style="font-size:28px;color:var(--text-muted);margin-bottom:10px;display:block;"></i>
-          <p style="color:var(--text-muted);">Waiting for real incoming OTPs — this feed only shows genuine messages received through your SMPP/HTTP connections.</p>
+          <p style="color:var(--text-muted);">Waiting for real incoming OTPs — this feed only shows genuine messages received through your CR API and Web Scraping connections.</p>
         </div>
       </div>
     </div>
@@ -4737,354 +3983,6 @@ function renderLiveTraffic() {
   };
 }
 
-// ─── SMPP DASHBOARD ───────────────────────────────────────────────
-async function renderSmppDashboard() {
-  try {
-    const [throughput, sessions] = await Promise.all([
-      apiFetch('/api/smpp/throughput'),
-      apiFetch('/api/smpp/sessions')
-    ]);
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">SMPP Dashboard</div><div class="page-subtitle">Server performance overview</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'smpp-dashboard')}
-      <div class="stats-grid">
-        ${statCard('Active Sessions', 'fas fa-plug', sessions?.length || 0, 'blue', 'SMPP connections')}
-        ${statCard('Current MPS', 'fas fa-chart-line', throughput?.current_mps || 0, 'green', 'Messages/sec')}
-        ${statCard('Peak MPS', 'fas fa-bolt', throughput?.peak_mps || 0, 'yellow', 'Maximum today')}
-        ${statCard('DLR Rate', 'fas fa-circle-check', (throughput?.dlr_rate || 0) + '%', 'purple', 'Delivery receipts')}
-      </div>
-      <div class="charts-grid">
-        <div class="card">
-          <div class="card-header"><div class="card-title">Throughput (last 60s)</div></div>
-          <div class="chart-container"><canvas id="smpp-throughput-chart"></canvas></div>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">Active Sessions</div></div>
-          ${buildTable(['System ID', 'IP', 'Bind', 'Messages', 'Status'],
-            (sessions || []).slice(0, 6).map(s => [
-              `<span class="monospace">${s.system_id || '—'}</span>`,
-              s.ip || '—',
-              badge(s.bind_type || '—', 'blue'),
-              (s.messages_sent || 0).toLocaleString(),
-              statusBadge(s.status)
-            ])
-          )}
-        </div>
-      </div>
-    `;
-
-    try {
-      const throughputData = throughput?.data || Array.from({ length: 60 }, () => 0);
-      const ctx = document.getElementById('smpp-throughput-chart');
-      if (ctx && typeof Chart !== 'undefined') {
-        new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: Array.from({ length: 60 }, (_, i) => i),
-            datasets: [{
-              data: throughputData,
-              label: 'MPS',
-              borderColor: '#334155',
-              backgroundColor: 'rgba(51,65,85,0.08)',
-              fill: true,
-              tension: 0.4,
-              pointRadius: 0,
-              borderWidth: 2
-            }]
-          },
-          options: chartOpts()
-        });
-      }
-    } catch (err) {
-      console.warn('Chart render error:', err);
-    }
-  } catch (err) {
-    console.error('SMPP Dashboard error:', err);
-    toast('Failed to load SMPP dashboard', 'error');
-  }
-}
-
-// ─── SMPP SESSIONS ────────────────────────────────────────────────
-async function renderSmppSessions() {
-  try {
-    const data = await apiFetch('/api/smpp/sessions') || [];
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">SMPP Sessions</div><div class="page-subtitle">Active server sessions</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'smpp-sessions')}
-      <div class="card">
-        ${buildTable(
-          ['ID', 'System ID', 'IP Address', 'Bind Type', 'Messages Sent', 'Connected At', 'Status', 'Actions'],
-          data.map(s => [
-            s.id || '—',
-            `<span class="monospace">${s.system_id || '—'}</span>`,
-            s.ip || '—',
-            badge(s.bind_type || '—', 'blue'),
-            (s.messages_sent || 0).toLocaleString(),
-            fmtShort(s.connected_at),
-            statusBadge(s.status),
-            `<button class="btn btn-warning btn-sm" onclick="disconnectSession(${s.id})"><i class="fas fa-plug-circle-xmark"></i> Disconnect</button>`
-          ])
-        )}
-      </div>
-    `;
-  } catch (err) {
-    console.error('SMPP Sessions error:', err);
-    toast('Failed to load SMPP sessions', 'error');
-  }
-}
-
-async function disconnectSession(id) {
-  if (!confirm('Disconnect this session?')) return;
-
-  try {
-    await apiFetch(`/api/smpp/sessions/${id}`, { method: 'DELETE' });
-    toast('Session disconnected', 'warning');
-    renderSmppSessions();
-  } catch (err) {
-    console.error('Disconnect session error:', err);
-    toast('Failed to disconnect session', 'error');
-  }
-}
-
-// ─── CONNECTED CLIENTS ────────────────────────────────────────────
-async function renderConnectedClients() {
-  try {
-    const data = await apiFetch('/api/smpp/sessions') || [];
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">Connected Clients</div><div class="page-subtitle">${data.length} active clients</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'connected-clients')}
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
-        ${data.map(s => `
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
-              <div>
-                <div class="fw-600 monospace">${s.system_id || '—'}</div>
-                <div class="text-muted fs-12">${s.ip || '—'}</div>
-              </div>
-              ${statusBadge(s.status)}
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
-              <div><div class="text-muted">Bind Type</div><div>${badge(s.bind_type || '—', 'blue')}</div></div>
-              <div><div class="text-muted">Messages</div><div>${(s.messages_sent || 0).toLocaleString()}</div></div>
-              <div style="grid-column:1/-1"><div class="text-muted">Connected</div><div>${fmtShort(s.connected_at)}</div></div>
-            </div>
-            <div style="margin-top:12px;display:flex;gap:8px;">
-              <button class="btn btn-outline btn-sm" style="flex:1" onclick="toast('Client details', 'info')"><i class="fas fa-info"></i> Details</button>
-              <button class="btn btn-danger btn-sm" style="flex:1" onclick="disconnectSession(${s.id})"><i class="fas fa-times"></i> Drop</button>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-  } catch (err) {
-    console.error('Connected clients error:', err);
-    toast('Failed to load connected clients', 'error');
-  }
-}
-
-// ─── DLR MONITOR ─────────────────────────────────────────────────
-async function renderDlrMonitor() {
-  try {
-    const data = await apiFetch('/api/smpp/dlr');
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">DLR Monitor</div><div class="page-subtitle">Delivery receipt tracking</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'dlr-monitor')}
-      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);">
-        ${statCard('DLR Rate', 'fas fa-percent', (data?.dlr_rate || 0) + '%', 'green', 'Success')}
-        ${statCard('Delivered', 'fas fa-circle-check', data?.delivered || 0, 'blue', 'Confirmed')}
-        ${statCard('Pending', 'fas fa-clock', data?.pending || 0, 'yellow', 'Awaiting')}
-        ${statCard('Failed DLR', 'fas fa-circle-xmark', data?.failed || 0, 'red', 'No receipt')}
-      </div>
-      <div class="card">
-        <div class="card-header"><div class="card-title">DLR Rate (last 60s)</div></div>
-        <div class="chart-container"><canvas id="dlr-chart"></canvas></div>
-      </div>
-    `;
-
-    try {
-      const dlrData = data?.data || Array.from({ length: 60 }, () => 0);
-      const ctx = document.getElementById('dlr-chart');
-      if (ctx && typeof Chart !== 'undefined') {
-        new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: Array.from({ length: 60 }, (_, i) => i),
-            datasets: [{
-              data: dlrData,
-              label: 'DLR %',
-              borderColor: '#334155',
-              backgroundColor: 'rgba(51,65,85,0.08)',
-              fill: true,
-              tension: 0.4,
-              pointRadius: 0,
-              borderWidth: 2
-            }]
-          },
-          options: chartOpts()
-        });
-      }
-    } catch (err) {
-      console.warn('Chart render error:', err);
-    }
-  } catch (err) {
-    console.error('DLR Monitor error:', err);
-    toast('Failed to load DLR monitor', 'error');
-  }
-}
-
-// ─── THROUGHPUT MONITOR ───────────────────────────────────────────
-function renderThroughputMonitor() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Throughput Monitor</div><div class="page-subtitle">Messages per second — live</div></div>
-      <div class="page-actions"><span class="badge badge-green"><span class="pulse-dot" style="display:inline-block;"></span> Live</span></div>
-    </div>
-    ${renderOwnerHubTabs('smpp', 'throughput-monitor')}
-    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);">
-      <div class="stat-card"><div class="stat-icon green"><i class="fas fa-gauge-high"></i></div>
-        <div><div class="stat-label">Current MPS</div><div class="stat-value" id="tp-mps">—</div></div></div>
-      <div class="stat-card"><div class="stat-icon blue"><i class="fas fa-bolt"></i></div>
-        <div><div class="stat-label">Peak (session)</div><div class="stat-value" id="tp-peak">0</div></div></div>
-      <div class="stat-card"><div class="stat-icon yellow"><i class="fas fa-percent"></i></div>
-        <div><div class="stat-label">Success Rate</div><div class="stat-value" id="tp-rate">—</div></div></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><div class="card-title">Live Throughput</div></div>
-      <div class="chart-container" style="height:280px;"><canvas id="tp-chart"></canvas></div>
-    </div>
-  `;
-
-  const labels = [],
-    data = [];
-  let peak = 0;
-
-  const ctx = document.getElementById('tp-chart');
-  const chart = (ctx && typeof Chart !== 'undefined') ? new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data,
-        label: 'MPS',
-        borderColor: '#334155',
-        backgroundColor: 'rgba(51,65,85,0.08)',
-        fill: true,
-        tension: 0.4,
-        pointRadius: 2,
-        borderWidth: 2
-      }]
-    },
-    options: chartOpts()
-  }) : null;
-
-  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${wsProto}://${location.host}/ws/smpp-monitor`);
-  activeWS.push(ws);
-
-  ws.onmessage = e => {
-    try {
-      const d = JSON.parse(e.data);
-      const el = document.getElementById('tp-mps');
-      if (!el) { ws.close(); return; }
-
-      peak = Math.max(peak, d.mps || 0);
-      el.textContent = d.mps || '—';
-      document.getElementById('tp-peak').textContent = peak;
-      document.getElementById('tp-rate').textContent = (d.dlr || 0) + '%';
-
-      labels.push(new Date(d.timestamp).toLocaleTimeString());
-      data.push(d.mps || 0);
-
-      if (labels.length > 60) { labels.shift();
-        data.shift(); }
-      if (chart) chart.update('none');
-    } catch (err) {
-      console.warn('WebSocket message error:', err);
-    }
-  };
-
-  ws.onerror = () => {
-    const el = document.getElementById('tp-mps');
-    if (el) el.textContent = '⚠️';
-  };
-}
-
-// ─── SMPP SECURITY ────────────────────────────────────────────────
-async function renderSmppSecurity() {
-  try {
-    const logs = await apiFetch('/api/smpp/connection-logs') || [];
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">SMPP Security Center</div><div class="page-subtitle">Authentication and access logs</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'smpp-security')}
-      <div class="card">
-        ${buildTable(
-          ['IP Address', 'System ID', 'Event', 'Timestamp'],
-          logs.slice(0, 20).map(l => [
-            l.ip || '—',
-            `<span class="monospace">${l.system_id || '—'}</span>`,
-            badge(l.event || '—', l.event === 'Connected' ? 'green' : l.event === 'Auth Failed' ? 'red' : 'yellow'),
-            fmtShort(l.timestamp)
-          ])
-        )}
-      </div>
-    `;
-  } catch (err) {
-    console.error('SMPP Security error:', err);
-    toast('Failed to load security logs', 'error');
-  }
-}
-
-// ─── CONNECTION LOGS ──────────────────────────────────────────────
-async function renderConnectionLogs() {
-  try {
-    const data = await apiFetch('/api/smpp/connection-logs') || [];
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">Connection Logs</div><div class="page-subtitle">All SMPP connection events</div></div>
-      </div>
-      ${renderOwnerHubTabs('smpp', 'connection-logs')}
-      <div class="card">
-        ${buildTable(
-          ['#', 'IP Address', 'System ID', 'Event', 'Timestamp'],
-          data.map((l, i) => [
-            i + 1,
-            l.ip || '—',
-            `<span class="monospace">${l.system_id || '—'}</span>`,
-            badge(l.event || '—', l.event === 'Connected' ? 'green' : l.event === 'Auth Failed' ? 'red' : 'yellow'),
-            fmtShort(l.timestamp)
-          ])
-        )}
-      </div>
-    `;
-  } catch (err) {
-    console.error('Connection logs error:', err);
-    toast('Failed to load connection logs', 'error');
-  }
-}
-
 // ─── REGISTRATION REQUESTS ────────────────────────────────────────
 async function renderRegistrationRequests() {
   try {
@@ -5174,15 +4072,11 @@ async function renderPayoutRequests(activeTab = 'all') {
           <div class="page-subtitle">Agent-to-Owner USD settlement ledger · Min payout: $${zyFmtMoney(Number(minPayout), 2)} USD · FX Reference: 1 USD = Rs. ${zyFmtMoney(fxRate, 2)} PKR</div>
         </div>
         <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="sp-btn-secondary" style="height:36px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;gap:6px;" onclick="loadPage('general-settings')">
-            <i class="fas fa-coins"></i> FX Rate: Rs. ${zyFmtMoney(fxRate, 2)}
-          </button>
           <button class="sp-btn-secondary" style="height:36px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;gap:6px;" onclick="openSetMinPayoutModal(${minPayout})">
             <i class="fas fa-sliders"></i> Minimum Payout
           </button>
         </div>
       </div>
-      ${renderOwnerHubTabs('finance', 'payout-requests')}
 
       <!-- Financial Metrics Strip -->
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:20px;">
@@ -5558,7 +4452,6 @@ async function renderStatementsHub(currency = 'USD', agentId = '') {
           <button class="btn btn-outline btn-sm" onclick="exportStatementsCsv()"><i class="fas fa-file-csv"></i> Export CSV</button>
         </div>
       </div>
-      ${renderOwnerHubTabs('finance', 'statements')}
       <div class="card" style="margin-bottom:16px;">
         <div class="filters-bar" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           ${['USD', 'EUR', 'GBP'].map(k => `
@@ -5627,7 +4520,6 @@ async function renderCreditNotesHub() {
           <div class="page-subtitle">${notes.length} credit note(s) issued · Total $${zyFmtMoney(totalVal, 4)}</div>
         </div>
       </div>
-      ${renderOwnerHubTabs('finance', 'credit-notes')}
       <div class="card">
         ${buildTable(
           ['Voucher #', 'Account', 'Role', 'Currency', 'Amount', 'Term', 'Reason', 'Date', 'Status', 'PDF'],
@@ -6330,10 +5222,6 @@ function openAddUserModal() {
             <span>Export CSV/TXT</span>
           </label>
           <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;color:#1e293b;">
-            <input type="checkbox" id="au-allow-rest" checked style="width:16px;height:16px;accent-color:#2563eb;">
-            <span>REST API &amp; Tokens</span>
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;color:#1e293b;">
             <input type="checkbox" id="au-can-downline" checked style="width:16px;height:16px;accent-color:#2563eb;">
             <span>Manage Downline</span>
           </label>
@@ -6384,7 +5272,6 @@ async function submitAddUser(event) {
       can_view_cdr: document.getElementById('au-can-cdr')?.checked !== false,
       can_request_payout: document.getElementById('au-can-payout')?.checked !== false,
       can_export_data: document.getElementById('au-can-export')?.checked !== false,
-      allow_rest_api: document.getElementById('au-allow-rest')?.checked !== false,
       can_manage_downline: document.getElementById('au-can-downline')?.checked !== false,
       status: 'active'
     };
@@ -6469,10 +5356,6 @@ async function openEditUserModal(id) {
               <span>Export CSV/TXT</span>
             </label>
             <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;color:#1e293b;">
-              <input type="checkbox" id="edit-allow-rest" ${user.allow_rest_api !== false ? 'checked' : ''} style="width:16px;height:16px;accent-color:#2563eb;">
-              <span>REST API &amp; Tokens</span>
-            </label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;color:#1e293b;">
               <input type="checkbox" id="edit-can-downline" ${user.can_manage_downline !== false ? 'checked' : ''} style="width:16px;height:16px;accent-color:#2563eb;">
               <span>Manage Downline</span>
             </label>
@@ -6550,7 +5433,6 @@ async function submitEditUser(event, id) {
       can_view_cdr: document.getElementById('edit-can-cdr')?.checked !== false,
       can_request_payout: document.getElementById('edit-can-payout')?.checked !== false,
       can_export_data: document.getElementById('edit-can-export')?.checked !== false,
-      allow_rest_api: document.getElementById('edit-allow-rest')?.checked !== false,
       can_manage_downline: document.getElementById('edit-can-downline')?.checked !== false,
       status: document.getElementById('edit-active')?.checked ? 'active' : 'suspended',
       alloc_mode: allocMode || null,
@@ -6625,7 +5507,6 @@ async function openViewUserModal(id, role = 'user') {
       { name: 'View CDR Reports', val: u.can_view_cdr !== false },
       { name: 'Request Payout', val: u.can_request_payout !== false },
       { name: 'Export Data (CSV/TXT)', val: u.can_export_data !== false },
-      { name: 'REST API & Tokens', val: u.allow_rest_api !== false },
       { name: 'Manage Downline', val: u.can_manage_downline !== false }
     ];
 
@@ -6768,7 +5649,6 @@ async function renderAccountBalances() {
       <div class="page-header">
         <div><div class="page-title">Account Balances</div><div class="page-subtitle">Owner &amp; Direct Agent USD Balances (Client PKR wallets are managed privately by their Agent)</div></div>
       </div>
-      ${renderOwnerHubTabs('finance', 'account-balances')}
       <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);">
         ${statCard('Total Balance', 'fas fa-dollar-sign', '$' + zyFmtMoney(totalBalance, 2), 'green', 'Owner & Agent accounts')}
         ${statCard('Agent Funds', 'fas fa-users', '$' + zyFmtMoney(downlineFunds, 2), 'blue', 'Direct Agents (USD)')}
@@ -6887,7 +5767,6 @@ async function renderAuditLogs(page = 1) {
           <button class="btn btn-outline btn-sm text-danger" onclick="clearAuditLogs()"><i class="fas fa-trash-can"></i> Clear All Logs</button>
         </div>
       </div>
-      ${renderSecurityTabs('audit-logs')}
       <div class="card">
         ${buildTable(
           ['#', 'User', 'Action', 'IP Address', 'Details', 'Timestamp'],
@@ -7162,13 +6041,13 @@ async function renderPermissions() {
   try {
     const livePerms = await apiFetch('/api/permissions') || {};
     const roles = ['Admin', 'Agent', 'Client'];
-    const modules = ['Numbers', 'SMS', 'SMPP', 'Users', 'Finance', 'API', 'Settings', 'Security'];
+    const modules = ['Numbers', 'SMS', 'Users', 'Finance', 'Settings', 'Security'];
 
     const getPerm = (r, m) => {
       if (livePerms[r] && livePerms[r][m] !== undefined) return livePerms[r][m];
       if (r === 'Admin') return 1;
-      if (r === 'Agent') return ['Numbers', 'SMS', 'Users', 'Finance', 'API'].includes(m) ? 1 : 0;
-      if (r === 'Client') return ['Numbers', 'SMS', 'Finance', 'API'].includes(m) ? 1 : 0;
+      if (r === 'Agent') return ['Numbers', 'SMS', 'Users', 'Finance'].includes(m) ? 1 : 0;
+      if (r === 'Client') return ['Numbers', 'SMS', 'Finance'].includes(m) ? 1 : 0;
       return 0;
     };
 
@@ -7204,9 +6083,9 @@ async function renderPermissions() {
 
 async function savePermissions() {
   const roles = ['Owner', 'Admin', 'Agent', 'Client'];
-  const modules = ['Numbers', 'SMS', 'SMPP', 'Users', 'Finance', 'API', 'Settings', 'Security'];
+  const modules = ['Numbers', 'SMS', 'Users', 'Finance', 'Settings', 'Security'];
   const updated = {
-    Owner: { Numbers: 1, SMS: 1, SMPP: 1, Users: 1, Finance: 1, API: 1, Settings: 1, Security: 1 }
+    Owner: { Numbers: 1, SMS: 1, Users: 1, Finance: 1, Settings: 1, Security: 1 }
   };
 
   roles.filter(r => r !== 'Owner').forEach(r => {
@@ -7236,640 +6115,6 @@ async function savePermissions() {
 // ════════════════════════════════════════════════════════════════════
 //  REMAINING PAGES — Placeholder functions (will work with real API)
 // ════════════════════════════════════════════════════════════════════
-
-// ─── HTTP OVERVIEW ──────────────────────────────────────────────
-function renderHttpOverview() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">HTTP Providers — Overview</div><div class="page-subtitle">Webhook and API integration guide</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    ${renderApiWebhooksTabs('webhook')}
-    <div class="two-col">
-      <div class="card">
-        <div class="card-header"><div class="card-title">Getting Started</div></div>
-        <div style="line-height:1.8;color:var(--text-secondary);">
-          <p>Connect your server to receive OTP data in real-time via HTTP webhooks.</p>
-          <br>
-          <strong>Steps:</strong>
-          <ol style="padding-left:20px;margin-top:8px;">
-            <li>Generate an API token</li>
-            <li>Configure your webhook URL</li>
-            <li>Set up field mapping</li>
-            <li>Test with the simulator</li>
-          </ol>
-        </div>
-        <div style="margin-top:20px;">
-          <button class="btn btn-primary" onclick="loadPage('api-tokens')"><i class="fas fa-key"></i> Get API Token</button>
-          <button class="btn btn-outline" style="margin-left:10px;" onclick="loadPage('webhook-config')"><i class="fas fa-share-nodes"></i> Configure Webhook</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header"><div class="card-title">Sample Payload</div></div>
-        <div class="code-block">
-<button class="code-copy" onclick="copyCode(this)">Copy</button>{
-  "event": "otp_received",
-  "number": "+12025551234",
-  "app": "WhatsApp",
-  "message": "Your code is 123456",
-  "country": "US",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "provider": "Twilio"
-}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function copyCode(btn) {
-  const block = btn.parentElement;
-  const text = block.textContent.replace('Copy', '').trim();
-  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard', 'success'));
-}
-
-// ─── CUSTOM POSTBACK ──────────────────────────────────────────────
-function renderCustomPostback() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Custom Postback</div><div class="page-subtitle">Build custom URL with field placeholders</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    ${renderApiWebhooksTabs('webhook')}
-    <div class="card">
-      <div class="card-header"><div class="card-title">Postback URL Builder</div></div>
-      <div class="form-group"><label class="form-label">Base URL</label>
-        <input id="pb-url" placeholder="https://your-server.com/callback" value="https://example.com/callback"></div>
-      <div class="form-group"><label class="form-label">Postback URL (with variables)</label>
-        <input id="pb-full" value="https://example.com/callback?number={number}&app={app}&msg={message}&time={timestamp}"></div>
-      <div class="card-header" style="margin-top:16px;"><div class="card-title">Available Variables</div></div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px;">
-        ${['{number}', '{app}', '{message}', '{country}', '{provider}', '{timestamp}', '{otp_code}', '{user_id}', '{token}']
-          .map(v => `<div class="code-block" style="cursor:pointer;" onclick="insertVar('${v}')">${v}</div>`).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function insertVar(v) {
-  const inp = document.getElementById('pb-full');
-  if (inp) inp.value += v;
-}
-
-// ─── FIELD MAPPING ────────────────────────────────────────────────
-function renderFieldMapping() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Field Mapping Guide</div><div class="page-subtitle">Map incoming fields to your schema</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    <div class="card">
-      ${renderApiWebhooksTabs('mapping')}
-      ${buildTable(
-        ['Our Field', 'Your Field Name', 'Type', 'Example'],
-        [
-          ['number', 'phone / mobile / number', 'string', '+12025551234'],
-          ['app', 'service / application / app', 'string', 'WhatsApp'],
-          ['message', 'body / text / sms_text', 'string', 'Your OTP is 123456'],
-          ['country', 'country_code / region', 'string', 'US'],
-          ['timestamp', 'time / created_at / date', 'ISO8601', '2024-01-15T10:30:00Z'],
-          ['provider', 'carrier / operator', 'string', 'Twilio'],
-          ['user_id', 'account_id / uid', 'integer', '42']
-        ]
-      )}
-    </div>
-  `;
-}
-
-// ─── TEST ENDPOINT ────────────────────────────────────────────────
-async function renderTestEndpoint() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Test Endpoint</div><div class="page-subtitle">Send test calls to your webhook</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    ${renderApiWebhooksTabs('simulator')}
-    <div class="two-col">
-      <div class="card">
-        <div class="card-header"><div class="card-title">Request Builder</div></div>
-        <div class="form-group"><label class="form-label">URL</label>
-          <input id="ep-url" value="https://example.com/webhook"></div>
-        <div class="form-group"><label class="form-label">Method</label>
-          <select id="ep-method"><option>POST</option><option>GET</option></select></div>
-        <div class="form-group"><label class="form-label">Body (JSON)</label>
-          <textarea id="ep-body" rows="5">${JSON.stringify({ event: "otp_received", number: "+12025551234", app: "WhatsApp", message: "Your code is 123456" }, null, 2)}</textarea></div>
-        <div class="form-actions">
-          <button class="btn btn-primary" onclick="runEndpointTest()"><i class="fas fa-paper-plane"></i> Send</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header"><div class="card-title">Response</div></div>
-        <div class="terminal" id="ep-response">// Response appears here…</div>
-      </div>
-    </div>
-  `;
-}
-
-async function runEndpointTest() {
-  const out = document.getElementById('ep-response');
-  out.innerHTML = '<span style="color:var(--yellow-light)">→ Sending request…</span>';
-
-  try {
-    const result = await apiFetch('/api/webhook/test', {
-      method: document.getElementById('ep-method').value,
-      body: document.getElementById('ep-body').value
-    });
-
-    if (result) {
-      out.innerHTML = `<span style="color:var(--green-light)">✓ ${result.status_code || 200} OK — ${result.response_time_ms || '—'}ms</span>\n\n${JSON.stringify(result, null, 2)}`;
-    } else {
-      out.innerHTML = `<span style="color:var(--red-light)">✗ Request failed</span>`;
-    }
-  } catch (err) {
-    out.innerHTML = `<span style="color:var(--red-light)">✗ Error: ${err.message}</span>`;
-  }
-}
-
-// ─── API TOKENS ───────────────────────────────────────────────────
-async function renderApiTokens() {
-  try {
-    const data = await apiFetch('/api/tokens') || [];
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">API Tokens</div><div class="page-subtitle">Manage access keys</div></div>
-        <div class="page-actions">
-          <button class="btn btn-primary btn-sm" onclick="createNewToken()"><i class="fas fa-plus"></i> New Token</button>
-        </div>
-      </div>
-      ${renderOwnerHubTabs('settings', 'api-tokens')}
-      <div class="card">
-        ${renderApiWebhooksTabs('tokens')}
-        ${buildTable(
-          ['#', 'Name', 'Agent', 'Token', 'Calls', 'Created', 'Last Used', 'Status', 'Actions'],
-          data.map(t => [
-            t.id || '—',
-            `<strong>${t.name || '—'}</strong>`,
-            t.agent_username ? `<span class="badge badge-blue">${t.agent_username}</span>` : '<span class="text-muted">—</span>',
-            `<span class="monospace api-token-full" style="font-size:11px;">${t.token_hint ? '••••••••' + t.token_hint : '••••••••'}</span>`,
-            t.calls || 0,
-            fmtShort(t.created),
-            t.last_used ? fmtShort(t.last_used) : '—',
-            statusBadge(t.status),
-            `<button class="btn btn-danger btn-sm" onclick="deleteToken(${t.id})"><i class="fas fa-trash"></i></button>`
-          ])
-        )}
-      </div>
-      <div class="card" style="margin-top:20px;">
-        <div class="card-header"><div class="card-title">Usage Example</div></div>
-        <div class="code-block">
-<button class="code-copy" onclick="copyCode(this)">Copy</button>curl -H "Authorization: Bearer YOUR_TOKEN" \\
-     -H "Content-Type: application/json" \\
-     ${window.location.origin}/api/numbers
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    console.error('API Tokens error:', err);
-    toast('Failed to load API tokens', 'error');
-  }
-}
-
-function copyToken(token) {
-  navigator.clipboard.writeText(token).then(() => toast('Token copied', 'success'));
-}
-
-async function createNewToken() {
-  const agentsData = await apiFetch('/api/agents?limit=500');
-  const agents = agentsData?.data || [];
-  openModal('Create API Token', `
-    <form id="create-token-form" onsubmit="doCreateToken(event)">
-      <div class="form-group"><label class="form-label">Agent *</label>
-        <select id="new-token-agent" required>
-          <option value="">— Select Agent —</option>
-          ${agents.map(a => `<option value="${a.id}">${a.username}</option>`).join('')}
-        </select></div>
-      <div class="form-group"><label class="form-label">Token Name</label>
-        <input id="new-token-name" placeholder="e.g. Production Key" required></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button type="submit" class="btn btn-primary" id="token-submit-btn">Create</button>
-      </div>
-    </form>
-  `);
-}
-
-async function doCreateToken(event) {
-  event.preventDefault();
-
-  try {
-    const name = document.getElementById('new-token-name').value.trim();
-    const agentId = parseInt(document.getElementById('new-token-agent')?.value);
-    if (!agentId) {
-      toast('Please select an agent', 'error');
-      return;
-    }
-    if (!name) {
-      toast('Token name is required', 'error');
-      return;
-    }
-
-    const btn = document.getElementById('token-submit-btn');
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<div class="spinner"></div> Creating...';
-    }
-
-    const result = await apiFetch('/api/tokens', { method: 'POST', body: JSON.stringify({ name, agent_id: agentId, created_by: 'Admin' }) });
-
-    if (result && result.id) {
-      closeModal();
-      openModal('API Token Created', `
-        <div class="alert alert-success" style="margin-bottom:14px;">API token created successfully. Save this token now.</div>
-        <div class="code-block api-token-full" id="new-api-token">${result.token || ''}</div>
-        <div class="form-actions" style="margin-top:14px;">
-          <button type="button" class="btn btn-primary" onclick="copyToken('${result.token || ''}')">Copy Full Token</button>
-          <button type="button" class="btn btn-outline" onclick="closeModal();renderApiTokens()">Done</button>
-        </div>
-      `);
-      toast('Token created successfully', 'success');
-    } else {
-      toast(result?.error || 'Failed to create token', 'error');
-    }
-  } catch (err) {
-    console.error('Create token error:', err);
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    const btn = document.getElementById('token-submit-btn');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = 'Create';
-    }
-  }
-}
-
-async function deleteToken(id) {
-  if (!confirm('Delete this token? This cannot be undone.')) return;
-
-  try {
-    await apiFetch(`/api/tokens/${id}`, { method: 'DELETE' });
-    toast('Token deleted', 'warning');
-    renderApiTokens();
-  } catch (err) {
-    console.error('Delete token error:', err);
-    toast('Failed to delete token', 'error');
-  }
-}
-
-// ─── API PLAYGROUND ───────────────────────────────────────────────
-function renderApiPlayground() {
-  const endpoints = [
-    { method: 'GET', path: '/api/numbers', desc: 'List all numbers' },
-    { method: 'GET', path: '/api/sms/stats', desc: 'SMS statistics' },
-    { method: 'GET', path: '/api/users', desc: 'List users' },
-    { method: 'GET', path: '/api/smpp/sessions', desc: 'SMPP sessions' },
-    { method: 'GET', path: '/api/firewall/stats', desc: 'Firewall stats' },
-    { method: 'GET', path: '/api/dashboard/stats', desc: 'Dashboard stats' }
-  ];
-
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">API Playground</div><div class="page-subtitle">Test API calls interactively</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    <div class="card" style="margin-bottom:16px;">
-      ${renderApiWebhooksTabs('playground')}
-    </div>
-    <div class="two-col">
-      <div class="card">
-        <div class="card-header"><div class="card-title">Available Endpoints</div></div>
-        ${endpoints.map(e => `
-          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer;"
-               onclick="setPlaygroundEndpoint('${e.method}','${e.path}')">
-            <span class="badge badge-${e.method === 'GET' ? 'green' : 'blue'}">${e.method}</span>
-            <span class="monospace fs-12">${e.path}</span>
-            <span class="text-muted fs-12">${e.desc}</span>
-          </div>
-        `).join('')}
-        <div style="margin-top:16px;">
-          <div class="form-group"><label class="form-label">Method</label>
-            <select id="pg-method"><option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option></select></div>
-          <div class="form-group"><label class="form-label">Path</label>
-            <input id="pg-path" value="/api/dashboard/stats"></div>
-          <div class="form-group"><label class="form-label">Body (JSON)</label>
-            <textarea id="pg-body" rows="3" placeholder="{}"></textarea></div>
-          <button class="btn btn-primary" onclick="runPlayground()"><i class="fas fa-play"></i> Run</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header"><div class="card-title">Response</div></div>
-        <div class="terminal" id="pg-response" style="min-height:400px;">// Hit Run to see response…</div>
-      </div>
-    </div>
-  `;
-}
-
-function setPlaygroundEndpoint(method, path) {
-  document.getElementById('pg-method').value = method;
-  document.getElementById('pg-path').value = path;
-}
-
-async function runPlayground() {
-  const method = document.getElementById('pg-method').value;
-  const path = document.getElementById('pg-path').value;
-  const body = document.getElementById('pg-body').value;
-  const out = document.getElementById('pg-response');
-
-  out.innerHTML = '<span style="color:var(--yellow-light)">→ Running…</span>';
-
-  try {
-    const opts = { method };
-    if (body.trim() && method !== 'GET') { opts.body = body; }
-    const result = await apiFetch(path, opts);
-
-    if (result) {
-      out.innerHTML = `<span style="color:var(--green-light)">// 200 OK</span>\n\n${JSON.stringify(result, null, 2)}`;
-    } else {
-      out.innerHTML = `<span style="color:var(--red-light)">// Request failed</span>`;
-    }
-  } catch (err) {
-    out.innerHTML = `<span style="color:var(--red-light)">// Error: ${err.message}</span>`;
-  }
-}
-
-// ─── LIVE TEST ────────────────────────────────────────────────────
-function renderLiveTest() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Live Test Simulator</div><div class="page-subtitle">Send dummy OTPs to test your webhook</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    <div class="card" style="margin-bottom:16px;">
-      ${renderApiWebhooksTabs('simulator')}
-    </div>
-    <div class="two-col">
-      <div class="card">
-        <div class="card-header"><div class="card-title">Simulator</div></div>
-        <div class="form-group"><label class="form-label">Target Webhook URL</label>
-          <input id="sim-url" value="https://example.com/webhook"></div>
-        <div class="form-group"><label class="form-label">App</label>
-          <select id="sim-app">
-            ${['WhatsApp', 'Telegram', 'Google', 'Amazon', 'Facebook'].map(a => `<option>${a}</option>`).join('')}
-          </select></div>
-        <div class="form-group"><label class="form-label">Number</label>
-          <input id="sim-number" value="+12025551234"></div>
-        <div class="form-group"><label class="form-label">OTP Message</label>
-          <input id="sim-msg" value="Your verification code is 123456"></div>
-        <div class="form-group"><label class="form-label">Count</label>
-          <input type="number" id="sim-count" value="1" min="1" max="50"></div>
-        <div class="form-actions">
-          <button class="btn btn-primary" onclick="runSimulator()"><i class="fas fa-paper-plane"></i> Send Test</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header"><div class="card-title">Simulation Log</div></div>
-        <div class="terminal" id="sim-log" style="min-height:300px;">// Simulation results appear here…</div>
-      </div>
-    </div>
-  `;
-}
-
-async function runSimulator() {
-  const count = parseInt(document.getElementById('sim-count').value) || 1;
-  const log = document.getElementById('sim-log');
-  log.innerHTML = '';
-
-  for (let i = 0; i < Math.min(count, 10); i++) {
-    setTimeout(async () => {
-      try {
-        const result = await apiFetch('/api/webhook/test', {
-          method: 'POST',
-          body: JSON.stringify({
-            event: 'otp_received',
-            app: document.getElementById('sim-app').value,
-            number: document.getElementById('sim-number').value,
-            message: document.getElementById('sim-msg').value
-          })
-        });
-        const logEl = document.getElementById('sim-log');
-        if (logEl) {
-          logEl.innerHTML += `<span style="color:var(--green-light)">[${new Date().toLocaleTimeString()}] ✓ Sent — ${result?.response_time_ms || '?'}ms</span>\n`;
-        }
-      } catch (err) {
-        const logEl = document.getElementById('sim-log');
-        if (logEl) {
-          logEl.innerHTML += `<span style="color:var(--red-light)">[${new Date().toLocaleTimeString()}] ✗ Failed — ${err.message}</span>\n`;
-        }
-      }
-    }, i * 300);
-  }
-}
-
-// ─── WEBHOOK CONFIG ───────────────────────────────────────────────
-async function renderWebhookConfig() {
-  try {
-    const cfg = await apiFetch('/api/webhook/config') || {};
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header" style="margin-bottom:18px;">
-        <div>
-          <div class="page-title">Webhook & Interconnect Hub</div>
-          <div class="page-subtitle">Real-time HTTP callbacks, carrier event dispatching & automated failover</div>
-        </div>
-        <div class="page-actions" style="display:flex;gap:8px;">
-          <button class="sp-btn-secondary" style="height:36px;padding:0 14px;font-size:12px;display:inline-flex;align-items:center;gap:6px;" onclick="testWebhookPing()">
-            <i class="fas fa-paper-plane"></i> Test Webhook Ping
-          </button>
-        </div>
-      </div>
-      ${renderOwnerHubTabs('settings', 'api-tokens')}
-      ${renderApiWebhooksTabs('webhook')}
-      
-      <div id="webhook-test-result" style="display:none;margin-bottom:16px;"></div>
-
-      <div class="two-col" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
-        <div class="zy-panel">
-          <div class="zy-panel-head"><span>Callback Endpoint Connection</span></div>
-          <div class="zy-panel-body" style="padding:16px;">
-            <form id="webhook-config-form" onsubmit="saveWebhookConfig(event)">
-              <div class="form-group" style="margin-bottom:12px;">
-                <label class="form-label" style="font-weight:600;font-size:12px;">Endpoint URL *</label>
-                <input class="zy-input" value="${cfg.url || ''}" id="wc-url" placeholder="https://api.yourdomain.com/sms/callback" style="width:100%;height:38px;">
-              </div>
-              <div class="form-group" style="margin-bottom:12px;">
-                <label class="form-label" style="font-weight:600;font-size:12px;">HMAC Signing Secret</label>
-                <input class="zy-input" value="${cfg.secret || ''}" id="wc-secret" type="password" placeholder="whsec_..." style="width:100%;height:38px;">
-              </div>
-              <div class="form-group" style="margin-bottom:16px;">
-                <label class="form-label" style="font-weight:600;font-size:12px;">Content-Type</label>
-                <select id="wc-content-type" class="zy-input" style="width:100%;height:38px;">
-                  <option ${cfg.content_type === 'application/json' ? 'selected' : ''}>application/json</option>
-                  <option ${cfg.content_type === 'application/x-www-form-urlencoded' ? 'selected' : ''}>application/x-www-form-urlencoded</option>
-                </select>
-              </div>
-              <div class="form-actions" style="display:flex;gap:8px;">
-                <button type="submit" class="sp-btn-primary" style="height:38px;padding:0 18px;font-size:13px;display:inline-flex;align-items:center;gap:6px;"><i class="fas fa-save"></i> Save Configuration</button>
-                <button type="button" class="sp-btn-secondary" style="height:38px;padding:0 14px;font-size:13px;" onclick="testWebhookPing()"><i class="fas fa-bolt"></i> Send Test Event</button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        <div class="zy-panel">
-          <div class="zy-panel-head"><span>Custom HTTP Headers</span></div>
-          <div class="zy-panel-body" style="padding:16px;">
-            <div id="headers-list">
-              ${Object.entries(cfg.headers || {}).map(([k, v]) => `
-                <div style="display:flex;gap:8px;margin-bottom:8px;">
-                  <input class="zy-input" value="${k}" style="flex:1;height:34px;" placeholder="Header-Name">
-                  <input class="zy-input" value="${v}" style="flex:2;height:34px;" placeholder="Value">
-                  <button class="btn-icon text-danger" onclick="this.parentElement.remove()" style="padding:4px 8px;"><i class="fas fa-times"></i></button>
-                </div>
-              `).join('')}
-            </div>
-            <button class="sp-btn-secondary" style="height:32px;padding:0 12px;font-size:12px;margin-top:8px;display:inline-flex;align-items:center;gap:5px;" onclick="addHeader()"><i class="fas fa-plus"></i> Add Header</button>
-          </div>
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    console.error('Webhook config error:', err);
-    toast('Failed to load webhook config', 'error');
-  }
-}
-
-async function testWebhookPing() {
-  const resultBox = document.getElementById('webhook-test-result');
-  if (resultBox) {
-    resultBox.style.display = 'block';
-    resultBox.innerHTML = `<div class="zy-loading">Dispatching test ping to webhook endpoint...</div>`;
-  }
-  const start = Date.now();
-  try {
-    const res = await apiFetch('/api/webhook/test', {
-      method: 'POST',
-      body: JSON.stringify({
-        event: 'test_ping',
-        timestamp: new Date().toISOString(),
-        test_payload: { ping: 'pong', source: 'HUMAX SMS Webhook Hub' }
-      })
-    });
-    const latency = Date.now() - start;
-    if (resultBox) {
-      resultBox.innerHTML = `
-        <div class="sp-card" style="padding:14px 18px;border-left:4px solid #10b981;background:#ecfdf5;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <i class="fas fa-circle-check" style="color:#10b981;font-size:20px;"></i>
-            <div>
-              <strong style="color:#065f46;">Webhook Test Succeeded (HTTP 200)</strong>
-              <div style="font-size:12px;color:#047857;">Response received in ${latency}ms · Message: "${res?.message || 'Webhook test received'}"</div>
-            </div>
-          </div>
-          <button class="sp-btn-secondary" style="height:28px;padding:0 10px;font-size:11px;" onclick="document.getElementById('webhook-test-result').style.display='none'">Dismiss</button>
-        </div>`;
-    }
-    toast(`✅ Webhook ping successful (${latency}ms)`, 'success');
-  } catch (err) {
-    const latency = Date.now() - start;
-    if (resultBox) {
-      resultBox.innerHTML = `
-        <div class="sp-card" style="padding:14px 18px;border-left:4px solid #ef4444;background:#fef2f2;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <i class="fas fa-circle-exclamation" style="color:#ef4444;font-size:20px;"></i>
-            <div>
-              <strong style="color:#991b1b;">Webhook Test Failed (${latency}ms)</strong>
-              <div style="font-size:12px;color:#b91c1c;">${err.message || 'Connection refused or timeout'}</div>
-            </div>
-          </div>
-          <button class="sp-btn-secondary" style="height:28px;padding:0 10px;font-size:11px;" onclick="document.getElementById('webhook-test-result').style.display='none'">Dismiss</button>
-        </div>`;
-    }
-    toast(`Webhook test failed: ${err.message}`, 'error');
-  }
-}
-
-function addHeader() {
-  const list = document.getElementById('headers-list');
-  const div = document.createElement('div');
-  div.style.cssText = 'display:flex;gap:8px;margin-bottom:8px;';
-  div.innerHTML = `
-    <input class="zy-input" style="flex:1;height:34px;" placeholder="Header-Name">
-    <input class="zy-input" style="flex:2;height:34px;" placeholder="Value">
-    <button class="btn-icon text-danger" onclick="this.parentElement.remove()" style="padding:4px 8px;"><i class="fas fa-times"></i></button>
-  `;
-  list.appendChild(div);
-}
-
-async function saveWebhookConfig(event) {
-  event.preventDefault();
-
-  try {
-    const headers = {};
-    document.querySelectorAll('#headers-list > div').forEach(div => {
-      const inputs = div.querySelectorAll('input');
-      if (inputs.length >= 2 && inputs[0].value.trim() && inputs[1].value.trim()) {
-        headers[inputs[0].value.trim()] = inputs[1].value.trim();
-      }
-    });
-
-    const payload = {
-      url: document.getElementById('wc-url').value,
-      secret: document.getElementById('wc-secret').value,
-      content_type: document.getElementById('wc-content-type').value,
-      headers
-    };
-
-    const result = await apiFetch('/api/webhook/config', { method: 'POST', body: JSON.stringify(payload) });
-
-    if (result && result.success) {
-      toast('Webhook config saved successfully', 'success');
-    } else {
-      toast(result?.error || 'Failed to save config', 'error');
-    }
-  } catch (err) {
-    console.error('Save webhook config error:', err);
-    toast('Error: ' + err.message, 'error');
-  }
-}
-
-// ─── DOCUMENTATION ────────────────────────────────────────────────
-function renderDocumentation() {
-  const c = document.getElementById('page-content');
-  c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">API Documentation</div><div class="page-subtitle">REST API reference</div></div>
-    </div>
-    ${renderOwnerHubTabs('settings', 'api-tokens')}
-    <div class="card" style="margin-bottom:16px;">
-      ${renderApiWebhooksTabs('docs')}
-    </div>
-    ${[
-      { method: 'GET', path: '/api/numbers', desc: 'List all virtual numbers. Supports ?page, ?limit, ?search, ?status query params.', resp: '{"data":[...],"total":200,"page":1,"pages":10}' },
-      { method: 'POST', path: '/api/numbers/upload', desc: 'Upload a .txt or .csv file with one number per line.', resp: '{"imported":50,"total":250}' },
-      { method: 'GET', path: '/api/sms/stats', desc: 'Get SMS delivery statistics and profit data.', resp: '{"total_sms":200,"delivered":180,"failed":20,...}' },
-      { method: 'GET', path: '/api/users', desc: 'List all users. Supports ?search, ?role filtering.', resp: '{"data":[...],"total":30}' },
-      { method: 'GET', path: '/api/smpp/sessions', desc: 'Get active SMPP sessions.', resp: '[{"id":1,"system_id":"sys001",...}]' },
-      { method: 'GET', path: '/api/firewall/stats', desc: 'Firewall statistics and threat level.', resp: '{"total_blocked":20,"threat_level":"Low",...}' }
-    ].map(ep => `
-      <div class="card" style="margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-          <span class="badge badge-${ep.method === 'GET' ? 'green' : 'blue'}" style="font-size:13px;padding:5px 12px;">${ep.method}</span>
-          <span class="monospace fw-600">${ep.path}</span>
-        </div>
-        <p class="text-secondary" style="margin-bottom:12px;">${ep.desc}</p>
-        <div class="code-block">${ep.resp}</div>
-      </div>
-    `).join('')}
-  `;
-}
 
 // ─── ANNOUNCEMENTS ────────────────────────────────────────────────
 async function renderAnnouncements() {
@@ -8087,11 +6332,7 @@ async function renderMyPayouts() {
     c.innerHTML = `
       <div class="page-header">
         <div><div class="page-title">Payouts Overview</div><div class="page-subtitle">Real payout activity across your whole system</div></div>
-        <div class="page-actions">
-          <button class="btn btn-outline btn-sm" onclick="loadPage('payout-requests')"><i class="fas fa-list-check"></i> Review Requests</button>
-        </div>
       </div>
-      ${renderOwnerHubTabs('finance', 'my-payouts')}
       <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);">
         ${statCard('Total Paid Out', 'fas fa-coins', '$' + zyFmtMoney(totalPaid, 2), 'blue', 'All time')}
         ${statCard('This Month', 'fas fa-calendar', '$' + zyFmtMoney(thisMonthPaid, 2), 'green', 'Paid so far this month')}
@@ -8131,11 +6372,6 @@ async function renderFirewallDashboard() {
         <div><div class="page-title">Firewall & Security Control</div><div class="page-subtitle">Security overview and intrusion defense</div></div>
       </div>
       ${renderSecurityTabs('firewall')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button class="btn btn-primary btn-sm" onclick="loadPage('firewall-dashboard')"><i class="fas fa-shield-halved"></i> Security Overview</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('blocked-ips')"><i class="fas fa-ban"></i> Blocked IPs</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('firewall-events')"><i class="fas fa-file-shield"></i> Firewall Events</button>
-      </div>
       <div class="stats-grid">
         ${statCard('Blocked IPs', 'fas fa-ban', stats?.total_blocked || 0, 'red', 'Active blocks')}
         ${statCard('Events (24h)', 'fas fa-bolt', stats?.events_24h || 0, 'yellow', 'Today')}
@@ -8203,12 +6439,7 @@ async function renderBlockedIps() {
           <button class="btn btn-danger btn-sm" onclick="openBlockIpModal()"><i class="fas fa-ban"></i> Block IP</button>
         </div>
       </div>
-      ${renderSecurityTabs('firewall')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button class="btn btn-outline btn-sm" onclick="loadPage('firewall-dashboard')"><i class="fas fa-shield-halved"></i> Security Overview</button>
-        <button class="btn btn-primary btn-sm" onclick="loadPage('blocked-ips')"><i class="fas fa-ban"></i> Blocked IPs</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('firewall-events')"><i class="fas fa-file-shield"></i> Firewall Events</button>
-      </div>
+      ${renderSecurityTabs('blocked-ips')}
       <div class="card">
         ${buildTable(
           ['#', 'IP Address', 'Reason', 'Blocked At', 'Expires', 'Actions'],
@@ -8324,12 +6555,7 @@ async function renderFirewallEvents(page = 1) {
       <div class="page-header">
         <div><div class="page-title">Firewall Events</div><div class="page-subtitle">Security log</div></div>
       </div>
-      ${renderSecurityTabs('firewall')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button class="btn btn-outline btn-sm" onclick="loadPage('firewall-dashboard')"><i class="fas fa-shield-halved"></i> Security Overview</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('blocked-ips')"><i class="fas fa-ban"></i> Blocked IPs</button>
-        <button class="btn btn-primary btn-sm" onclick="loadPage('firewall-events')"><i class="fas fa-file-shield"></i> Firewall Events</button>
-      </div>
+      ${renderSecurityTabs('firewall-events')}
       <div class="card">
         ${buildTable(
           ['#', 'IP Address', 'Event', 'Reason', 'Threat', 'Timestamp'],
@@ -8451,11 +6677,6 @@ async function renderGeneralSettings() {
         </div>
       </div>
       ${renderOwnerHubTabs('settings', 'general-settings')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button type="button" class="btn btn-primary btn-sm" onclick="loadPage('general-settings')"><i class="fas fa-sliders"></i> General &amp; Appearance</button>
-        <button type="button" class="btn btn-outline btn-sm" onclick="loadPage('security-settings')"><i class="fas fa-shield"></i> Security &amp; Sessions</button>
-        <button type="button" class="btn btn-outline btn-sm" onclick="loadPage('smpp-settings')"><i class="fas fa-server"></i> SMPP Server</button>
-      </div>
 
       <div class="gs-subtabs" id="gs-section-tabs">
         <button type="button" class="gs-subtab-btn active" data-gs-tab="brand" onclick="switchGsSectionTab('brand', this)"><i class="fas fa-palette"></i> Brand &amp; Role Theme Studio</button>
@@ -9937,20 +8158,11 @@ async function renderSecuritySettings() {
       <div class="page-header">
         <div><div class="page-title">Security Settings</div></div>
       </div>
-      ${renderOwnerHubTabs('settings', 'general-settings')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button class="btn btn-outline btn-sm" onclick="loadPage('general-settings')"><i class="fas fa-sliders"></i> General &amp; Appearance</button>
-        <button class="btn btn-primary btn-sm" onclick="loadPage('security-settings')"><i class="fas fa-shield"></i> Security &amp; Sessions</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('smpp-settings')"><i class="fas fa-server"></i> SMPP Server</button>
-      </div>
+      ${renderOwnerHubTabs('settings', 'security-settings')}
       <div class="two-col">
         <div class="card">
           <div class="card-header"><div class="card-title">Credentials &amp; Two-Factor Auth</div></div>
-          <p class="text-muted fs-12" style="margin-bottom:14px;">Manage your Owner login password, TOTP 2FA authenticator setup, REST API tokens, and personal audit history in My Profile.</p>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <button class="btn btn-primary btn-sm" onclick="loadPage('profile-security')"><i class="fas fa-key"></i> Change Password</button>
-            <button class="btn btn-outline btn-sm" onclick="loadPage('2fa')"><i class="fas fa-shield-halved"></i> 2FA Authenticator</button>
-          </div>
+          <p class="text-muted fs-12" style="margin-bottom:0;">Manage your Owner login password, TOTP 2FA authenticator setup, and personal audit history from <strong>My Profile</strong> in the sidebar.</p>
         </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Session Settings</div></div>
@@ -9986,78 +8198,6 @@ async function saveSecuritySettings() {
     }
   } catch (err) {
     console.error('Save security settings error:', err);
-    toast('Error: ' + err.message, 'error');
-  }
-}
-
-// ─── SMPP SETTINGS ────────────────────────────────────────────────
-async function renderSmppSettings() {
-  try {
-    const data = await apiFetch('/api/settings') || {};
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">SMPP Settings</div></div>
-        <div class="page-actions">
-          <button class="btn btn-primary btn-sm" onclick="saveSmppSettings()"><i class="fas fa-save"></i> Save</button>
-        </div>
-      </div>
-      ${renderOwnerHubTabs('settings', 'general-settings')}
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button class="btn btn-outline btn-sm" onclick="loadPage('general-settings')"><i class="fas fa-sliders"></i> General &amp; Appearance</button>
-        <button class="btn btn-outline btn-sm" onclick="loadPage('security-settings')"><i class="fas fa-shield"></i> Security &amp; Sessions</button>
-        <button class="btn btn-primary btn-sm" onclick="loadPage('smpp-settings')"><i class="fas fa-server"></i> SMPP Server</button>
-      </div>
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header"><div class="card-title">Server Configuration</div></div>
-          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">
-            <label class="form-label" style="margin:0;">Enable Built-in SMPP Listener</label>
-            <input type="checkbox" id="smpp-enabled" ${data.smpp_enabled ? 'checked' : ''}>
-          </div>
-          <div class="form-group"><label class="form-label">Listen Host</label><input id="smpp-host" value="${escapeHtml(data.smpp_host || '0.0.0.0')}"></div>
-          <div class="form-group"><label class="form-label">Port</label><input id="smpp-port" type="number" value="${Number(data.smpp_port || 2775)}"></div>
-          <div class="form-group"><label class="form-label">Max Connections</label><input id="smpp-max-conn" type="number" value="${Number(data.smpp_max_connections || 100)}"></div>
-          <div class="form-group"><label class="form-label">Bind Timeout (s)</label><input id="smpp-bind-timeout" type="number" value="${Number(data.smpp_bind_timeout || 30)}"></div>
-          <div class="form-group"><label class="form-label">Enquire Link Interval (s)</label><input id="smpp-enquire-interval" type="number" value="${Number(data.smpp_enquire_interval || 60)}"></div>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">Throughput Limits</div></div>
-          <div class="form-group"><label class="form-label">Max MPS (per session)</label><input id="smpp-max-mps" type="number" value="${Number(data.smpp_max_mps || 500)}"></div>
-          <div class="form-group"><label class="form-label">Global Max MPS</label><input id="smpp-global-mps" type="number" value="${Number(data.smpp_global_max_mps || 5000)}"></div>
-          <div class="form-group"><label class="form-label">Queue Size</label><input id="smpp-queue-size" type="number" value="${Number(data.smpp_queue_size || 10000)}"></div>
-          <div class="form-group"><label class="form-label">DLR Timeout (s)</label><input id="smpp-dlr-timeout" type="number" value="${Number(data.smpp_dlr_timeout || 86400)}"></div>
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    console.error('SMPP settings error:', err);
-    toast('Failed to load SMPP settings', 'error');
-  }
-}
-
-async function saveSmppSettings() {
-  try {
-    const payload = {
-      smpp_enabled: !!document.getElementById('smpp-enabled')?.checked,
-      smpp_host: (document.getElementById('smpp-host')?.value || '0.0.0.0').trim(),
-      smpp_port: parseInt(document.getElementById('smpp-port')?.value, 10) || 2775,
-      smpp_max_connections: parseInt(document.getElementById('smpp-max-conn')?.value, 10) || 100,
-      smpp_bind_timeout: parseInt(document.getElementById('smpp-bind-timeout')?.value, 10) || 30,
-      smpp_enquire_interval: parseInt(document.getElementById('smpp-enquire-interval')?.value, 10) || 60,
-      smpp_max_mps: parseInt(document.getElementById('smpp-max-mps')?.value, 10) || 500,
-      smpp_global_max_mps: parseInt(document.getElementById('smpp-global-mps')?.value, 10) || 5000,
-      smpp_queue_size: parseInt(document.getElementById('smpp-queue-size')?.value, 10) || 10000,
-      smpp_dlr_timeout: parseInt(document.getElementById('smpp-dlr-timeout')?.value, 10) || 86400
-    };
-    const result = await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(payload) });
-    if (result && !result.error) {
-      toast('SMPP settings saved', 'success');
-    } else {
-      toast(result?.error || 'Failed to save SMPP settings', 'error');
-    }
-  } catch (err) {
-    console.error('Save SMPP settings error:', err);
     toast('Error: ' + err.message, 'error');
   }
 }

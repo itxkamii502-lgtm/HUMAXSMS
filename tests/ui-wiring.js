@@ -270,7 +270,7 @@ assertCheck('agent-shell.js flattens MY PROFILE into a single direct My Profile 
   speedAgentJs.includes("'My Profile', 'my-profile'") &&
   speedAgentJs.includes("'profile-security': 'my-profile'") &&
   speedAgentJs.includes("'2fa': 'my-profile'") &&
-  speedAgentJs.includes("'api-tokens': 'my-profile'") &&
+  !speedAgentJs.includes("'api-tokens'") &&
   speedAgentJs.includes("'audit-logs': 'my-profile'")
 );
 
@@ -278,7 +278,7 @@ assertCheck('agent-shell.js flattens MY PROFILE into a single direct My Profile 
 const speedAgentPagesJs = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
 assertCheck('agent-pages.js handles bulk-add', speedAgentPagesJs.includes("'bulk-add'"));
 assertCheck('agent-pages.js handles notifications', speedAgentPagesJs.includes("'notifications'"));
-assertCheck('agent-pages.js handles api-tokens', speedAgentPagesJs.includes("'api-tokens'"));
+assertCheck('agent-pages.js omits removed api-tokens route', !speedAgentPagesJs.includes("'api-tokens'"));
 assertCheck('agent-pages.js handles audit-logs', speedAgentPagesJs.includes("'audit-logs'"));
 assertCheck('agent-pages.js handles transfer-history', speedAgentPagesJs.includes("'transfer-history'"));
 
@@ -1197,8 +1197,8 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     assertCheck(`F2: ${name} flattens MY PROFILE folder into a single direct My Profile link (${profileSlug})`,
       !js.includes('"MY PROFILE"') && (js.includes(`'My Profile', '${profileSlug}'`) || js.includes(`label: 'My Profile', page: '${profileSlug}'`))
     );
-    assertCheck(`F2: ${name} preserves route mappings for Password, 2FA, REST API & Audit Logs`,
-      js.includes("'profile-security'") && js.includes("'2fa'") && js.includes("'api-tokens'") && js.includes(auditToken)
+    assertCheck(`F2: ${name} preserves route mappings for Password, 2FA & Audit Logs (and omits removed api-tokens)`,
+      js.includes("'profile-security'") && js.includes("'2fa'") && !js.includes("'api-tokens'") && js.includes(auditToken)
     );
     assertCheck(`F2: ${name} sidebar footer renders Logout button with doLogout()`,
       js.includes('zy-side-logout') && js.includes('doLogout()')
@@ -1221,9 +1221,9 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   assertCheck('F2: client-shell.js does not render zy-foot-profile box', !speedClient.includes('zy-foot-profile'));
   assertCheck('F2: owner-shell.js does not render zy-foot-profile box', !speedAdmin.includes('zy-foot-profile'));
 
-  // 4. REST API and Audit Log moved into profile page as tabs
-  assertCheck('F2: shared-profile-security.js defines profile tabs', profileSecJs.includes('zy-pro-tabs') && profileSecJs.includes('tab-btn-api') && profileSecJs.includes('tab-btn-audit'));
-  assertCheck('F2: shared-profile-security.js defines REST API panel tab', profileSecJs.includes('pro-tab-api') && profileSecJs.includes('REST API INTEGRATION'));
+  // 4. My Profile and Audit Log tabs present; removed REST API tab absent
+  assertCheck('F2: shared-profile-security.js defines My Profile & Audit Log tabs without REST API tab', profileSecJs.includes('zy-pro-tabs') && profileSecJs.includes('tab-btn-details') && profileSecJs.includes('tab-btn-audit') && !profileSecJs.includes('tab-btn-api'));
+  assertCheck('F2: shared-profile-security.js omits removed REST API panel tab', !profileSecJs.includes('pro-tab-api') && !profileSecJs.includes('REST API INTEGRATION'));
   assertCheck('F2: shared-profile-security.js defines Audit Log panel tab', profileSecJs.includes('pro-tab-audit') && profileSecJs.includes('ACCOUNT AUDIT LOG'));
   assertCheck('F2: shared-profile-security.js switchTab and loadAuditLogs exported', profileSecJs.includes('switchTab') && profileSecJs.includes('loadAuditLogs'));
 
@@ -1475,9 +1475,9 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     speedAdminJs.includes('Provider') && speedAdminJs.includes('Range') && speedAdminJs.includes('Agent') &&
     speedAdminJs.includes('Number') && speedAdminJs.includes('CLI')
   );
-  assertCheck('F5: owner-shell.js has Show Report (blue) and Show Report & Sync on CDR2',
+  assertCheck('F5: owner-shell.js has Show Report (blue) and Upload Excel Stats on CDR2',
     speedAdminJs.includes('zy-btn-blue-solid') && speedAdminJs.includes('Show Report') &&
-    speedAdminJs.includes('Show Report &amp; Sync')
+    speedAdminJs.includes('Upload Excel Stats')
   );
   assertCheck('F5: owner-shell.js has limit select and Columns pill inside .zy-cdr-control-bar',
     speedAdminJs.includes('zy-cdr-control-bar') && speedAdminJs.includes('zy-table-toolbar') &&
@@ -1683,7 +1683,7 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     sharedKitJs.includes('Biweekly (15/3)') &&
     sharedKitJs.includes('Weekly (7/3)') &&
     sharedRouterJs.includes("'cdr2': 'CDR2'") &&
-    sharedRouterJs.includes("'whitenoise-panels': 'WhitenoiseAPI'")
+    sharedRouterJs.includes("'whitenoise-panels': 'WhitenoiseReports'")
   );
 
   assertCheck('Whitenoise 14c: Owner UI wires CDR 2, Whitenoise API, Monthly (30/5) {W} Range rows & whitenoise_access toggles',
@@ -1696,15 +1696,14 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     ownerEngineJs.includes('edit-cl-wn-access')
   );
 
-  assertCheck('Whitenoise 14d: Agent UI wires permission-gated CDR 2, Fetch OTP, Client whitenoise_access toggle & Monthly Cycle Settlement Box',
+  assertCheck('Whitenoise 14d: Agent UI wires permission-gated Excel CDR 2, Client whitenoise_access toggle & Monthly Cycle Settlement Box',
     speedAgentJs.includes("['CDR 2 (Monthly)', 'cdr2'") &&
     !speedAgentJs.includes('CDR 2 (Whitenoise)') &&
     speedAgentJs.includes('zyRefreshWhitenoiseNav') &&
     speedAgentJs.includes('/api/auth/me') &&
     speedAgentPagesJs.includes('async function pgCdr2') &&
     speedAgentPagesJs.includes('/api/cdr2/logs') &&
-    speedAgentPagesJs.includes('/api/cdr2/sync') &&
-    speedAgentPagesJs.includes('zyAgentFetchWhitenoiseOtp') &&
+    speedAgentPagesJs.includes('/api/cdr2/export') &&
     speedAgentPagesJs.includes('nc-wn-access') &&
     speedAgentPagesJs.includes('ec-wn-access') &&
     speedAgentPagesJs.includes('Monthly (30/5) {W}') &&
@@ -1712,18 +1711,112 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     speedAgentPagesJs.includes("'cdr2': pgCdr2")
   );
 
-  assertCheck('Whitenoise 14e: Client UI wires permission-gated CDR 2 (PKR), Fetch OTP & Monthly Cycle Settlement Box',
+  assertCheck('Whitenoise 14e: Client UI wires permission-gated Excel CDR 2 (PKR) & Monthly Cycle Settlement Box',
     speedClientJs.includes("label: 'CDR 2 (Monthly)', page: 'cdr2'") &&
     !speedClientJs.includes('CDR 2 (Whitenoise)') &&
     speedClientJs.includes('zyRefreshWhitenoiseNav') &&
     speedClientJs.includes('/api/auth/me') &&
     speedClientPagesJs.includes('async function pgCdr2') &&
     speedClientPagesJs.includes('/api/cdr2/logs') &&
-    speedClientPagesJs.includes('/api/cdr2/sync') &&
-    speedClientPagesJs.includes('zyClientFetchWhitenoiseOtp') &&
+    speedClientPagesJs.includes('/api/cdr2/export') &&
     speedClientPagesJs.includes('Monthly (30/5) {W}') &&
     speedClientPagesJs.includes('Monthly Cycle (30/5) {W} Settlement Box') &&
     speedClientPagesJs.includes("'cdr2': pgCdr2")
+  );
+
+  // 15. Whitenoise Excel-Only Daily Stats, Dry-Run Preview, Batch History & Date Ownership Engine
+  assertCheck('Whitenoise 15a: server.js defines Excel preview, commit, batches, rollback, and ownership-ledger routes without background polling',
+    serverJsSrc.includes('/api/whitenoise-excel/preview') &&
+    serverJsSrc.includes('/api/whitenoise-excel/commit') &&
+    serverJsSrc.includes('/api/whitenoise-excel/batches') &&
+    serverJsSrc.includes('/api/whitenoise-excel/batches/:id/rollback') &&
+    serverJsSrc.includes('/api/whitenoise-excel/ownership-ledger') &&
+    serverJsSrc.includes('resolveNumberOwnershipForDate') &&
+    !serverJsSrc.includes('setInterval(pollWhitenoiseConnections')
+  );
+
+  assertCheck('Whitenoise 15b: Owner UI wires Excel Upload Drag-Drop Modal, Dry-Run Preview, Batch History & 1-Click Rollback',
+    speedAdminJs.includes('openWhitenoiseExcelUploadModal') &&
+    speedAdminJs.includes('/api/whitenoise-excel/preview') &&
+    speedAdminJs.includes('/api/whitenoise-excel/commit') &&
+    speedAdminJs.includes('/api/whitenoise-excel/batches') &&
+    speedAdminJs.includes('zyWnRollbackBatch') &&
+    ownerEngineJs.includes('openWhitenoiseExcelUploadModal') &&
+    ownerEngineJs.includes('zyLoadWhitenoiseBatches')
+  );
+
+  assertCheck('Whitenoise 15c: Agent & Client CDR 2 UIs stay privacy-clean (no whitenoise brand leak, no live OTP sync clutter)',
+    !speedAgentPagesJs.includes('/api/cdr2/sync') &&
+    !speedClientPagesJs.includes('/api/cdr2/sync') &&
+    !speedAgentPagesJs.includes('Fetch Special Number') &&
+    !speedClientPagesJs.includes('Fetch Special Number')
+  );
+
+  // 16. Complete SMPP & Outward REST API Removal + CR API / Web Scraping Panel Preservation
+  const pkgJsonSrc = fs.readFileSync(path.resolve('package.json'), 'utf8');
+  const profileSecLatest = fs.readFileSync(path.resolve('humex-sms/static/js/shared-profile-security.js'), 'utf8');
+
+  assertCheck('Cleanup 16a: server.js and package.json contain zero SMPP, outward REST API or Webhook setup',
+    !/smpp/i.test(serverJsSrc) &&
+    !serverJsSrc.includes('/api/tokens') &&
+    !serverJsSrc.includes('/crapi/viewstats') &&
+    !serverJsSrc.includes('/api/sms/viewstats') &&
+    !serverJsSrc.includes('/api/webhook/config') &&
+    !pkgJsonSrc.includes('"smpp"')
+  );
+
+  assertCheck('Cleanup 16b: Frontend JS files contain zero SMPP or outward REST API/Webhook screens',
+    !/smpp/i.test(speedAdminJs) &&
+    !/smpp/i.test(ownerEngineJs) &&
+    !/smpp/i.test(sharedRouterJs) &&
+    !ownerEngineJs.includes('renderApiTokens') &&
+    !ownerEngineJs.includes('renderWebhookConfig') &&
+    !ownerEngineJs.includes('renderApiPlayground') &&
+    !profileSecLatest.includes('/api/tokens')
+  );
+
+  assertCheck('Cleanup 16c: CR API Panels and Web Scraping Login Panels remain 100% wired in backend & Owner UI',
+    serverJsSrc.includes('/api/cr-api-connections') &&
+    serverJsSrc.includes('/api/login-panels') &&
+    speedAdminJs.includes("'CR API Panels'") &&
+    speedAdminJs.includes("'cr-api-panels'") &&
+    speedAdminJs.includes("'Web Scraping Panels'") &&
+    speedAdminJs.includes("'login-panels'") &&
+    ownerEngineJs.includes('renderCrApiPanels')
+  );
+
+  // 17. Clean Smooth Sidebar & Zero Duplicate In-Page Sidebar Redirects
+  const adminSkinCss = fs.readFileSync(path.resolve('humex-sms/static/css/humex-admin-skin.css'), 'utf8');
+  const panelCssSrc = fs.readFileSync(path.resolve('humex-sms/static/css/humex-panel.css'), 'utf8');
+  const sharedLoginModalJs = fs.readFileSync(path.resolve('humex-sms/static/js/shared-login-modal.js'), 'utf8');
+
+  assertCheck('Sidebar 17a: Owner engine removes duplicate sidebar-page hub tabs & redirects while retaining internal sub-views',
+    !ownerEngineJs.includes("renderOwnerHubTabs('providers'") &&
+    !ownerEngineJs.includes("renderOwnerHubTabs('finance'") &&
+    !sharedLoginModalJs.includes("renderOwnerHubTabs('providers'") &&
+    !ownerEngineJs.includes("renderSecurityTabs('audit-logs')") &&
+    !ownerEngineJs.includes("Open CDR 2 Stats") &&
+    ownerEngineJs.includes("blocked-ips") &&
+    ownerEngineJs.includes("firewall-events") &&
+    ownerEngineJs.includes("security-settings") &&
+    ownerEngineJs.includes("bulk-allocation")
+  );
+
+  assertCheck('Sidebar 17b: Owner, Agent & Client dashboards omit duplicate Quick Access redirect tiles and use domain-specific sidebar icons',
+    speedAdminJs.includes('shortcuts: []') &&
+    speedAgentJs.includes('shortcuts: []') &&
+    speedClientJs.includes('shortcuts: []') &&
+    sharedKitJs.includes('shortcuts.length ?') &&
+    speedAdminJs.includes('zy-sub-ic') &&
+    speedAgentJs.includes('zy-sub-ic') &&
+    !speedAdminJs.includes('fa-folder') &&
+    !speedAgentJs.includes('fa-folder')
+  );
+
+  assertCheck('Sidebar 17c: Sidebar CSS provides smooth animated accordion drawers and dark-mode contrast polish',
+    adminSkinCss.includes('cubic-bezier(0.16, 1, 0.3, 1)') &&
+    panelCssSrc.includes('body.rmsui.dark .zy-sidenav .zy-snav') &&
+    panelCssSrc.includes('body.rmsui.dark .zy-sidenav .zy-ssub div')
   );
 })();
 

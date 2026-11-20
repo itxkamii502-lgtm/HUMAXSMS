@@ -34,8 +34,6 @@ const LOG_ARRAY_FILES = [
   'sms_log.json',
   'audit_logs.json',
   'login_activity.json',
-  'smpp_logs.json',
-  'smpp_sessions.json',
   'firewall_events.json',
   'notifications.json',
   'allocation_history.json',

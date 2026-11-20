@@ -18,7 +18,7 @@ export async function stageA() {
     check('A0 manager.html and testpanel.html deleted from static/', !fs.existsSync(path.join(ROOT, 'humex-sms/static/manager.html')) && !fs.existsSync(path.join(ROOT, 'humex-sms/static/testpanel.html')));
 
     // anonymous
-    for (const [m, u] of [['GET', '/api/backup/export'], ['GET', '/api/sms/logs'], ['POST', '/api/numbers/bulk-assign-many'], ['GET', '/api/numbers'], ['GET', '/api/tokens'], ['GET', '/api/notifications']]) {
+    for (const [m, u] of [['GET', '/api/backup/export'], ['GET', '/api/sms/logs'], ['POST', '/api/numbers/bulk-assign-many'], ['GET', '/api/numbers'], ['GET', '/api/notifications']]) {
       const r = await api(m, u, { body: m === 'POST' ? {} : undefined });
       check(`A1 anonymous refused: ${m} ${u}`, r.status === 401, 'got ' + r.status);
     }
@@ -28,7 +28,7 @@ export async function stageA() {
     // Client cannot do owner/agent things
     const cl = (m, u, body) => api(m, u, { cookie: client.cookie, body });
     check('A1 client cannot bulk-delete numbers', (await cl('POST', '/api/numbers/bulk-delete-many', { number_ids: [1] })).status === 403);
-    check('A1 client cannot read API tokens', (await cl('GET', '/api/tokens')).status === 403);
+    check('A1 removed /api/tokens is inaccessible for client', [403, 404].includes((await cl('GET', '/api/tokens')).status));
     check('A1 client cannot write rate-card', (await cl('POST', '/api/numbers/rate-card', { country: 'x' })).status === 403);
     check('A1 client cannot download all numbers', (await cl('GET', '/api/numbers/download')).status === 403);
     check('A1 client cannot read dashboard stats', (await cl('GET', '/api/dashboard/stats')).status === 403);
@@ -51,7 +51,7 @@ export async function stageA() {
     const ow = (m, u, body) => api(m, u, { cookie: owner.cookie, body });
     check('A1 owner can open backup export', (await ow('GET', '/api/backup/export')).status === 200);
     check('A1 owner can read dashboard stats', (await ow('GET', '/api/dashboard/stats')).status === 200);
-    check('A1 owner can read tokens list', (await ow('GET', '/api/tokens')).status === 200);
+    check('A1 removed /api/tokens and /api/smpp/accounts return 404 for owner', (await ow('GET', '/api/tokens')).status === 404 && (await ow('GET', '/api/smpp/accounts')).status === 404);
     check('A1 owner can post announcement', (await ow('POST', '/api/announcements', { title: 'hello', body: 'm' })).status < 300);
     check('A1 removed testpanel API endpoints refuse/404', (await ow('GET', '/api/sms/test-numbers')).status >= 400 && (await ow('GET', '/api/testpanel-accounts')).status >= 400);
 
@@ -76,25 +76,13 @@ export async function stageA() {
     const dup = await api('POST', '/api/sms/inbound', { body: { from: 'Apple', to: '233500000005', message: 'Your Apple code is 123456', sms_id: 'sid-1' }, headers: { 'x-inbound-token': 'inbound-secret' } });
     check('A5 duplicate sms_id is not logged twice', dup.status === 200 && dup.data.duplicate === true);
 
-    // A7 tokens hashed + shown once + token API strictness
+    // A7 removed outward REST API & tokens endpoints are closed
     const noTok = await api('GET', '/api/sms');
-    check('A7 /api/sms without token refused', noTok.status === 401);
-    const bad = await api('GET', '/api/sms', { headers: { Authorization: 'Bearer tok_fake' } });
-    check('A7 /api/sms with wrong token refused', bad.status === 401);
-    const created = await ow('POST', '/api/tokens', { name: 'k1', agent_id: 1 });
-    check('A7 token created and returned once', created.status === 200 && /^tok_[0-9a-f]{48}$/.test(created.data.token || ''), JSON.stringify(created.data).slice(0, 150));
-    const stored = readJson(dir, 'api_tokens');
-    check('A7 token stored hashed (no raw token on disk)', stored.length === 1 && !stored[0].token && stored[0].token_hash && stored[0].token_hash.length === 64);
-    const listed = await ow('GET', '/api/tokens');
-    check('A7 token list never shows the raw token', Array.isArray(listed.data) && listed.data.every(t => !t.token && !t.token_hash));
-    const viaTok = await api('GET', '/api/sms', { headers: { Authorization: 'Bearer ' + created.data.token } });
-    check('A7 valid token works and is scoped to its agent', viaTok.status === 200, 'status ' + viaTok.status);
-    const rows = Array.isArray(viaTok.data) ? viaTok.data : (viaTok.data && (viaTok.data.data || viaTok.data.sms || viaTok.data.rows)) || [];
-    check('A7 token result only has the agent\'s chain', rows.every(r => Number(r.agent_id) === 1), JSON.stringify(viaTok.data).slice(0, 200));
-    const sessionOnly = await api('GET', '/api/sms', { cookie: owner.cookie });
-    check('A7 /api/sms refuses a browser session (token only)', sessionOnly.status === 401);
+    check('A7 outward GET /api/sms removed/refused', [401, 404].includes(noTok.status));
+    const tokPost = await ow('POST', '/api/tokens', { name: 'k1', agent_id: 1 });
+    check('A7 POST /api/tokens removed (404)', tokPost.status === 404);
     const crapi = await api('GET', '/crapi/viewstats');
-    check('A7 /crapi/viewstats refuses requests without a token', crapi.status === 401);
+    check('A7 outward /crapi/viewstats removed/refused', [401, 404].includes(crapi.status));
 
     // notifications scoping
     fs.writeFileSync(path.join(dir, 'notifications.json'), JSON.stringify([{ id: 1, title: 'owner only', message: 'secret', recipient_role: 'owner', read: false }, { id: 2, title: 'for clients', message: 'hi', recipient_role: 'client', read: false }]));
@@ -119,12 +107,12 @@ export async function stageA() {
     });
     check('A6 anonymous WebSocket refused (close code 1008)', wsNoAuth === 1008, 'got ' + wsNoAuth);
 
-    // A3 UI token masking + A9 escapeHtml
+    // A3 removed REST API tokens UI + A9 escapeHtml
     const btCode = fs.readFileSync(path.join(ROOT, 'humex-sms/static/js/shared-brand-theme.js'), 'utf-8');
     check('A9 escapeHtml defined globally in shared-brand-theme.js', btCode.includes('window.escapeHtml'));
     check('A3 manager-engine.js removed from static/js/', !fs.existsSync(path.join(ROOT, 'humex-sms/static/js/manager-engine.js')));
     const appJs = fs.readFileSync(path.join(ROOT, 'humex-sms/static/js/owner-engine.js'), 'utf-8');
-    check('A3 token masked in owner table', appJs.includes('token_hint ?') && !appJs.includes("copyToken('${t.token"));
+    check('A3 outward API token UI removed from owner-engine.js', !appJs.includes('renderApiTokens') && !appJs.includes("copyToken('${t.token"));
   } finally { await srv.stop(); }
 
   // A5 volume + crash safety

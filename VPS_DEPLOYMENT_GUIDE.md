@@ -104,11 +104,9 @@ sudo npm install -g pm2
 cd /var/www/humexsms
 cp .env.example .env
 
-# Random strong tokens auto-generate kar ke .env mein daalein
+# Random strong token auto-generate kar ke .env mein daalein
 INBOUND_RAND=$(openssl rand -hex 32)
-SMPP_RAND=$(openssl rand -hex 32)
 sed -i "s|change_me_to_a_strong_random_inbound_token|$INBOUND_RAND|g" .env
-sed -i "s|change_me_to_a_strong_random_32_byte_secret|$SMPP_RAND|g" .env
 ```
 
 Ab apna domain (ya VPS IP) `.env` mein set karein:
@@ -209,14 +207,13 @@ sudo certbot --nginx -d sms.yourdomain.com
 
 ## Step 7: Firewall (UFW) Security On Karein
 
-Sirf zaroori ports kholein (`22` SSH, `80` HTTP, `443` HTTPS, `2775` SMPP):
+Sirf zaroori ports kholein (`22` SSH, `80` HTTP, `443` HTTPS):
 ```bash
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 2775/tcp
 sudo ufw --force enable
 sudo ufw status
 ```

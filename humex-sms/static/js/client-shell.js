@@ -97,7 +97,6 @@ const ZY_LABELS = {
   'my-profile': 'My Profile',
   'profile-security': 'My Profile',
   '2fa': 'My Profile',
-  'api-tokens': 'My Profile',
   'audit-logs': 'My Profile'
 };
 window.ZY_LABELS = ZY_LABELS;
@@ -111,7 +110,6 @@ const CLIENT_ROUTE_PARENT = {
   'profile': 'my-profile',
   'profile-security': 'my-profile',
   '2fa': 'my-profile',
-  'api-tokens': 'my-profile',
   'audit-logs': 'my-profile'
 };
 window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
@@ -325,14 +323,7 @@ pgDashboard = async function () {
           { label: 'My Earnings Today', value: fmtPkr(earnToday), sub: 'Earned today (PKR)', icon: 'fa-sack-dollar', page: 'my-earnings' },
           { label: 'My Earnings Week', value: fmtPkr(earnWeek), sub: 'Current week (Mon–Sun PKR)', icon: 'fa-chart-line', page: 'my-balance' }
         ],
-        shortcuts: [
-          { label: 'Dashboard', icon: 'fa-gauge-high', page: 'dashboard' },
-          { label: 'Ranges Rate Card', icon: 'fa-layer-group', page: 'sms-overview' },
-          { label: 'My Numbers', icon: 'fa-mobile-screen', page: 'my-numbers' },
-          { label: 'SMS Reports', icon: 'fa-chart-column', page: 'my-sms' },
-          { label: 'Payment Requests', icon: 'fa-wallet', page: 'payout-requests' },
-          { label: 'My Profile', icon: 'fa-user-gear', page: 'my-profile' }
-        ],
+        shortcuts: [],
         volumes: [
           { label: 'Today SMS', value: todaySmsVal, page: 'my-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },

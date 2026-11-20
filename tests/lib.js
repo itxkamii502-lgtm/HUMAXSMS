@@ -51,7 +51,7 @@ export function makeFixture(overrides = {}) {
     mk(10, '233500000010')
   ]);
   W('sms_ranges', [{ id: 1, range_name: 'Ghana Orange NS2', name: 'Ghana Orange NS2', country: 'Ghana', provider: 'Orange', prefix: '233', cost: 0.02, payout: 0.01, currency: 'USD' }]);
-  for (const f of ['sms_log', 'audit_logs', 'api_tokens', 'notifications', 'number_transfers', 'number_requests', 'allocation_history', 'sessions']) W(f, []);
+  for (const f of ['sms_log', 'audit_logs', 'api_tokens', 'notifications', 'number_transfers', 'number_requests', 'allocation_history', 'sessions', 'whitenoise_connections', 'login_panels', 'cr_api_connections']) W(f, []);
   try { fs.rmSync(path.join(dir, 'sessions'), { recursive: true, force: true }); } catch (e) { /* ignore */ }
   fs.writeFileSync(path.join(dir, 'sms_log.journal.ndjson'), '');
   for (const [name, val] of Object.entries(overrides)) W(name, val);

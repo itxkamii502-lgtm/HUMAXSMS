@@ -3542,6 +3542,7 @@ window.zyAgtRejectReq = async function(id) {
     'transfer-history': pgAgentTransferHistory,
     'client-requests': pgClientRequests,
     'news-clients': pgNewsClients, 'notifications': pgNewsClients,
+    'live-chat': () => { if (window.HumexLiveChat) window.HumexLiveChat.renderPage('page-content'); },
     'my-clients': pgMyClients,
     'bulk-add': pgBulkAdd,
     'api-tokens': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'api'); },
@@ -3564,6 +3565,7 @@ window.zyAgtRejectReq = async function(id) {
   };
   const prev = loadPage;
   loadPage = function (page) {
+    if (page !== 'live-chat' && window.HumexLiveChat) window.HumexLiveChat.unmount();
     if (map[page]) {
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('nav-' + page)?.classList.add('active');

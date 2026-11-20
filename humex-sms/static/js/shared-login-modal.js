@@ -161,12 +161,26 @@ async function renderLoginPanels() {
   }, 3000);
 }
 
+function fillWhitenoiseLoginPreset() {
+  const u = document.getElementById('lp-url');
+  const d = document.getElementById('lp-data');
+  const n = document.getElementById('lp-name');
+  if (u) u.value = 'https://whitenoise.one';
+  if (d) d.value = 'https://whitenoise.one/sms';
+  if (n && !n.value.trim()) n.value = 'Whitenoise';
+  if (typeof toast === 'function') toast('Whitenoise Login & SMS URLs filled — ab sirf Email aur Password dalein.', 'info');
+}
+
 function loginPanelForm(p) {
   p = p || {};
   return `
+    ${!p.id ? `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;border-radius:8px;background:rgba(79,70,229,0.08);border:1px solid rgba(79,70,229,0.2);">
+      <span class="fs-12"><strong>Quick Setup:</strong> Whitenoise Panel (<code>whitenoise.one</code> + <code>/sms</code>)</span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="fillWhitenoiseLoginPreset()"><i class="fas fa-bolt"></i> Fill Whitenoise URLs</button>
+    </div>` : ''}
     <div class="form-group">
-      <label class="form-label">Username *</label>
-      <input id="lp-user" value="${lpEsc(p.username || '')}" placeholder="panel username" required>
+      <label class="form-label">Email / Username *</label>
+      <input id="lp-user" value="${lpEsc(p.username || '')}" placeholder="Whitenoise email or panel username" required>
     </div>
     <div class="form-group">
       <label class="form-label">Password *</label>
@@ -174,15 +188,15 @@ function loginPanelForm(p) {
     </div>
     <div class="form-group">
       <label class="form-label">Panel Link (login page) *</label>
-      <input id="lp-url" value="${lpEsc(p.panel_url || '')}" placeholder="http://your-provider.com/ints/ag/login" required>
+      <input id="lp-url" value="${lpEsc(p.panel_url || '')}" placeholder="https://whitenoise.one" required>
     </div>
     <div class="form-group">
       <label class="form-label">SMS / OTP Link (CDR page) *</label>
-      <input id="lp-data" value="${lpEsc(p.data_url || '')}" placeholder="http://your-provider.com/ints/ag/client/SMSCDRStats" required>
+      <input id="lp-data" value="${lpEsc(p.data_url || '')}" placeholder="https://whitenoise.one/sms" required>
     </div>
     <div class="form-group">
       <label class="form-label">Panel Name</label>
-      <input id="lp-name" value="${lpEsc(p.name || '')}" placeholder="optional — taken from the link if left blank">
+      <input id="lp-name" value="${lpEsc(p.name || '')}" placeholder="optional — e.g. Whitenoise">
     </div>
     <div class="form-group">
       <label class="form-label">Check Every (seconds) — auto-pull interval (default 10s)</label>

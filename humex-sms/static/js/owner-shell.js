@@ -12,6 +12,9 @@ const ZY_ADMIN_MENU = [
   { t: null, c: '#e0a030', items: [
       ['Dashboard', 'dashboard', 'fa-gauge-high'],
   ] },
+  { t: null, c: '#16a34a', items: [
+      ['Live Chat', 'live-chat', 'fa-comments'],
+  ] },
   { t: "NUMBERS & INVENTORY", c: '#e8a33d', items: [
       ['Numbers Pool Hub', 'my-numbers', 'fa-mobile-screen'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
@@ -232,6 +235,7 @@ const OWNER_ROUTE_PARENT = {
 window.OWNER_ROUTE_PARENT = OWNER_ROUTE_PARENT;
 
 const ZY_ADMIN_LABELS = {
+  'live-chat': 'Live Chat',
   'bulk-allocation': 'Bulk Allocation',
   'revoke-numbers': 'Revoke Numbers',
   'sms-rate-card': 'Rate Card',

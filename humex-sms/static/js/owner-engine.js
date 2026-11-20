@@ -626,6 +626,7 @@ function stopWebSockets() {
 
 function loadPage(page) {
   stopWebSockets();
+  if (page !== 'live-chat' && window.HumexLiveChat) window.HumexLiveChat.unmount();
   currentPage = page;
   sessionStorage.setItem('admin_current_page', page);
 
@@ -702,6 +703,7 @@ function loadPage(page) {
     'documentation': renderDocumentation,
     'announcements': renderAnnouncements,
     'notifications': () => window.HumexNotifications && window.HumexNotifications.renderPage('page-content'),
+    'live-chat': () => window.HumexLiveChat && window.HumexLiveChat.renderPage('page-content'),
     'support-tickets': renderSupportTickets,
     'my-profile': () => renderMyProfile('details'),
     'profile': () => renderMyProfile('details'),
@@ -877,22 +879,30 @@ let _whitenoiseCache = [];
 
 async function renderWhitenoisePanels() {
   try {
-    const [raw, mcRes] = await Promise.all([
+    const [raw, mcRes, ipRes] = await Promise.all([
       apiFetch('/api/whitenoise-connections'),
-      apiFetch('/api/monthly-cycle').catch(() => null)
+      apiFetch('/api/monthly-cycle').catch(() => null),
+      apiFetch('/api/whitenoise-connections/server-ip').catch(() => null)
     ]);
     const connections = Array.isArray(raw) ? raw : (raw?.data || []);
     _whitenoiseCache = connections;
     const mc = mcRes?.monthly_cycle || { start_date: '', end_date: '', clear_date: '' };
+    const serverIp = ipRes?.ip || '';
+
+    const modeBadge = (m) => {
+      if (m === 'web_login') return '<span class="badge badge-green">Web Auto-Login</span>';
+      if (m === 'hybrid') return '<span class="badge badge-purple">Hybrid (Web+API)</span>';
+      return '<span class="badge badge-blue">API Key</span>';
+    };
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
       <div class="page-header">
         <div>
           <div class="page-title"><i class="fas fa-tower-cell" style="color:#4f46e5;"></i> Whitenoise API Connections</div>
-          <div class="page-subtitle">Direct pure-Node integration for Whitenoise SMS fetching, conditional conversion registration, and Monthly (30/5) {W} payouts.</div>
+          <div class="page-subtitle">Direct pure-Node integration for Whitenoise Web Auto-Login, API SMS fetching, conditional conversion registration, and Monthly (30/5) {W} payouts.</div>
         </div>
-        <div class="page-actions" style="display:flex;gap:8px;">
+        <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-outline btn-sm" onclick="loadPage('cdr2')"><i class="fas fa-table-list"></i> Open CDR 2</button>
           <button class="btn btn-primary btn-sm" onclick="openAddWhitenoiseModal()"><i class="fas fa-plus"></i> Add Whitenoise Connection</button>
         </div>
@@ -901,7 +911,10 @@ async function renderWhitenoisePanels() {
       <div class="card" style="margin-bottom:14px;background:#eef2ff;border-color:#c7d2fe;padding:12px 16px;">
         <div style="font-size:12.5px;color:#312e81;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
           <div><strong><i class="fas fa-calendar-check"></i> Payment Rule:</strong> All Whitenoise numbers, ranges, and CDR 2 logs are locked to <b>Monthly (30/5) {W}</b> (5-day hold).</div>
-          <div><strong>Modes:</strong> <code>Hybrid (Cookie + API Key)</code> fetches full SMS inbox + registers conversions · <code>API Key Only</code> hits <code>/sms/get-phone-last-sms</code></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span><strong>Modes:</strong> <code>Web Auto-Login</code> (whitenoise.one email+pass) · <code>Hybrid</code> · <code>API Key</code></span>
+            ${serverIp ? `<span class="badge badge-blue" style="cursor:pointer;" onclick="navigator.clipboard?.writeText('${escapeHtml(serverIp)}');toast('Server IP copied: ${escapeHtml(serverIp)}','success')" title="Click to copy Server IP for Whitenoise API IP Whitelist"><i class="fas fa-network-wired"></i> Server IP: ${escapeHtml(serverIp)} <i class="fas fa-copy"></i></span>` : ''}
+          </div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;background:#ffffff;border:1px solid #c7d2fe;border-radius:8px;padding:10px 12px;">
           <div>
@@ -925,18 +938,19 @@ async function renderWhitenoisePanels() {
       </div>
       <div class="card">
         ${connections.length ? buildTable(
-          ['#', 'Panel Name', 'Base URL', 'Mode', 'Conversion', 'Credentials', 'Sweep (Client / Pool)', 'Status', 'Pulled / Conv.', 'Actions'],
+          ['#', 'Panel Name', 'Endpoints', 'Mode', 'Conversion', 'Credentials', 'Sweep (Client / Pool)', 'Status', 'Pulled / Conv.', 'Actions'],
           connections.map(cn => [
             cn.id,
             `<strong>${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}</strong>`,
-            `<span class="fs-12 text-muted">${escapeHtml(cn.base_url || 'https://api.whitenoise.one')}</span>`,
-            `<span class="badge ${cn.mode === 'hybrid' ? 'badge-purple' : 'badge-blue'}">${cn.mode === 'hybrid' ? 'Hybrid (Cookie+API)' : 'API Key'}</span>`,
+            `<div class="fs-12 text-muted">Login: ${escapeHtml(cn.web_login_url || cn.web_url || 'https://whitenoise.one')}<br>SMS: ${escapeHtml(cn.web_sms_url || ((cn.web_url || 'https://whitenoise.one').replace(/\/+$/, '') + '/sms'))}</div>`,
+            modeBadge(cn.mode),
             `<span class="badge badge-outline">${escapeHtml(cn.conversion_mode || 'on_client_match')}</span>`,
-            `<div class="fs-12 monospace">Key: ${escapeHtml(cn.api_key_masked || '—')}<br>Cookie: ${escapeHtml(cn.cookie_masked || 'None')}</div>`,
+            `<div class="fs-12 monospace">Key: ${escapeHtml(cn.api_key_masked || '—')}<br>Web: ${cn.web_email ? escapeHtml(cn.web_email) : escapeHtml(cn.cookie_masked || 'None')}</div>`,
             `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${cn.poll_interval_sec || cn.interval || 240}s / ${Math.round((cn.pool_interval_sec || 540) / 60)}m</span>`,
             `<div class="fs-12 ${String(cn.last_status || '').startsWith('Error') ? 'text-danger' : 'text-success'}">${statusBadge(cn.active ? 'active' : 'paused')}<div style="margin-top:2px;">${escapeHtml(cn.last_status || 'Ready')}</div></div>`,
             `<b>${cn.total_pulled || 0}</b> SMS<br><small class="text-muted">${cn.total_conversions || 0} conv.</small>`,
             `<div style="display:inline-flex;gap:4px;flex-wrap:wrap;">
+              <button class="btn btn-outline btn-sm" onclick="verifyWhitenoiseConn(${cn.id})" title="Verify Connection & Login"><i class="fas fa-plug-circle-check"></i> Verify</button>
               <button class="btn btn-outline btn-sm" onclick="openTestWhitenoiseModal(${cn.id}, '${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}')" title="Test Number"><i class="fas fa-vial"></i> Test</button>
               <button class="btn btn-outline btn-sm" onclick="pullWhitenoiseNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
               <button class="btn btn-outline btn-sm" onclick="openEditWhitenoiseModal(${cn.id})" title="Edit Connection"><i class="fas fa-pen"></i></button>
@@ -944,7 +958,7 @@ async function renderWhitenoisePanels() {
               <button class="btn btn-danger btn-sm" onclick="deleteWhitenoiseConn(${cn.id})" title="Remove"><i class="fas fa-trash"></i></button>
             </div>`
           ])
-        ) : `<div class="empty-state"><i class="fas fa-tower-cell"></i><p>No Whitenoise connections yet — click "Add Whitenoise Connection" to integrate your Whitenoise account.</p></div>`}
+        ) : `<div class="empty-state"><i class="fas fa-tower-cell"></i><p>No Whitenoise connections yet — click "Add Whitenoise Connection" to integrate your Whitenoise account using Email/Password or API Key.</p></div>`}
       </div>
     `;
   } catch (err) {
@@ -982,17 +996,37 @@ async function zySaveMonthlyCycleFromPanels() {
 
 function openAddWhitenoiseModal() {
   openModal('Add Whitenoise Connection', buildWhitenoiseFormHtml(null));
+  onWhitenoiseModeChange();
 }
 
 function openEditWhitenoiseModal(id) {
   const cn = _whitenoiseCache.find(x => Number(x.id) === Number(id));
   if (!cn) return;
   openModal(`Edit Whitenoise — ${escapeHtml(cn.panel_name || cn.name || 'Connection')}`, buildWhitenoiseFormHtml(cn));
+  onWhitenoiseModeChange();
+}
+
+function onWhitenoiseModeChange() {
+  const mode = document.getElementById('wn-mode')?.value || 'web_login';
+  const hint = document.getElementById('wn-mode-hint');
+  const webBox = document.getElementById('wn-web-creds-box');
+  const apiBox = document.getElementById('wn-api-creds-box');
+  if (webBox) webBox.style.display = mode === 'api_key' ? 'none' : 'block';
+  if (apiBox) apiBox.style.display = mode === 'web_login' ? 'none' : 'block';
+  if (hint) {
+    if (mode === 'web_login') {
+      hint.innerHTML = '<i class="fas fa-circle-check" style="color:#16a34a;"></i> <b>Web Panel Auto-Login:</b> Logs directly into <code>https://whitenoise.one</code> using your Email & Password (no API IP-whitelist required, auto-refreshes APPSID session).';
+    } else if (mode === 'hybrid') {
+      hint.innerHTML = '<i class="fas fa-layer-group" style="color:#6366f1;"></i> <b>Hybrid Mode:</b> Uses Web Auto-Login/Cookie for full inbox sync AND API Key for fast per-number fetch & conversion registration (auto-falls back to Web if API is blocked).';
+    } else {
+      hint.innerHTML = '<i class="fas fa-key" style="color:#2563eb;"></i> <b>API Key Mode:</b> Queries <code>https://api.whitenoise.one</code> directly. Make sure your VPS outbound IP is whitelisted in your Whitenoise API settings.';
+    }
+  }
 }
 
 function buildWhitenoiseFormHtml(cn) {
   const isEdit = Boolean(cn && cn.id);
-  const modeVal = cn?.mode || 'hybrid';
+  const modeVal = cn?.mode || 'web_login';
   const convVal = cn?.conversion_mode || 'on_client_match';
   return `
     <form id="wn-conn-form" onsubmit="submitWhitenoiseForm(event, ${isEdit ? Number(cn.id) : 'null'})">
@@ -1002,35 +1036,66 @@ function buildWhitenoiseFormHtml(cn) {
           <input id="wn-panel-name" value="${escapeHtml(cn?.panel_name || cn?.name || 'Whitenoise Main')}" required>
         </div>
         <div class="form-group">
-          <label class="form-label">Base URL *</label>
-          <input id="wn-base-url" value="${escapeHtml(cn?.base_url || 'https://api.whitenoise.one')}" required>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
           <label class="form-label">Connection Mode *</label>
-          <select id="wn-mode">
-            <option value="hybrid" ${modeVal === 'hybrid' ? 'selected' : ''}>Hybrid (Cookie + API Key)</option>
-            <option value="api_key" ${modeVal === 'api_key' ? 'selected' : ''}>API Key Only (/sms/get-phone-last-sms)</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Conversion Registration</label>
-          <select id="wn-conv-mode">
-            <option value="on_client_match" ${convVal === 'on_client_match' ? 'selected' : ''}>On Client Match (Recommended)</option>
-            <option value="always" ${convVal === 'always' ? 'selected' : ''}>Always Register</option>
-            <option value="off" ${convVal === 'off' ? 'selected' : ''}>Disabled (Off)</option>
+          <select id="wn-mode" onchange="onWhitenoiseModeChange()">
+            <option value="web_login" ${modeVal === 'web_login' ? 'selected' : ''}>Web Panel Auto-Login (Recommended)</option>
+            <option value="hybrid" ${modeVal === 'hybrid' ? 'selected' : ''}>Hybrid (Web Login/Cookie + API Key)</option>
+            <option value="api_key" ${modeVal === 'api_key' ? 'selected' : ''}>API Key Only (api.whitenoise.one)</option>
           </select>
         </div>
       </div>
-      <div class="form-group">
-        <label class="form-label">API Key ${isEdit ? '(leave blank to keep existing)' : '*'}</label>
-        <input id="wn-api-key" placeholder="${isEdit ? escapeHtml(cn.api_key_masked || 'Keep existing') : 'Whitenoise API key'}" ${isEdit ? '' : 'required'}>
+      <div id="wn-mode-hint" style="font-size:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;margin-bottom:12px;color:#334155;"></div>
+
+      <div id="wn-web-creds-box" style="border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#fcfdff;">
+        <div style="font-size:12px;font-weight:700;color:#1e293b;margin-bottom:8px;"><i class="fas fa-globe"></i> Whitenoise Web Panel (Login URL + SMS Location URL)</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Login URL *</label>
+            <input id="wn-web-url" value="${escapeHtml(cn?.web_login_url || cn?.web_url || 'https://whitenoise.one')}" placeholder="https://whitenoise.one">
+          </div>
+          <div class="form-group">
+            <label class="form-label">SMS Location URL *</label>
+            <input id="wn-web-sms-url" value="${escapeHtml(cn?.web_sms_url || 'https://whitenoise.one/sms')}" placeholder="https://whitenoise.one/sms">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Whitenoise Account Email</label>
+            <input id="wn-web-email" type="email" value="${escapeHtml(cn?.web_email || '')}" placeholder="you@example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Whitenoise Password ${isEdit && cn?.has_web_password ? '(saved — leave blank to keep)' : ''}</label>
+            <input id="wn-web-password" type="password" placeholder="${isEdit && cn?.has_web_password ? '••••••••' : 'Whitenoise panel password'}">
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Manual Session Cookie (optional — auto-handled if Email + Password entered)</label>
+          <textarea id="wn-cookie" rows="2" placeholder="${isEdit ? escapeHtml(cn.cookie_masked || 'Leave blank to keep existing cookie') : 'APPSID=...'}" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+        </div>
       </div>
-      <div class="form-group">
-        <label class="form-label">Session Cookie ${isEdit ? '(optional — leave blank to keep existing)' : '(for Hybrid /sms fetch)'}</label>
-        <textarea id="wn-cookie" rows="2" placeholder="${isEdit ? escapeHtml(cn.cookie_masked || 'Leave blank to keep existing cookie') : 'PHPSESSID=...; remember_web=...'}" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+
+      <div id="wn-api-creds-box" style="border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#fcfdff;">
+        <div style="font-size:12px;font-weight:700;color:#1e293b;margin-bottom:8px;"><i class="fas fa-key"></i> Whitenoise API Settings (api.whitenoise.one)</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">API Base URL</label>
+            <input id="wn-base-url" value="${escapeHtml(cn?.base_url || 'https://api.whitenoise.one')}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Conversion Registration</label>
+            <select id="wn-conv-mode">
+              <option value="on_client_match" ${convVal === 'on_client_match' ? 'selected' : ''}>On Client Match (Recommended)</option>
+              <option value="always" ${convVal === 'always' ? 'selected' : ''}>Always Register</option>
+              <option value="off" ${convVal === 'off' ? 'selected' : ''}>Disabled (Off)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">API Key ${isEdit && cn?.has_api_key ? '(leave blank to keep existing)' : ''}</label>
+          <input id="wn-api-key" placeholder="${isEdit ? escapeHtml(cn.api_key_masked || 'Keep existing') : 'Whitenoise API key'}">
+        </div>
       </div>
+
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Client Sweep Interval (sec)</label>
@@ -1042,12 +1107,12 @@ function buildWhitenoiseFormHtml(cn) {
         </div>
         <div class="form-group">
           <label class="form-label">Request Timeout (ms)</label>
-          <input id="wn-timeout" type="number" min="2000" max="60000" value="${Number(cn?.timeout_ms || 12000)}">
+          <input id="wn-timeout" type="number" min="3000" max="60000" value="${Number(cn?.timeout_ms || 15000)}">
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">User-Agent (optional)</label>
-        <input id="wn-ua" value="${escapeHtml(cn?.user_agent || '')}" placeholder="Mozilla/5.0 ...">
+        <input id="wn-ua" value="${escapeHtml(cn?.user_agent || '')}" placeholder="Leave blank for default Chrome User-Agent">
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -1060,28 +1125,42 @@ function buildWhitenoiseFormHtml(cn) {
 async function submitWhitenoiseForm(event, editId) {
   event.preventDefault();
   const panelName = document.getElementById('wn-panel-name')?.value.trim();
+  const mode = document.getElementById('wn-mode')?.value || 'web_login';
   const clientSweep = parseInt(document.getElementById('wn-interval')?.value, 10) || 240;
   const poolSweep = parseInt(document.getElementById('wn-pool-interval')?.value, 10) || 540;
   const payload = {
     name: panelName,
     panel_name: panelName,
     base_url: document.getElementById('wn-base-url')?.value.trim() || 'https://api.whitenoise.one',
-    mode: document.getElementById('wn-mode')?.value || 'hybrid',
+    web_url: document.getElementById('wn-web-url')?.value.trim() || 'https://whitenoise.one',
+    web_login_url: document.getElementById('wn-web-url')?.value.trim() || 'https://whitenoise.one',
+    web_sms_url: document.getElementById('wn-web-sms-url')?.value.trim() || 'https://whitenoise.one/sms',
+    mode,
     conversion_mode: document.getElementById('wn-conv-mode')?.value || 'on_client_match',
     interval: clientSweep,
     poll_interval_sec: clientSweep,
     client_interval_sec: clientSweep,
     pool_interval_sec: poolSweep,
-    timeout_ms: parseInt(document.getElementById('wn-timeout')?.value, 10) || 12000,
+    timeout_ms: parseInt(document.getElementById('wn-timeout')?.value, 10) || 15000,
     user_agent: document.getElementById('wn-ua')?.value.trim() || ''
   };
   const apiKey = document.getElementById('wn-api-key')?.value.trim();
   const cookie = document.getElementById('wn-cookie')?.value.trim();
+  const webEmail = document.getElementById('wn-web-email')?.value.trim();
+  const webPassword = document.getElementById('wn-web-password')?.value || '';
+
   if (apiKey) payload.api_key = apiKey;
   if (cookie) { payload.cookie = cookie; payload.web_cookie = cookie; }
+  if (webEmail !== undefined) payload.web_email = webEmail;
+  if (webPassword) payload.web_password = webPassword;
 
   if (!payload.panel_name) { toast('Panel name is required', 'error'); return; }
-  if (!editId && !payload.api_key && !payload.web_cookie) { toast('API Key or Session Cookie is required', 'error'); return; }
+  if (!editId) {
+    const hasWeb = Boolean(cookie || (webEmail && webPassword));
+    if (mode === 'api_key' && !apiKey) { toast('API Key is required for API Key mode', 'error'); return; }
+    if (mode === 'web_login' && !hasWeb) { toast('Enter Whitenoise Email + Password (or APPSID Cookie)', 'error'); return; }
+    if (mode === 'hybrid' && !hasWeb && !apiKey) { toast('Enter Whitenoise Email + Password, Cookie, or API Key', 'error'); return; }
+  }
 
   const btn = document.getElementById('wn-submit-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Saving...'; }
@@ -1091,7 +1170,7 @@ async function submitWhitenoiseForm(event, editId) {
     const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
     if (res && !res.error) {
       closeModal();
-      toast(editId ? 'Whitenoise connection updated' : 'Whitenoise connection added', 'success');
+      toast(editId ? 'Whitenoise connection updated — click Verify to test live.' : 'Whitenoise connection saved — click Verify to test live.', 'success');
       await renderWhitenoisePanels();
     } else {
       toast(res?.error || 'Failed to save connection', 'error');
@@ -1100,6 +1179,23 @@ async function submitWhitenoiseForm(event, editId) {
     toast(err.message || 'Failed to save connection', 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fas fa-save"></i> ${editId ? 'Save Changes' : 'Connect Whitenoise'}`; }
+  }
+}
+
+async function verifyWhitenoiseConn(id) {
+  toast('Testing live Whitenoise connection…', 'info');
+  try {
+    const res = await apiFetch(`/api/whitenoise-connections/${id}/test-connection`, { method: 'POST', body: JSON.stringify({}) });
+    const summary = (res?.checks || []).map(ch => `${ch.ok ? '✓' : '✗'} ${ch.channel}: ${ch.detail}`).join(' | ');
+    if (res && res.success) {
+      toast(summary || 'Whitenoise connection verified!', 'success');
+    } else {
+      toast(res?.error || summary || 'Connection verification failed', 'error');
+    }
+    await renderWhitenoisePanels();
+  } catch (err) {
+    toast(err.message || 'Connection test failed', 'error');
+    await renderWhitenoisePanels();
   }
 }
 
@@ -1143,12 +1239,13 @@ async function submitTestWhitenoise(event, id) {
     if (resEl) {
       resEl.innerHTML = `
         <div class="badge ${res?.success ? 'badge-green' : 'badge-red'}" style="margin-bottom:8px;">
-          ${res?.success ? `OK (${res.source || 'whitenoise'}) · ${rows.length} message(s), ${res.ingested || 0} new ingested` : (res?.error || 'Request failed')}
+          ${res?.success ? `OK (${escapeHtml(res.source || 'whitenoise')}) · ${rows.length} message(s), ${res.ingested || 0} new ingested` : escapeHtml(res?.error || 'Request failed')}
         </div>
+        ${res?.api_warning ? `<div class="fs-12 text-muted" style="margin-bottom:6px;"><i class="fas fa-info-circle"></i> API note: ${escapeHtml(res.api_warning)}</div>` : ''}
         ${rows.length ? `<div style="max-height:220px;overflow:auto;border:1px solid #cbd5e1;border-radius:6px;padding:8px;font-size:12px;">
           ${rows.slice(0, 15).map(m => `<div style="border-bottom:1px dashed #e2e8f0;padding:4px 0;">
-            <b>${escapeHtml(m.cli || m.sender || 'CLI')}</b> <span class="text-muted">${escapeHtml(m.timestamp || '')}</span>
-            <div>${escapeHtml(m.message || '')}</div>
+            <b>${escapeHtml(m.cli || m.sender || m.src || 'CLI')}</b> <span class="text-muted">${escapeHtml(m.timestamp || m.time || '')}</span>
+            <div>${escapeHtml(m.message || m.text || '')}</div>
           </div>`).join('')}
         </div>` : ''}
       `;
@@ -1165,9 +1262,9 @@ async function pullWhitenoiseNow(id) {
   try {
     const res = await apiFetch(`/api/whitenoise-connections/${id}/pull`, { method: 'POST' });
     if (res && res.success) {
-      toast(`Synced ${res.checked || 0} number(s) · ${res.pulled || 0} new SMS · ${res.conversions || 0} conv.`, 'success');
+      toast(res.status || `Synced · ${res.pulled || 0} new SMS`, 'success');
     } else {
-      toast(res?.error || res?.status || 'Sync completed with warning', 'warning');
+      toast(res?.error || res?.status || 'Sync completed with error', 'error');
     }
     await renderWhitenoisePanels();
   } catch (err) {

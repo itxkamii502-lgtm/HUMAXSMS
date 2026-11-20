@@ -1566,6 +1566,7 @@ window.zyClientWipeNotifications = async function() {
     'my-balance': pgClientPaymentRequests,
     'news': pgClientNotifications,
     'notifications': pgClientNotifications,
+    'live-chat': () => { if (window.HumexLiveChat) window.HumexLiveChat.renderPage('page-content'); },
     'my-profile': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'details'); },
     'profile': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'details'); },
     'profile-security': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'security'); },
@@ -1575,6 +1576,7 @@ window.zyClientWipeNotifications = async function() {
   };
   const prev = loadPage;
   loadPage = function (page) {
+    if (page !== 'live-chat' && window.HumexLiveChat) window.HumexLiveChat.unmount();
     if (map[page]) {
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('nav-' + page)?.classList.add('active');

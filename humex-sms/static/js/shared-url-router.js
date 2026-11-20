@@ -9,6 +9,7 @@
   const MAPS = {
     owner: {
       'dashboard': 'SMSDashboard',
+      'live-chat': 'LiveChat',
       'my-numbers': 'SMSNumbers',
       'bulk-allocation': 'SMSBulkAllocations',
       'allocation-history': 'AllocationHistory',
@@ -89,6 +90,7 @@
     },
     agent: {
       'dashboard': 'SMSDashboard',
+      'live-chat': 'LiveChat',
       'my-sms-numbers': 'MySMSNumbers',
       'bulk-add': 'BulkAllocation',
       'client-requests': 'NumberRequests',
@@ -119,6 +121,7 @@
     },
     client: {
       'dashboard': 'SMSDashboard',
+      'live-chat': 'LiveChat',
       'my-numbers': 'MySMSNumbers',
       'sms-overview': 'SMSRanges',
       'sms-ranges': 'SMSRanges',
@@ -143,6 +146,7 @@
   const CANONICAL_URL_TO_PAGE = {
     owner: {
       profile: 'my-profile',
+      livechat: 'live-chat',
       numberrequests: 'agent-requests',
       agentpaymentrequests: 'payout-requests',
       searchsms: 'my-sms',
@@ -152,6 +156,7 @@
     },
     agent: {
       profile: 'my-profile',
+      livechat: 'live-chat',
       smsranges: 'sms-ranges',
       clientrateset: 'client-rate-set',
       clientpaymentrequests: 'client-payment-requests',
@@ -166,6 +171,7 @@
     },
     client: {
       profile: 'my-profile',
+      livechat: 'live-chat',
       smsranges: 'sms-overview',
       notifications: 'news'
     }

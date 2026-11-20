@@ -12,6 +12,9 @@ const ZY_AGENT_MENU = [
   { t: null, c: '#e0a030', items: [
       ['Dashboard', 'dashboard', 'fa-gauge-high'],
   ] },
+  { t: null, c: '#16a34a', items: [
+      ['Live Chat', 'live-chat', 'fa-comments'],
+  ] },
   { t: "NUMBERS & INVENTORY", c: '#e8a33d', items: [
       ['My Numbers', 'my-sms-numbers', 'fa-mobile-screen'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
@@ -42,6 +45,7 @@ const ZY_AGENT_MENU = [
 
 const ZY_LABELS = {
   'dashboard': 'Dashboard',
+  'live-chat': 'Live Chat',
   'sms-ranges': 'Ranges & Rate Card',
   'sms-overview': 'Ranges & Rate Card',
   'sms-ratecard': 'Ranges & Rate Card',

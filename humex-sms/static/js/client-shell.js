@@ -15,6 +15,12 @@ const ZY_CLIENT_ICONS = {
     <rect x="13" y="11" width="8" height="10" rx="2.5" stroke="currentColor" stroke-width="1.8"/>
     <rect x="3" y="14.5" width="8" height="6.5" rx="2.2" fill="currentColor" opacity="0.88"/>
   </svg>`,
+  'live-chat': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M4.5 6.5A3 3 0 0 1 7.5 3.5h9a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H10l-4.2 3.2c-.5.38-1.3.03-1.3-.62V6.5Z" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    <circle cx="9.2" cy="10" r="1.15" fill="currentColor"/>
+    <circle cx="12.2" cy="10" r="1.15" fill="currentColor"/>
+    <circle cx="15.2" cy="10" r="1.15" fill="currentColor"/>
+  </svg>`,
   'my-numbers': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <rect x="5.5" y="2.5" width="13" height="19" rx="3" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.8"/>
     <rect x="8.5" y="6" width="7" height="5.5" rx="1.2" fill="currentColor" opacity="0.88"/>
@@ -64,6 +70,7 @@ const ZY_CLIENT_ICONS = {
 
 const ZY_CLIENT_MENU = [
   { label: 'Dashboard', page: 'dashboard', color: '#d97706', tint: 'rgba(245, 158, 11, 0.14)' },
+  { label: 'Live Chat', page: 'live-chat', color: '#16a34a', tint: 'rgba(22, 163, 74, 0.14)' },
   { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(14, 165, 233, 0.14)' },
   { label: 'Ranges Rate Card', page: 'sms-overview', color: '#7c3aed', tint: 'rgba(139, 92, 246, 0.14)' },
   { label: 'CDR & Statistics', page: 'my-sms', color: '#2563eb', tint: 'rgba(37, 99, 235, 0.14)' },
@@ -75,6 +82,7 @@ const ZY_CLIENT_MENU = [
 ];
 const ZY_LABELS = {
   'dashboard': 'Dashboard',
+  'live-chat': 'Live Chat',
   'my-numbers': 'My Numbers',
   'sms-overview': 'Ranges Rate Card',
   'sms-ranges': 'Ranges Rate Card',

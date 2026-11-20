@@ -2223,6 +2223,302 @@ function ingestSms({
 }
 
 const loginPanelsInFlight = new Set();
+const loginPanelCookieCache = new Map();
+
+function extractOtpQuick(text) {
+  const s = String(text || '');
+  const m1 = s.match(/(?:code|otp|pin|verification|passcode|password)[^\d]{0,16}(\d{4,8})/i);
+  if (m1) return m1[1];
+  const m2 = s.match(/\b(\d{3}[-\s]\d{3})\b/);
+  if (m2) return m2[1].replace(/\D/g, '');
+  const m3 = s.match(/\b(\d{4,8})\b/);
+  return m3 ? m3[1] : '';
+}
+
+function parseGenericSmsHtmlTable(html, panelName = '') {
+  if (!html || typeof html !== 'string') return [];
+  // First try Whitenoise 8/9-col format
+  const wnRows = parseWhitenoiseWebSmsHtml(html);
+  if (wnRows.length > 0) {
+    return wnRows.map(r => ({
+      date: r.time_received || r.time_sent || '',
+      number: r.dst || '',
+      cli: r.src || r.service_name || 'Whitenoise',
+      message: r.text || '',
+      otp: extractOtpQuick(r.text),
+      provider: r.provider_col || panelName || 'Whitenoise',
+      range: r.service_name || ''
+    }));
+  }
+
+  // Generic HTML <table> header-aware parser
+  const rows = [];
+  const tableRe = /<table\b[^>]*>([\s\S]*?)<\/table>/gi;
+  let tm;
+  while ((tm = tableRe.exec(html)) !== null) {
+    const tbl = tm[1];
+    const headers = [];
+    const thRe = /<th\b[^>]*>([\s\S]*?)<\/th>/gi;
+    let hm;
+    while ((hm = thRe.exec(tbl)) !== null) {
+      headers.push(decodeHtmlEntities(hm[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).toLowerCase());
+    }
+    const idxOf = (re) => headers.findIndex(h => re.test(h));
+    const iNum = idxOf(/number|dest|destination|phone|msisdn|\bto\b/);
+    const iMsg = idxOf(/message|text|sms|content|body/);
+    const iCli = idxOf(/cli|sender|source|\bfrom\b|service|origin/);
+    const iDate = idxOf(/time|date|received|sent|created/);
+    const iRange = idxOf(/range|country|route|termination/);
+    const iProv = idxOf(/provider|carrier|vendor/);
+
+    const bodyMatch = tbl.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i);
+    const slice = bodyMatch ? bodyMatch[1] : tbl;
+    const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+    let trm;
+    while ((trm = trRe.exec(slice)) !== null) {
+      if (/<th\b/i.test(trm[1])) continue;
+      const cells = [];
+      const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+      let tdm;
+      while ((tdm = tdRe.exec(trm[1])) !== null) {
+        cells.push(decodeHtmlEntities(tdm[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()));
+      }
+      if (cells.length < 3) continue;
+      let num = iNum >= 0 ? (cells[iNum] || '') : '';
+      let msg = iMsg >= 0 ? (cells[iMsg] || '') : '';
+      let cli = iCli >= 0 ? (cells[iCli] || '') : '';
+      let dt = iDate >= 0 ? (cells[iDate] || '') : '';
+      let rng = iRange >= 0 ? (cells[iRange] || '') : '';
+      let prov = iProv >= 0 ? (cells[iProv] || '') : '';
+
+      // Heuristic fallback if table has no <th> headers
+      if (!num) {
+        const foundNum = cells.find(c => /^\+?\d[\d\s\-()]{6,18}$/.test(c.trim()));
+        if (foundNum) num = foundNum.trim();
+      }
+      if (!msg) {
+        const candidates = cells.filter(c => c !== num && c.length >= 6);
+        msg = candidates.sort((a, b) => b.length - a.length)[0] || '';
+      }
+      if (!num || !msg) continue;
+      const numDigits = num.replace(/\D/g, '');
+      if (numDigits.length < 6) continue;
+      rows.push({
+        date: dt || new Date().toISOString(),
+        number: num.startsWith('+') ? num : '+' + numDigits,
+        cli: cli || panelName || 'SMS',
+        message: msg,
+        otp: extractOtpQuick(msg),
+        provider: prov || panelName || '',
+        range: rng || ''
+      });
+    }
+    if (rows.length > 0) break;
+  }
+  return rows;
+}
+
+async function fetchWithCookieRedirects(url, { method = 'GET', headers = {}, body, cookieJar = '', timeoutMs = 20000, maxRedirects = 5 } = {}) {
+  let currentUrl = url;
+  let currentMethod = method;
+  let currentBody = body;
+  let cookies = cookieJar;
+  let resp = null;
+  let text = '';
+
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const reqHeaders = { ...headers };
+      if (cookies) reqHeaders.Cookie = cookies;
+      if (currentMethod === 'GET' || currentMethod === 'HEAD') {
+        delete reqHeaders['Content-Type'];
+      }
+      resp = await fetch(currentUrl, {
+        method: currentMethod,
+        redirect: 'manual',
+        signal: ctrl.signal,
+        headers: reqHeaders,
+        body: (currentMethod === 'GET' || currentMethod === 'HEAD') ? undefined : currentBody
+      });
+      const sc = resp.headers.getSetCookie ? resp.headers.getSetCookie() : (resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
+      cookies = mergeCookieHeader(cookies, sc);
+      const loc = resp.headers.get('location');
+      if (loc && resp.status >= 300 && resp.status < 400 && hop < maxRedirects) {
+        currentUrl = new URL(loc, currentUrl).toString();
+        currentMethod = 'GET';
+        currentBody = undefined;
+        continue;
+      }
+      text = await resp.text();
+      break;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return { status: resp ? resp.status : 0, url: currentUrl, html: text, cookies };
+}
+
+async function runNodeLoginPanelScraper(panel) {
+  const loginUrl = String(panel.panel_url || '').trim();
+  const dataUrl = String(panel.data_url || '').trim();
+  if (!loginUrl || !dataUrl) {
+    throw new Error('Both Login URL and SMS Page URL are required.');
+  }
+  const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  const baseHeaders = {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8'
+  };
+
+  const performLogin = async () => {
+    const getPage = await fetchWithCookieRedirects(loginUrl, { method: 'GET', headers: baseHeaders, timeoutMs: 20000 });
+    let cookies = getPage.cookies;
+    const html = getPage.html || '';
+
+    // Parse form action, input field names, and hidden inputs
+    const formTag = html.match(/<form\b[^>]*>/i)?.[0] || '';
+    const actionAttr = formTag.match(/action=["']([^"']*)["']/i)?.[1] || '';
+    const postUrl = actionAttr ? new URL(actionAttr, getPage.url || loginUrl).toString() : (getPage.url || loginUrl);
+
+    const hidden = {};
+    let userField = '';
+    let passField = '';
+    const inputRe = /<input\b[^>]*>/gi;
+    let im;
+    while ((im = inputRe.exec(html)) !== null) {
+      const tag = im[0];
+      const type = (tag.match(/type=["']?([^"'\s>]+)/i)?.[1] || 'text').toLowerCase();
+      const name = tag.match(/name=["']([^"']+)["']/i)?.[1] || '';
+      const val = tag.match(/value=["']([^"']*)["']/i)?.[1] ?? '';
+      if (!name) continue;
+      if (type === 'hidden') {
+        hidden[name] = val;
+      } else if (type === 'password' && !passField) {
+        passField = name;
+      } else if (!userField && (type === 'email' || type === 'text') && /email|user|login|uname|account/i.test(name)) {
+        userField = name;
+      }
+    }
+    if (!userField) userField = /whitenoise\.one/i.test(loginUrl) ? 'email' : 'username';
+    if (!passField) passField = 'password';
+
+    const formBody = new URLSearchParams();
+    for (const [k, v] of Object.entries(hidden)) formBody.append(k, v);
+    formBody.append(userField, String(panel.username || '').trim());
+    formBody.append(passField, String(panel.password || ''));
+
+    const postRes = await fetchWithCookieRedirects(postUrl, {
+      method: 'POST',
+      cookieJar: cookies,
+      headers: {
+        ...baseHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': getPage.url || loginUrl,
+        'Origin': new URL(postUrl).origin
+      },
+      body: formBody.toString(),
+      timeoutMs: 20000
+    });
+    cookies = postRes.cookies;
+    const postText = postRes.html || '';
+    const badCreds = /incorrect username or password|invalid (username|email|password|credentials)|wrong password/i.test(postText);
+    if (badCreds) {
+      throw new Error('Login failed: Incorrect username/email or password on remote panel.');
+    }
+    if (postRes.status >= 400) {
+      throw new Error(`Login HTTP ${postRes.status} on ${postUrl}`);
+    }
+    if (isWhitenoiseLoginHtml(postText) && postRes.url.replace(/\/+$/, '') === loginUrl.replace(/\/+$/, '')) {
+      throw new Error('Login rejected by remote panel — please check Email/Username and Password.');
+    }
+    loginPanelCookieCache.set(panel.id, cookies);
+    return cookies;
+  };
+
+  let cookies = loginPanelCookieCache.get(panel.id) || '';
+  if (!cookies) {
+    cookies = await performLogin();
+  }
+
+  const fetchSmsPage = async (targetUrl, ck) => {
+    return fetchWithCookieRedirects(targetUrl, {
+      method: 'GET',
+      cookieJar: ck,
+      headers: { ...baseHeaders, 'Referer': loginUrl },
+      timeoutMs: 25000
+    });
+  };
+
+  const isWhitenoiseTarget = /whitenoise\.one/i.test(dataUrl) || /whitenoise\.one/i.test(loginUrl);
+  let targetFetchUrl = dataUrl;
+  if (isWhitenoiseTarget && !dataUrl.includes('?')) {
+    const now = new Date();
+    const startDt = new Date(now.getTime() - 360 * 60000); // last 6 hours
+    targetFetchUrl = `${dataUrl.replace(/\/+$/, '')}?sms_time_start=${encodeURIComponent(formatWhitenoiseWebTime(startDt))}&sms_time_end=${encodeURIComponent(formatWhitenoiseWebTime(now))}&order=id:desc`;
+  }
+
+  let dataRes = await fetchSmsPage(targetFetchUrl, cookies);
+  cookies = dataRes.cookies || cookies;
+
+  // Detect expired session / redirected back to login page -> auto-relogin once
+  if (dataRes.status === 401 || dataRes.status === 403 || isWhitenoiseLoginHtml(dataRes.html)) {
+    cookies = await performLogin();
+    dataRes = await fetchSmsPage(targetFetchUrl, cookies);
+    cookies = dataRes.cookies || cookies;
+    if (dataRes.status === 401 || dataRes.status === 403 || isWhitenoiseLoginHtml(dataRes.html)) {
+      throw new Error('Remote panel requires login — credentials rejected or session blocked.');
+    }
+  }
+  if (dataRes.status < 200 || dataRes.status >= 300) {
+    throw new Error(`SMS page HTTP ${dataRes.status} at ${targetFetchUrl}`);
+  }
+  loginPanelCookieCache.set(panel.id, cookies);
+
+  const parseBody = (raw) => {
+    const trimmed = String(raw || '').trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const j = JSON.parse(trimmed);
+        const arr = Array.isArray(j) ? j : (j.data || j.aaData || j.rows || j.sms || j.messages || []);
+        if (Array.isArray(arr)) {
+          return arr.map(r => {
+            if (Array.isArray(r)) {
+              const dt = String(r[0] || '');
+              const num = String(r[1] || r[2] || '');
+              const cli = String(r[2] || r[1] || '');
+              const msg = String(r[3] || r[4] || '');
+              return { date: dt, number: num, cli, message: msg, otp: extractOtpQuick(msg) };
+            }
+            const msg = String(r.message ?? r.text ?? r.sms ?? r.body ?? '');
+            return {
+              date: String(r.date ?? r.time ?? r.timestamp ?? r.time_received ?? ''),
+              number: String(r.number ?? r.dst ?? r.phone ?? r.to ?? ''),
+              cli: String(r.cli ?? r.src ?? r.sender ?? r.service_name ?? panel.name ?? ''),
+              message: msg,
+              otp: String(r.otp || extractOtpQuick(msg)),
+              provider: String(r.provider || panel.name || ''),
+              range: String(r.range || r.range_name || r.service_name || '')
+            };
+          }).filter(x => x.number && x.message);
+        }
+      } catch (_) {}
+    }
+    return parseGenericSmsHtmlTable(raw, panel.name || '');
+  };
+
+  let rows = parseBody(dataRes.html);
+  // If time-windowed Whitenoise query returned 0 rows, also check bare data_url (default view)
+  if (rows.length === 0 && targetFetchUrl !== dataUrl) {
+    const bareRes = await fetchSmsPage(dataUrl, cookies);
+    if (bareRes.status >= 200 && bareRes.status < 300 && !isWhitenoiseLoginHtml(bareRes.html)) {
+      rows = parseBody(bareRes.html);
+    }
+  }
+
+  return { success: true, rows };
+}
 
 async function pollSingleLoginPanel(panelId, force = false) {
   const panels = readDb('login_panels') || [];
@@ -2235,14 +2531,8 @@ async function pollSingleLoginPanel(panelId, force = false) {
   let added = 0;
 
   try {
-    const scraperScript = path.join(HUMEX_DIR, 'panel_scraper.py');
-    if (!fs.existsSync(scraperScript)) {
-      panel.last_run = new Date().toISOString();
-      panel.last_error = 'Scraper engine not installed';
-      return 0;
-    }
-    const { stdout } = await execFileAsync('python3', [scraperScript, 'poll', JSON.stringify(panel)], { timeout: 60000 });
-    const result = JSON.parse(stdout || '{}');
+    const result = await runNodeLoginPanelScraper(panel);
+    const isWnPanel = /whitenoise/i.test(`${panel.name || ''} ${panel.panel_url || ''} ${panel.data_url || ''}`);
 
     if (result.success && Array.isArray(result.rows)) {
       // Reverse rows so newest unshifts to the top of smsLog
@@ -2259,9 +2549,9 @@ async function pollSingleLoginPanel(panelId, force = false) {
           timestamp: row.date,
           range: row.range || row.range_name || '',
           country: row.country || '',
-          provider: row.provider || panel.name || '',
+          provider: row.provider || (isWnPanel ? 'Whitenoise' : panel.name) || '',
           payout: panelRate,
-          source: 'login_panel',
+          source: isWnPanel ? 'whitenoise' : 'login_panel',
           panel_id: panel.id,
           panel_name: panel.name,
           ext_key: key
@@ -2279,7 +2569,7 @@ async function pollSingleLoginPanel(panelId, force = false) {
     }
   } catch (err) {
     panel.last_run = new Date().toISOString();
-    const errorMsg = err.killed ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
+    const errorMsg = err.name === 'AbortError' ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
     panel.last_error = String(errorMsg).slice(0, 200);
   } finally {
     loginPanelsInFlight.delete(panelId);
@@ -2539,13 +2829,150 @@ function parseWhitenoiseWebSmsHtml(html) {
   return rows;
 }
 
+function normalizeWhitenoiseWebBaseUrl(rawUrl) {
+  let u = String(rawUrl || 'https://whitenoise.one').trim().replace(/\/+$/, '');
+  if (!u) u = 'https://whitenoise.one';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  // Prevent double /sms/sms if user enters https://whitenoise.one/sms
+  u = u.replace(/\/sms$/i, '');
+  return u;
+}
+
+function mergeCookieHeader(existingCookie, setCookieHeaders) {
+  const jar = new Map();
+  const addPair = (raw) => {
+    const first = String(raw || '').split(';')[0].trim();
+    const eq = first.indexOf('=');
+    if (eq > 0) {
+      const k = first.slice(0, eq).trim();
+      const v = first.slice(eq + 1).trim();
+      if (k) jar.set(k, v);
+    }
+  };
+  if (existingCookie) {
+    String(existingCookie).split(';').forEach(addPair);
+  }
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : (setCookieHeaders ? [setCookieHeaders] : []);
+  list.forEach(addPair);
+  return Array.from(jar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+function isWhitenoiseLoginHtml(html) {
+  if (!html || typeof html !== 'string') return false;
+  const hasPassInput = /<input[^>]+type=["']?password["']?[^>]*>/i.test(html) || /<input[^>]+name=["']?password["']?[^>]*>/i.test(html);
+  const hasEmailInput = /<input[^>]+name=["']?email["']?[^>]*>/i.test(html);
+  const isLoginTitle = /<title>\s*Login\s*<\/title>/i.test(html);
+  return (hasPassInput && hasEmailInput) || (isLoginTitle && hasPassInput);
+}
+
+async function loginWhitenoiseWebPanel(conn) {
+  const email = String(conn.web_email || '').trim();
+  const password = String(conn.web_password || '');
+  if (!email || !password) {
+    throw new Error('Whitenoise Web Login requires both email and password.');
+  }
+  const loginBase = normalizeWhitenoiseWebBaseUrl(conn.web_login_url || conn.web_url || 'https://whitenoise.one');
+  const loginEndpoint = String(conn.web_login_url || `${loginBase}/`).trim();
+  const ua = String(conn.user_agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+  const timeoutMs = Math.max(3000, Math.min(60000, parseInt(conn.timeout_ms, 10) || 15000));
+
+  // Step 1: GET login page to initialize APPSID cookie & extract any hidden fields
+  let cookieJar = String(conn.web_cookie || '').trim();
+  const hiddenFields = {};
+  let postTarget = loginEndpoint;
+  {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const getResp = await fetch(loginEndpoint, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          ...(cookieJar ? { Cookie: cookieJar } : {})
+        }
+      });
+      const sc = getResp.headers.getSetCookie ? getResp.headers.getSetCookie() : (getResp.headers.get('set-cookie') ? [getResp.headers.get('set-cookie')] : []);
+      cookieJar = mergeCookieHeader(cookieJar, sc);
+      const loginHtml = await getResp.text();
+      const formTag = loginHtml.match(/<form\b[^>]*>/i)?.[0] || '';
+      const act = formTag.match(/action=["']([^"']*)["']/i)?.[1] || '';
+      if (act) postTarget = new URL(act, loginEndpoint).toString();
+      const hiddenRe = /<input[^>]+type=["']?hidden["']?[^>]*>/gi;
+      let hm;
+      while ((hm = hiddenRe.exec(loginHtml)) !== null) {
+        const tag = hm[0];
+        const nm = tag.match(/name=["']([^"']+)["']/i)?.[1];
+        const val = tag.match(/value=["']([^"']*)["']/i)?.[1] ?? '';
+        if (nm) hiddenFields[nm] = val;
+      }
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  // Step 2: POST email + password form
+  const form = new URLSearchParams();
+  for (const [k, v] of Object.entries(hiddenFields)) form.append(k, v);
+  form.append('email', email);
+  form.append('password', password);
+
+  const ctrl2 = new AbortController();
+  const t2 = setTimeout(() => ctrl2.abort(), timeoutMs);
+  let postResp;
+  let postHtml = '';
+  try {
+    postResp = await fetch(postTarget, {
+      method: 'POST',
+      redirect: 'manual',
+      signal: ctrl2.signal,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': loginEndpoint,
+        'Origin': new URL(postTarget).origin,
+        ...(cookieJar ? { Cookie: cookieJar } : {})
+      },
+      body: form.toString()
+    });
+    const sc2 = postResp.headers.getSetCookie ? postResp.headers.getSetCookie() : (postResp.headers.get('set-cookie') ? [postResp.headers.get('set-cookie')] : []);
+    cookieJar = mergeCookieHeader(cookieJar, sc2);
+    postHtml = await postResp.text();
+  } finally {
+    clearTimeout(t2);
+  }
+
+  const loc = postResp.headers.get('location') || '';
+  if (postResp.status >= 400 || /incorrect username or password/i.test(postHtml) || (!loc && isWhitenoiseLoginHtml(postHtml))) {
+    throw new Error('Whitenoise web login rejected — check your Whitenoise email and password.');
+  }
+
+  // Persist refreshed session cookie on connection record
+  conn.web_cookie = cookieJar;
+  if (conn.id != null) {
+    const allConns = readDb('whitenoise_connections') || [];
+    const idx = allConns.findIndex(c => Number(c.id) === Number(conn.id));
+    if (idx !== -1) {
+      allConns[idx].web_cookie = cookieJar;
+      writeDb('whitenoise_connections', allConns);
+    }
+  }
+  return cookieJar;
+}
+
 async function callWhitenoiseApi(conn, endpointPath, payload = {}, method = 'POST') {
   const baseUrl = String(conn.base_url || 'https://api.whitenoise.one').trim().replace(/\/+$/, '');
   const fullPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
-  const reqBody = { api_key: String(conn.api_key || '').trim(), ...payload };
+  const apiKey = String(conn.api_key || '').trim();
+  const reqBody = { api_key: apiKey, ...payload };
+  const timeoutMs = Math.max(3000, Math.min(60000, parseInt(conn.timeout_ms, 10) || 15000));
+  const ua = String(conn.user_agent || 'HUMEX-SMS-Whitenoise/1.0');
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     let targetUrl = `${baseUrl}${fullPath}`;
     const opts = {
@@ -2553,7 +2980,8 @@ async function callWhitenoiseApi(conn, endpointPath, payload = {}, method = 'POS
       signal: controller.signal,
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'HUMEX-SMS-Whitenoise/1.0'
+        'User-Agent': ua,
+        ...(apiKey ? { 'X-Api-Key': apiKey } : {})
       }
     };
     if (opts.method === 'GET') {
@@ -2572,7 +3000,10 @@ async function callWhitenoiseApi(conn, endpointPath, payload = {}, method = 'POS
     let json = {};
     try { json = JSON.parse(rawText); } catch (_) { json = { raw: rawText }; }
     if (!resp.ok || (json && json.status && String(json.status).toLowerCase() !== 'ok')) {
-      const errMsg = (json && (json.error || json.message || json.detail)) || `HTTP ${resp.status}`;
+      let errMsg = (json && (json.error || json.message || json.detail)) || `HTTP ${resp.status}`;
+      if (resp.status === 403 && /permission|access|forbidden/i.test(String(errMsg))) {
+        errMsg = `${errMsg} (Check API Key & whitelist this server IP in Whitenoise API settings, or switch to Web Panel Login mode.)`;
+      }
       const err = new Error(String(errMsg));
       err.httpStatus = resp.status;
       throw err;
@@ -2664,40 +3095,43 @@ async function fetchWhitenoiseSinglePhone(conn, rawPhone, opts = {}) {
   const ordered = [...rawRows].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
   const newEntries = [];
   let conversions = 0;
+  const shouldIngest = opts.ingest !== false;
 
-  for (const row of ordered) {
-    if (!row || !row.text) continue;
-    const wnId = row.id != null ? String(row.id) : md5(`${row.dst || formattedPhone}|${row.time || ''}|${row.text}`).slice(0, 16);
-    const extKey = `wn-${conn.id}-${wnId}`;
-    const targetDst = formatWhitenoisePhone(row.dst || formattedPhone);
-    const ingestRes = ingestSms({
-      sender: row.src || row.service_name || 'Whitenoise',
-      to_number: targetDst,
-      message: row.text,
-      sms_id: wnId,
-      company: conn.name || 'Whitenoise',
-      provider: conn.provider_tag || conn.name || 'Whitenoise',
-      country: row.country || '',
-      source: 'whitenoise',
-      panel_id: conn.id,
-      panel_name: conn.name || 'Whitenoise',
-      ext_key: extKey,
-      timestamp: row.time || new Date().toISOString(),
-      whitenoise_sms_id: row.id != null ? Number(row.id) : null
-    });
+  if (shouldIngest) {
+    for (const row of ordered) {
+      if (!row || !row.text) continue;
+      const wnId = row.id != null ? String(row.id) : md5(`${row.dst || formattedPhone}|${row.time || ''}|${row.text}`).slice(0, 16);
+      const extKey = `wn-${conn.id}-${wnId}`;
+      const targetDst = formatWhitenoisePhone(row.dst || formattedPhone);
+      const ingestRes = ingestSms({
+        sender: row.src || row.service_name || 'Whitenoise',
+        to_number: targetDst,
+        message: row.text,
+        sms_id: wnId,
+        company: conn.name || 'Whitenoise',
+        provider: conn.provider_tag || conn.name || 'Whitenoise',
+        country: row.country || '',
+        source: 'whitenoise',
+        panel_id: conn.id,
+        panel_name: conn.name || 'Whitenoise',
+        ext_key: extKey,
+        timestamp: row.time || new Date().toISOString(),
+        whitenoise_sms_id: row.id != null ? Number(row.id) : null
+      });
 
-    if (ingestRes && ingestRes.logged && ingestRes.entry) {
-      newEntries.push(ingestRes.entry);
-      const convMode = String(conn.conversion_mode || 'on_client_match').toLowerCase();
-      const shouldConvert = convMode === 'always' || (convMode === 'on_client_match' && ingestRes.entry.client_id != null);
-      if (shouldConvert && row.id != null && !isNaN(Number(row.id))) {
-        conversions++;
-        sendWhitenoiseConversionNonBlocking(conn, {
-          smsId: row.id,
-          phone: targetDst,
-          serviceName: row.service_name || svc || '',
-          logEntryId: ingestRes.entry.id
-        });
+      if (ingestRes && ingestRes.logged && ingestRes.entry) {
+        newEntries.push(ingestRes.entry);
+        const convMode = String(conn.conversion_mode || 'on_client_match').toLowerCase();
+        const shouldConvert = convMode === 'always' || (convMode === 'on_client_match' && ingestRes.entry.client_id != null);
+        if (shouldConvert && row.id != null && !isNaN(Number(row.id))) {
+          conversions++;
+          sendWhitenoiseConversionNonBlocking(conn, {
+            smsId: row.id,
+            phone: targetDst,
+            serviceName: row.service_name || svc || '',
+            logEntryId: ingestRes.entry.id
+          });
+        }
       }
     }
   }
@@ -2718,76 +3152,115 @@ function formatWhitenoiseWebTime(dateObj) {
   return `${dateObj.getUTCFullYear()}-${pad(dateObj.getUTCMonth() + 1)}-${pad(dateObj.getUTCDate())}.${pad(dateObj.getUTCHours())}.${pad(dateObj.getUTCMinutes())}`;
 }
 
-async function pollWhitenoiseWebFeed(conn) {
-  if (!conn.web_url || !conn.web_cookie) {
-    throw new Error('Mode B hybrid feed requires web_url and web_cookie');
+async function pollWhitenoiseWebFeed(conn, opts = {}) {
+  const hasWebLogin = Boolean(conn.web_email && conn.web_password);
+  if (!conn.web_cookie && !hasWebLogin) {
+    throw new Error('Whitenoise Web Feed requires Email + Password or an APPSID Session Cookie.');
   }
-  const baseWeb = String(conn.web_url).trim().replace(/\/+$/, '');
+  const baseWeb = normalizeWhitenoiseWebBaseUrl(conn.web_login_url || conn.web_url || 'https://whitenoise.one');
+  const smsBaseUrl = String(conn.web_sms_url || `${baseWeb}/sms`).trim().replace(/\/+$/, '');
   const now = new Date();
-  const windowMin = Math.max(5, parseInt(conn.web_window_minutes, 10) || 30);
+  const windowMin = Math.max(5, parseInt(opts.windowMinutes ?? conn.web_window_minutes, 10) || 180);
   const startDt = new Date(now.getTime() - windowMin * 60000);
-  const targetUrl = `${baseWeb}/sms?sms_time_start=${encodeURIComponent(formatWhitenoiseWebTime(startDt))}&sms_time_end=${encodeURIComponent(formatWhitenoiseWebTime(now))}&order=id:desc`;
+  const windowedUrl = smsBaseUrl.includes('?')
+    ? smsBaseUrl
+    : `${smsBaseUrl}?sms_time_start=${encodeURIComponent(formatWhitenoiseWebTime(startDt))}&sms_time_end=${encodeURIComponent(formatWhitenoiseWebTime(now))}&order=id:desc`;
+  const timeoutMs = Math.max(3000, Math.min(60000, parseInt(conn.timeout_ms, 10) || 20000));
+  const ua = String(conn.user_agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-  let html = '';
-  try {
-    const resp = await fetch(targetUrl, {
-      signal: controller.signal,
-      headers: {
-        'Cookie': String(conn.web_cookie).trim(),
-        'User-Agent': 'Mozilla/5.0 HUMEX-SMS/1.0',
-        'Accept': 'text/html,application/xhtml+xml'
-      }
-    });
-    if (!resp.ok) throw new Error(`Web feed HTTP ${resp.status}`);
-    html = await resp.text();
-  } finally {
-    clearTimeout(timeout);
+  if (!conn.web_cookie && hasWebLogin) {
+    await loginWhitenoiseWebPanel(conn);
   }
 
-  const parsedRows = parseWhitenoiseWebSmsHtml(html);
+  const fetchSmsHtml = async (urlToHit) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(urlToHit, {
+        signal: controller.signal,
+        redirect: 'manual',
+        headers: {
+          'Cookie': String(conn.web_cookie || '').trim(),
+          'User-Agent': ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Referer': `${baseWeb}/`
+        }
+      });
+      const text = await resp.text();
+      return { status: resp.status, location: resp.headers.get('location') || '', html: text };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  let resObj = await fetchSmsHtml(windowedUrl);
+  const needsReauth = resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html);
+  if (needsReauth) {
+    if (hasWebLogin) {
+      await loginWhitenoiseWebPanel(conn);
+      resObj = await fetchSmsHtml(windowedUrl);
+    }
+    if (resObj.status === 401 || resObj.status === 403 || (resObj.status >= 300 && resObj.status < 400) || isWhitenoiseLoginHtml(resObj.html)) {
+      throw new Error('Whitenoise web session expired or unauthorized — please verify Email/Password or paste a fresh APPSID cookie.');
+    }
+  }
+  if (resObj.status < 200 || resObj.status >= 300) {
+    throw new Error(`Web feed HTTP ${resObj.status}`);
+  }
+
+  let parsedRows = parseWhitenoiseWebSmsHtml(resObj.html);
+  // Fallback to bare /sms default page if time-filtered view returned 0 rows
+  if (parsedRows.length === 0 && windowedUrl !== smsBaseUrl) {
+    const bareRes = await fetchSmsHtml(smsBaseUrl);
+    if (bareRes.status >= 200 && bareRes.status < 300 && !isWhitenoiseLoginHtml(bareRes.html)) {
+      parsedRows = parseWhitenoiseWebSmsHtml(bareRes.html);
+    }
+  }
   const ordered = [...parsedRows].reverse();
+  const shouldIngest = opts.ingest !== false;
   let newCount = 0;
 
-  for (const row of ordered) {
-    const hashKey = md5(`${row.dst}|${row.src}|${row.time_received}|${row.text}`).slice(0, 16);
-    const extKey = `wn-web-${conn.id}-${hashKey}`;
-    const ingestRes = ingestSms({
-      sender: row.src || row.service_name || 'Whitenoise',
-      to_number: row.dst,
-      message: row.text,
-      sms_id: hashKey,
-      company: conn.name || 'Whitenoise',
-      provider: conn.provider_tag || conn.name || 'Whitenoise',
-      source: 'whitenoise',
-      panel_id: conn.id,
-      panel_name: conn.name || 'Whitenoise',
-      ext_key: extKey,
-      timestamp: row.time_received || row.time_sent
-    });
-    if (ingestRes && ingestRes.logged) {
-      newCount++;
-      // Optional conversion lookup if api_key is present & client-matched
-      if (conn.api_key && conn.conversion_mode !== 'off' && ingestRes.entry?.client_id != null) {
-        callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: row.dst, since: 120 }, 'POST')
-          .then(apiRes => {
-            const list = Array.isArray(apiRes && apiRes.sms) ? apiRes.sms : [];
-            const matched = list.find(x => x && String(x.text || '').trim() === String(row.text || '').trim());
-            if (matched && matched.id != null) {
-              sendWhitenoiseConversionNonBlocking(conn, {
-                smsId: matched.id,
-                phone: row.dst,
-                serviceName: matched.service_name || row.service_name || '',
-                logEntryId: ingestRes.entry.id
-              });
-            }
-          })
-          .catch(() => {});
+  if (shouldIngest) {
+    for (const row of ordered) {
+      if (opts.filterPhone && !phoneDigitsVariantsMatch(row.dst, opts.filterPhone)) continue;
+      const hashKey = md5(`${row.dst}|${row.src}|${row.time_received}|${row.text}`).slice(0, 16);
+      const extKey = `wn-web-${conn.id}-${hashKey}`;
+      const ingestRes = ingestSms({
+        sender: row.src || row.service_name || 'Whitenoise',
+        to_number: row.dst,
+        message: row.text,
+        sms_id: hashKey,
+        company: conn.name || 'Whitenoise',
+        provider: conn.provider_tag || conn.name || 'Whitenoise',
+        source: 'whitenoise',
+        panel_id: conn.id,
+        panel_name: conn.name || 'Whitenoise',
+        ext_key: extKey,
+        timestamp: row.time_received || row.time_sent
+      });
+      if (ingestRes && ingestRes.logged) {
+        newCount++;
+        // Optional conversion lookup if api_key is present & client-matched
+        if (conn.api_key && conn.conversion_mode !== 'off' && ingestRes.entry?.client_id != null) {
+          callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: row.dst, since: 120 }, 'POST')
+            .then(apiRes => {
+              const list = Array.isArray(apiRes && apiRes.sms) ? apiRes.sms : [];
+              const matched = list.find(x => x && String(x.text || '').trim() === String(row.text || '').trim());
+              if (matched && matched.id != null) {
+                sendWhitenoiseConversionNonBlocking(conn, {
+                  smsId: matched.id,
+                  phone: row.dst,
+                  serviceName: matched.service_name || row.service_name || '',
+                  logEntryId: ingestRes.entry.id
+                });
+              }
+            })
+            .catch(() => {});
+        }
       }
     }
   }
-  return { rows_parsed: parsedRows.length, new_sms: newCount };
+  return { rows_parsed: parsedRows.length, new_sms: newCount, rows: parsedRows };
 }
 
 function getNumbersForWhitenoiseConnection(conn, scopeFilter = {}) {
@@ -2830,16 +3303,22 @@ async function pollSingleWhitenoiseConnection(connId, force = false) {
   const conn = conns.find(c => Number(c.id) === Number(connId));
   if (!conn || (!force && !conn.active)) return 0;
   let pulled = 0;
+  let checkedCount = 0;
+  let conversionsCount = 0;
 
   try {
     const mode = String(conn.mode || 'api_key').toLowerCase();
+    const hasWebCreds = Boolean(conn.web_cookie || (conn.web_email && conn.web_password));
     let statusDetail = '';
-    if (mode === 'hybrid' && conn.web_url && conn.web_cookie) {
+
+    if ((mode === 'web_login' || mode === 'hybrid') && hasWebCreds) {
       const webRes = await pollWhitenoiseWebFeed(conn);
       pulled += webRes.new_sms;
+      checkedCount = webRes.rows_parsed || 0;
+      const modeTag = mode === 'web_login' ? 'Web Login' : 'Hybrid';
       statusDetail = webRes.new_sms > 0
-        ? `OK (Hybrid) — pulled ${webRes.new_sms} new from ${webRes.rows_parsed} web row(s)`
-        : `Active (Hybrid) — scanned ${webRes.rows_parsed} web row(s)`;
+        ? `OK (${modeTag}) — pulled ${webRes.new_sms} new from ${webRes.rows_parsed} web row(s)`
+        : `Active (${modeTag}) — scanned ${webRes.rows_parsed} web row(s)`;
     } else if (conn.api_key) {
       const wnNumbers = getNumbersForWhitenoiseConnection(conn);
       const nowMs = Date.now();
@@ -2861,13 +3340,13 @@ async function pollSingleWhitenoiseConnection(connId, force = false) {
           const d = String(numObj?.number || '').replace(/\D/g, '');
           if (!d) return false;
           const lastOd = whitenoiseOnDemandFetchedAt.get(`${conn.id}:${d}`) || 0;
-          return (nowMs - lastOd) < 180000; // Skip 3 min if recently manually fetched on-demand
+          return (nowMs - lastOd) < 180000;
         };
         const clientNums = wnNumbers.filter(n => Boolean(n.client_id) && !skipRecentOnDemand(n));
         const poolNums = wnNumbers.filter(n => !n.client_id && !skipRecentOnDemand(n));
 
         const clientIntervalMs = Math.max(30, parseInt(conn.client_interval_sec ?? conn.interval, 10) || 240) * 1000;
-        const poolIntervalMs = Math.max(60, parseInt(conn.pool_interval_sec, 10) || 540) * 1000; // ~9 min default safety sweep
+        const poolIntervalMs = Math.max(60, parseInt(conn.pool_interval_sec, 10) || 540) * 1000;
 
         const pickBatch = (list, cursorMap, cap) => {
           if (!list.length) return [];
@@ -2901,31 +3380,46 @@ async function pollSingleWhitenoiseConnection(connId, force = false) {
             since: conn.since || 600
           })
         );
+        let firstErr = '';
         for (const r of resList) {
+          if (r && r.error && !firstErr) firstErr = r.error;
+          if (r && r.checked !== false && !r.error) checkedCount++;
           if (r && r.new_sms) pulled += r.new_sms;
+          if (r && r.conversions) conversionsCount += r.conversions;
+        }
+        if (checkedCount === 0 && firstErr) {
+          throw new Error(firstErr);
         }
         statusDetail = pulled > 0
-          ? `OK — pulled ${pulled} new SMS across ${batch.length} number(s)`
-          : `Active — swept ${batch.length} number(s)`;
+          ? `OK — pulled ${pulled} new SMS across ${checkedCount} number(s)`
+          : (firstErr ? `Partial — swept ${checkedCount}/${batch.length} (${firstErr.slice(0, 90)})` : `Active — swept ${checkedCount} number(s)`);
+      } else if (force) {
+        statusDetail = 'Connected — No Whitenoise numbers assigned yet (add numbers under a Whitenoise range or use Test Number)';
       } else {
         statusDetail = conn.last_status || 'Idle (waiting for next paced sweep or on-demand fetch)';
       }
     } else {
-      statusDetail = 'Warning — Missing API Key or Web Cookie';
+      statusDetail = 'Warning — Missing API Key or Web Login / Session Cookie';
     }
 
     conn.last_pulled_at = new Date().toISOString();
     conn.last_status = statusDetail;
     conn.total_pulled = (conn.total_pulled || 0) + pulled;
+    conn.total_conversions = (conn.total_conversions || 0) + conversionsCount;
+    conn._last_checked = checkedCount;
+    conn._last_conversions = conversionsCount;
   } catch (err) {
     conn.last_pulled_at = new Date().toISOString();
-    conn.last_status = `Error — ${String(err.message).slice(0, 180)}`;
+    conn.last_status = `Error — ${String(err.message).slice(0, 220)}`;
+    conn._last_checked = checkedCount;
+    conn._last_conversions = conversionsCount;
   }
 
   const allConns = readDb('whitenoise_connections') || [];
   const idx = allConns.findIndex(c => Number(c.id) === Number(connId));
   if (idx !== -1) {
-    allConns[idx] = conn;
+    const { _last_checked, _last_conversions, ...persistable } = conn;
+    allConns[idx] = persistable;
     writeDb('whitenoise_connections', allConns);
   }
   return pulled;
@@ -4178,7 +4672,7 @@ const API_RULES = [
 ];
 // Client is default-deny: only these routes exist for them.
 const CLIENT_ALLOW = [
-  { p: /^\/(auth|user|account|notifications|support-tickets)(\/|$)/ },
+  { p: /^\/(auth|user|account|notifications|support-tickets|chat)(\/|$)/ },
   { m: new Set(['GET']), p: /^\/(settings|announcements|payterms|monthly-cycle)(\/|$)/ },
   { m: new Set(['GET']), p: /^\/numbers$/ },
   { m: new Set(['GET']), p: /^\/numbers\/sms-ranges$/ },
@@ -12730,6 +13224,62 @@ app.delete('/api/cr-api-connections/:id', (req, res) => {
 });
 
 // Whitenoise Connections (Owner only via API_RULES)
+let _cachedOutboundIp = { ip: '', fetchedAt: 0 };
+app.get('/api/whitenoise-connections/server-ip', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (_cachedOutboundIp.ip && (now - _cachedOutboundIp.fetchedAt) < 300000) {
+      return res.json({ success: true, ip: _cachedOutboundIp.ip });
+    }
+    const providers = ['https://api.ipify.org?format=json', 'https://ifconfig.me/ip'];
+    let foundIp = '';
+    for (const u of providers) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const r = await fetch(u, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (r.ok) {
+          const txt = (await r.text()).trim();
+          try { foundIp = JSON.parse(txt).ip || ''; } catch (_) { foundIp = txt.split(/\s+/)[0]; }
+          if (foundIp) break;
+        }
+      } catch (_) {}
+    }
+    if (foundIp) _cachedOutboundIp = { ip: foundIp, fetchedAt: now };
+    res.json({ success: Boolean(foundIp), ip: foundIp || '' });
+  } catch (err) {
+    res.json({ success: false, ip: '', error: err.message });
+  }
+});
+
+function sanitizeWhitenoiseConnectionForResponse(c, matchedCount = 0) {
+  const ak = String(c.api_key || '').trim();
+  const maskedKey = ak.length > 6 ? `${ak.slice(0, 3)}••••••${ak.slice(-3)}` : (ak ? '••••••' : '—');
+  const maskedCookie = (c.web_cookie && c.web_cookie.length > 6)
+    ? `${c.web_cookie.slice(0, 4)}••••${c.web_cookie.slice(-4)}`
+    : (c.web_cookie ? '••••••' : 'None');
+  const { api_key: _ak, web_cookie: _wc, web_password: _wp, ...safeRest } = c;
+  return {
+    ...safeRest,
+    panel_name: c.panel_name || c.name || 'Whitenoise Main',
+    web_url: normalizeWhitenoiseWebBaseUrl(c.web_login_url || c.web_url || 'https://whitenoise.one'),
+    web_login_url: normalizeWhitenoiseWebBaseUrl(c.web_login_url || c.web_url || 'https://whitenoise.one'),
+    web_sms_url: String(c.web_sms_url || `${normalizeWhitenoiseWebBaseUrl(c.web_login_url || c.web_url || 'https://whitenoise.one')}/sms`).trim(),
+    web_email: c.web_email || '',
+    has_web_password: Boolean(c.web_password),
+    poll_interval_sec: c.interval || c.poll_interval_sec || 240,
+    pool_interval_sec: c.pool_interval_sec || 540,
+    timeout_ms: Number(c.timeout_ms || 15000),
+    user_agent: c.user_agent || '',
+    api_key_masked: maskedKey,
+    cookie_masked: maskedCookie,
+    has_api_key: Boolean(c.api_key),
+    has_web_cookie: Boolean(c.web_cookie),
+    numbers_count: matchedCount
+  };
+}
+
 app.get('/api/whitenoise-connections', (req, res) => {
   const data = readDb('whitenoise_connections') || [];
   const numbers = readDb('numbers') || [];
@@ -12743,23 +13293,7 @@ app.get('/api/whitenoise-connections', (req, res) => {
       const p = String(n.provider || '').toLowerCase();
       return !tag || p.includes(tag) || p.includes('whitenoise');
     }).length;
-    const ak = String(c.api_key || '').trim();
-    const maskedKey = ak.length > 6 ? `${ak.slice(0, 3)}••••••${ak.slice(-3)}` : (ak ? '••••••' : '—');
-    const maskedCookie = (c.web_cookie && c.web_cookie.length > 6)
-      ? `${c.web_cookie.slice(0, 4)}••••${c.web_cookie.slice(-4)}`
-      : (c.web_cookie ? '••••••' : 'None');
-    const { api_key: _ak, web_cookie: _wc, ...safeRest } = c;
-    return {
-      ...safeRest,
-      panel_name: c.panel_name || c.name || 'Whitenoise Main',
-      poll_interval_sec: c.interval || c.poll_interval_sec || 240,
-      pool_interval_sec: c.pool_interval_sec || 540,
-      api_key_masked: maskedKey,
-      cookie_masked: maskedCookie,
-      has_api_key: Boolean(c.api_key),
-      has_web_cookie: Boolean(c.web_cookie),
-      numbers_count: matchedCount
-    };
+    return sanitizeWhitenoiseConnectionForResponse(c, matchedCount);
   });
 
   if (req.query.page) {
@@ -12775,18 +13309,25 @@ app.post('/api/whitenoise-connections', (req, res) => {
   const body = req.body || {};
   const data = readDb('whitenoise_connections') || [];
   const name = String(body.name || body.panel_name || 'Whitenoise Provider').trim();
-  const mode = String(body.mode || 'api_key').trim().toLowerCase() === 'hybrid' ? 'hybrid' : 'api_key';
+  const rawMode = String(body.mode || 'hybrid').trim().toLowerCase();
+  const mode = ['hybrid', 'web_login', 'api_key'].includes(rawMode) ? rawMode : 'api_key';
   const apiKey = String(body.api_key || '').trim();
   const webCookie = String(body.web_cookie || body.cookie || '').trim();
+  const webEmail = String(body.web_email || body.email || '').trim();
+  const webPassword = String(body.web_password || body.password || '');
   const baseUrl = String(body.base_url || 'https://api.whitenoise.one').trim().replace(/\/+$/, '');
-  const webUrl = String(body.web_url || 'https://whitenoise.one/sms').trim().replace(/\/+$/, '');
+  const webUrl = normalizeWhitenoiseWebBaseUrl(body.web_login_url || body.web_url || 'https://whitenoise.one');
+  const webSmsUrl = String(body.web_sms_url || `${webUrl}/sms`).trim().replace(/\/+$/, '');
   const providerTag = String(body.provider_tag || 'Whitenoise').trim() || 'Whitenoise';
 
   if (mode === 'api_key' && apiKey.length < 6) {
-    return res.status(400).json({ error: 'Valid Whitenoise api_key (12 chars) is required for API Key mode.' });
+    return res.status(400).json({ error: 'Valid Whitenoise API Key is required for API Key mode.' });
   }
-  if (mode === 'hybrid' && !webCookie && apiKey.length < 6) {
-    return res.status(400).json({ error: 'Hybrid mode requires a Web Session Cookie (web_cookie) and/or api_key.' });
+  if (mode === 'web_login' && !webCookie && !(webEmail && webPassword)) {
+    return res.status(400).json({ error: 'Web Panel Login mode requires Whitenoise Email + Password or an APPSID Session Cookie.' });
+  }
+  if (mode === 'hybrid' && !webCookie && !(webEmail && webPassword) && apiKey.length < 6) {
+    return res.status(400).json({ error: 'Hybrid mode requires Email + Password, an APPSID Cookie, and/or an API Key.' });
   }
 
   const dup = data.find(c =>
@@ -12801,6 +13342,7 @@ app.post('/api/whitenoise-connections', (req, res) => {
   const conversionMode = ['on_client_match', 'always', 'off'].includes(convModeRaw) ? convModeRaw : 'on_client_match';
   const effInterval = Math.max(5, parseInt(body.interval ?? body.poll_interval_sec, 10) || 240);
   const effPoolInterval = Math.max(60, parseInt(body.pool_interval_sec, 10) || 540);
+  const timeoutMs = Math.max(3000, Math.min(60000, parseInt(body.timeout_ms, 10) || 15000));
 
   const item = {
     id: nextId(data),
@@ -12809,14 +13351,20 @@ app.post('/api/whitenoise-connections', (req, res) => {
     mode,
     api_key: apiKey,
     web_cookie: webCookie,
+    web_email: webEmail,
+    web_password: webPassword,
     base_url: baseUrl,
     web_url: webUrl,
+    web_login_url: webUrl,
+    web_sms_url: webSmsUrl,
     provider_tag: providerTag,
     service_name: String(body.service_name || '').trim(),
     interval: effInterval,
     poll_interval_sec: effInterval,
     client_interval_sec: Math.max(10, parseInt(body.client_interval_sec, 10) || effInterval),
     pool_interval_sec: effPoolInterval,
+    timeout_ms: timeoutMs,
+    user_agent: String(body.user_agent || '').trim(),
     concurrency: Math.min(10, Math.max(1, parseInt(body.concurrency, 10) || 4)),
     max_numbers_per_cycle: Math.min(200, Math.max(1, parseInt(body.max_numbers_per_cycle, 10) || 20)),
     since: Math.max(60, parseInt(body.since, 10) || 600),
@@ -12833,14 +13381,7 @@ app.post('/api/whitenoise-connections', (req, res) => {
   writeDb('whitenoise_connections', data);
   logAudit(req.sessionUser?.username || 'Owner', 'Add Whitenoise Connection', `Added Whitenoise '${item.name}' (${item.mode}, Monthly 30/5 {W})`, 'Whitenoise');
 
-  const { api_key: _ak, web_cookie: _wc, ...safeItem } = item;
-  res.json({
-    ...safeItem,
-    api_key_masked: apiKey ? `${apiKey.slice(0, 3)}••••••${apiKey.slice(-3)}` : '—',
-    has_api_key: Boolean(apiKey),
-    has_web_cookie: Boolean(webCookie),
-    numbers_count: 0
-  });
+  res.json(sanitizeWhitenoiseConnectionForResponse(item, 0));
 });
 
 app.patch('/api/whitenoise-connections/:id', (req, res) => {
@@ -12855,12 +13396,28 @@ app.patch('/api/whitenoise-connections/:id', (req, res) => {
     const nm = String(body.name ?? body.panel_name ?? '').trim();
     if (nm) { next.name = nm; next.panel_name = nm; }
   }
-  if (body.mode !== undefined) next.mode = String(body.mode).trim().toLowerCase() === 'hybrid' ? 'hybrid' : 'api_key';
+  if (body.mode !== undefined) {
+    const rm = String(body.mode).trim().toLowerCase();
+    if (['hybrid', 'web_login', 'api_key'].includes(rm)) next.mode = rm;
+  }
   if (body.api_key !== undefined && String(body.api_key).trim()) next.api_key = String(body.api_key).trim();
   const rawCk = body.web_cookie ?? body.cookie;
   if (rawCk !== undefined && String(rawCk).trim()) next.web_cookie = String(rawCk).trim();
+  const rawEmail = body.web_email ?? body.email;
+  if (rawEmail !== undefined) next.web_email = String(rawEmail).trim();
+  const rawPass = body.web_password ?? body.password;
+  if (rawPass !== undefined && String(rawPass).length > 0) next.web_password = String(rawPass);
   if (body.base_url !== undefined && String(body.base_url).trim()) next.base_url = String(body.base_url).trim().replace(/\/+$/, '');
-  if (body.web_url !== undefined && String(body.web_url).trim()) next.web_url = String(body.web_url).trim().replace(/\/+$/, '');
+  if (body.web_login_url !== undefined && String(body.web_login_url).trim()) {
+    next.web_login_url = normalizeWhitenoiseWebBaseUrl(body.web_login_url);
+    next.web_url = next.web_login_url;
+  } else if (body.web_url !== undefined && String(body.web_url).trim()) {
+    next.web_url = normalizeWhitenoiseWebBaseUrl(body.web_url);
+    next.web_login_url = next.web_url;
+  }
+  if (body.web_sms_url !== undefined && String(body.web_sms_url).trim()) {
+    next.web_sms_url = String(body.web_sms_url).trim().replace(/\/+$/, '');
+  }
   if (body.provider_tag !== undefined && String(body.provider_tag).trim()) next.provider_tag = String(body.provider_tag).trim();
   if (body.service_name !== undefined) next.service_name = String(body.service_name).trim();
   if (body.interval !== undefined || body.poll_interval_sec !== undefined) {
@@ -12871,6 +13428,12 @@ app.patch('/api/whitenoise-connections/:id', (req, res) => {
   }
   if (body.pool_interval_sec !== undefined) {
     next.pool_interval_sec = Math.max(60, parseInt(body.pool_interval_sec, 10) || 540);
+  }
+  if (body.timeout_ms !== undefined) {
+    next.timeout_ms = Math.max(3000, Math.min(60000, parseInt(body.timeout_ms, 10) || 15000));
+  }
+  if (body.user_agent !== undefined) {
+    next.user_agent = String(body.user_agent || '').trim();
   }
   if (body.concurrency !== undefined) next.concurrency = Math.min(10, Math.max(1, parseInt(body.concurrency, 10) || 4));
   if (body.max_numbers_per_cycle !== undefined) next.max_numbers_per_cycle = Math.min(200, Math.max(1, parseInt(body.max_numbers_per_cycle, 10) || 20));
@@ -12883,13 +13446,7 @@ app.patch('/api/whitenoise-connections/:id', (req, res) => {
 
   data[idx] = next;
   writeDb('whitenoise_connections', data);
-  const { api_key: _ak, web_cookie: _wc, ...safe } = next;
-  res.json({
-    ...safe,
-    api_key_masked: next.api_key ? `${next.api_key.slice(0, 3)}••••••${next.api_key.slice(-3)}` : '—',
-    has_api_key: Boolean(next.api_key),
-    has_web_cookie: Boolean(next.web_cookie)
-  });
+  res.json(sanitizeWhitenoiseConnectionForResponse(next));
 });
 
 app.delete('/api/whitenoise-connections/:id', (req, res) => {
@@ -12898,6 +13455,71 @@ app.delete('/api/whitenoise-connections/:id', (req, res) => {
   writeDb('whitenoise_connections', data.filter(x => Number(x.id) !== id));
   logAudit(req.sessionUser?.username || 'Owner', 'Delete Whitenoise Connection', `Deleted Whitenoise connection #${id}`, 'Whitenoise');
   res.json({ success: true });
+});
+
+app.post('/api/whitenoise-connections/:id/test-connection', async (req, res) => {
+  const id = Number(req.params.id);
+  const conns = readDb('whitenoise_connections') || [];
+  const conn = conns.find(c => Number(c.id) === id);
+  if (!conn) return res.status(404).json({ error: 'Whitenoise connection not found' });
+
+  const checks = [];
+  let webOk = false;
+  let apiOk = false;
+  const hasWebCreds = Boolean(conn.web_cookie || (conn.web_email && conn.web_password));
+
+  if (hasWebCreds) {
+    try {
+      const webRes = await pollWhitenoiseWebFeed(conn, { ingest: false, windowMinutes: 60 });
+      webOk = true;
+      checks.push({ channel: 'web_panel', ok: true, detail: `Connected to ${normalizeWhitenoiseWebBaseUrl(conn.web_url)}/sms — parsed ${webRes.rows_parsed} recent SMS row(s).` });
+    } catch (err) {
+      checks.push({ channel: 'web_panel', ok: false, detail: err.message });
+    }
+  }
+
+  if (conn.api_key) {
+    const wnNums = getNumbersForWhitenoiseConnection(conn);
+    const chosenPhone = req.body?.phone || (wnNums[0] && wnNums[0].number) || '';
+    if (!chosenPhone) {
+      apiOk = true;
+      checks.push({
+        channel: 'api_key',
+        ok: true,
+        detail: 'API Key saved. Click "Test" and enter a real Whitenoise API-project phone number to verify live (Whitenoise returns 403 for unassigned numbers).'
+      });
+    } else {
+      const samplePhone = formatWhitenoisePhone(chosenPhone);
+      try {
+        const apiRes = await callWhitenoiseApi(conn, '/sms/get-phone-last-sms', { phone: samplePhone, since: 600 }, 'POST');
+        apiOk = true;
+        const cnt = Array.isArray(apiRes?.sms) ? apiRes.sms.length : 0;
+        checks.push({ channel: 'api_key', ok: true, detail: `API reachable (${conn.base_url || 'https://api.whitenoise.one'}) — status OK (${cnt} SMS for ${samplePhone}).` });
+      } catch (err) {
+        checks.push({ channel: 'api_key', ok: false, detail: err.message });
+      }
+    }
+  }
+
+  if (!checks.length) {
+    return res.status(400).json({ success: false, error: 'No credentials configured. Add Whitenoise Email/Password, APPSID Cookie, or API Key.', checks });
+  }
+
+  const overallOk = webOk || apiOk;
+  conn.last_status = overallOk
+    ? `Verified (${[webOk ? 'Web OK' : '', apiOk ? 'API OK' : ''].filter(Boolean).join(' + ')})`
+    : `Error — ${checks[0].detail.slice(0, 180)}`;
+  const all = readDb('whitenoise_connections') || [];
+  const idx = all.findIndex(c => Number(c.id) === id);
+  if (idx !== -1) { all[idx] = conn; writeDb('whitenoise_connections', all); }
+
+  res.status(overallOk ? 200 : 502).json({
+    success: overallOk,
+    web_ok: webOk,
+    api_ok: apiOk,
+    checks,
+    error: overallOk ? undefined : checks.map(c => `${c.channel}: ${c.detail}`).join(' | ')
+  });
 });
 
 app.post('/api/whitenoise-connections/:id/test-number', async (req, res) => {
@@ -12909,27 +13531,64 @@ app.post('/api/whitenoise-connections/:id/test-number', async (req, res) => {
   if (!phone || phone.length < 6) {
     return res.status(400).json({ error: 'Valid phone number is required to test Whitenoise.' });
   }
-  if (!conn.api_key) {
-    return res.status(400).json({ error: 'Connection does not have an api_key configured for single-number lookup.' });
+  const shouldIngest = req.body?.ingest !== false;
+  const hasWebCreds = Boolean(conn.web_cookie || (conn.web_email && conn.web_password));
+  const mapDisplayRows = (rows) => (rows || []).map(r => ({
+    ...r,
+    cli: r.src || r.service_name || r.cli || 'Whitenoise',
+    sender: r.src || r.service_name || r.sender || 'Whitenoise',
+    message: r.text || r.message || '',
+    timestamp: r.time || r.time_received || r.time_sent || r.timestamp || ''
+  }));
+
+  if (!conn.api_key && !hasWebCreds) {
+    return res.status(400).json({ error: 'Connection needs an API Key or Web Panel Login (Email/Password or APPSID Cookie).' });
   }
+
+  let apiErr = null;
+  if (conn.api_key && String(conn.mode || '').toLowerCase() !== 'web_login') {
+    try {
+      const result = await fetchWhitenoiseSinglePhone(conn, phone, {
+        bypassCooldown: true,
+        onDemand: true,
+        includeCount: true,
+        ingest: shouldIngest,
+        since: parseInt(req.body?.since, 10) || conn.since || 600,
+        service_name: req.body?.service_name || conn.service_name || ''
+      });
+      return res.json({
+        success: true,
+        phone,
+        source: 'whitenoise',
+        ingested: result.new_sms || 0,
+        messages: mapDisplayRows(result.latest_sms || []),
+        ...result
+      });
+    } catch (err) {
+      apiErr = err;
+      if (!hasWebCreds) {
+        return res.status(502).json({ success: false, error: err.message });
+      }
+    }
+  }
+
+  // Fallback or primary Web Panel Feed test for web_login / hybrid
   try {
-    const result = await fetchWhitenoiseSinglePhone(conn, phone, {
-      bypassCooldown: true,
-      onDemand: true,
-      includeCount: true,
-      since: parseInt(req.body?.since, 10) || conn.since || 600,
-      service_name: req.body?.service_name || conn.service_name || ''
-    });
-    res.json({
+    const webRes = await pollWhitenoiseWebFeed(conn, { ingest: shouldIngest, filterPhone: phone, windowMinutes: 120 });
+    const matched = (webRes.rows || []).filter(r => phoneDigitsVariantsMatch(r.dst, phone));
+    return res.json({
       success: true,
       phone,
-      source: 'whitenoise',
-      ingested: result.new_sms || 0,
-      messages: result.latest_sms || [],
-      ...result
+      source: apiErr ? 'whitenoise_web_fallback' : 'whitenoise_web',
+      api_warning: apiErr ? apiErr.message : undefined,
+      ingested: webRes.new_sms || 0,
+      new_sms: webRes.new_sms || 0,
+      fetched_count: matched.length,
+      messages: mapDisplayRows(matched)
     });
-  } catch (err) {
-    res.status(502).json({ success: false, error: err.message });
+  } catch (webErr) {
+    const combined = apiErr ? `API: ${apiErr.message} | Web: ${webErr.message}` : webErr.message;
+    return res.status(502).json({ success: false, error: combined });
   }
 });
 
@@ -12941,7 +13600,17 @@ app.post('/api/whitenoise-connections/:id/pull', async (req, res) => {
   try {
     const pulled = await pollSingleWhitenoiseConnection(id, true);
     const updated = (readDb('whitenoise_connections') || []).find(c => Number(c.id) === id);
-    res.json({ success: true, pulled: pulled || 0, status: updated?.last_status || 'OK', total_pulled: updated?.total_pulled || 0 });
+    const st = String(updated?.last_status || 'OK');
+    const isErr = st.startsWith('Error') || st.startsWith('Warning');
+    res.json({
+      success: !isErr,
+      error: isErr ? st : undefined,
+      pulled: pulled || 0,
+      checked: pulled || 0,
+      conversions: 0,
+      status: st,
+      total_pulled: updated?.total_pulled || 0
+    });
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -13002,8 +13671,10 @@ app.patch('/api/login-panels/:id', (req, res) => {
   const idx = panels.findIndex(p => p.id === id);
   if (idx === -1) return res.status(404).json({ error: 'Login panel not found' });
   const updates = { ...req.body };
-  if (updates.interval) updates.interval = Math.max(10, parseInt(updates.interval) || 20);
+  if (updates.password === '' || updates.password == null) delete updates.password;
+  if (updates.interval) updates.interval = Math.max(5, parseInt(updates.interval) || 10);
   panels[idx] = { ...panels[idx], ...updates };
+  loginPanelCookieCache.delete(id);
   writeDb('login_panels', panels);
   const { password: _, ...safe } = panels[idx];
   res.json({ ...safe, has_password: Boolean(panels[idx].password) });
@@ -13012,6 +13683,7 @@ app.patch('/api/login-panels/:id', (req, res) => {
 app.delete('/api/login-panels/:id', (req, res) => {
   const panels = readDb('login_panels') || [];
   const id = Number(req.params.id);
+  loginPanelCookieCache.delete(id);
   writeDb('login_panels', panels.filter(p => p.id !== id));
   logAudit('Admin', 'Delete Login Panel', `Deleted panel #${id}`, 'Login Panel');
   res.json({ success: true });
@@ -13047,15 +13719,16 @@ app.post('/api/login-panels/:id/test', async (req, res) => {
   const panel = panels.find(p => p.id === id);
   if (!panel) return res.status(404).json({ error: 'Login panel not found' });
   try {
-    const scraperScript = path.join(HUMEX_DIR, 'panel_scraper.py');
-    if (!fs.existsSync(scraperScript)) {
-      return res.json({ success: false, error: 'Scraper engine not installed' });
-    }
-    const { stdout } = await execFileAsync('python3', [scraperScript, 'test', JSON.stringify(panel)], { timeout: 60000 });
-    const result = JSON.parse(stdout || '{}');
-    res.json(result);
+    loginPanelCookieCache.delete(id); // force fresh login check on Test
+    const result = await runNodeLoginPanelScraper(panel);
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    res.json({
+      success: true,
+      rows: rows.length,
+      preview: rows.slice(0, 15)
+    });
   } catch (err) {
-    const errorMsg = err.killed ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
+    const errorMsg = err.name === 'AbortError' ? 'Connection timed out. Please try again.' : (err.message || 'Scraper failed');
     res.json({ success: false, error: errorMsg });
   }
 });
@@ -14390,8 +15063,8 @@ app.post('/api/cdr2/sync', requireAuth, async (req, res) => {
       batch = [{ number: formatWhitenoisePhone(rawNumInput) }];
     }
 
-    const apiConn = conns.find(c => c.api_key) || null;
-    const hybridWebConn = conns.find(c => c.mode === 'hybrid' && c.web_cookie);
+    const apiConn = conns.find(c => c.api_key && String(c.mode || '').toLowerCase() !== 'web_login') || null;
+    const hybridWebConn = conns.find(c => (c.mode === 'hybrid' || c.mode === 'web_login') && (c.web_cookie || (c.web_email && c.web_password)));
 
     let checked = 0;
     let skipped_cooldown = 0;
@@ -14399,11 +15072,12 @@ app.post('/api/cdr2/sync', requireAuth, async (req, res) => {
     let conversions = 0;
 
     if (hybridWebConn && !apiConn) {
-      const webRes = await pollWhitenoiseWebFeed(hybridWebConn);
+      const webRes = await pollWhitenoiseWebFeed(hybridWebConn, isTargetedFetch ? { filterPhone: rawNumInput } : {});
       new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
       conversions += Number(webRes?.conversions || 0);
+      checked += Number(webRes?.rows_parsed || 0);
     } else if (apiConn) {
-      if (hybridWebConn && hybridWebConn.web_cookie && !isTargetedFetch) {
+      if (hybridWebConn && !isTargetedFetch) {
         const webRes = await pollWhitenoiseWebFeed(hybridWebConn).catch(() => ({ new_sms: 0, conversions: 0 }));
         new_sms += Number(webRes?.new_sms || webRes?.ingested || 0);
         conversions += Number(webRes?.conversions || 0);
@@ -14474,22 +15148,39 @@ app.post('/api/numbers/:id/whitenoise-fetch', requireAuth, async (req, res) => {
       return res.status(400).json({ error: isOwner ? 'This number does not belong to a Whitenoise range.' : 'This number does not belong to CDR 2 Monthly Route.' });
     }
 
-    const conns = (readDb('whitenoise_connections') || []).filter(c => c && c.active !== false && c.api_key);
+    const conns = (readDb('whitenoise_connections') || []).filter(c => c && c.active !== false && (c.api_key || c.web_cookie || (c.web_email && c.web_password)));
     const provLow = String(n.provider || '').toLowerCase();
     const conn = conns.find(c => provLow && provLow.includes(String(c.provider_tag || 'whitenoise').toLowerCase())) || conns[0];
     if (!conn) {
-      return res.status(400).json({ error: isOwner ? 'No active Whitenoise API Key connection configured.' : 'Live fetch connection is not active.' });
+      return res.status(400).json({ error: isOwner ? 'No active Whitenoise connection configured.' : 'Live fetch connection is not active.' });
     }
 
-    const result = await fetchWhitenoiseSinglePhone(conn, n.number, {
-      bypassCooldown: true,
-      onDemand: true,
-      includeCount: true,
-      since: parseInt(req.body?.since, 10) || conn.since || 600,
-      service_name: req.body?.service_name || conn.service_name || ''
-    });
+    const hasWebCreds = Boolean(conn.web_cookie || (conn.web_email && conn.web_password));
+    if (conn.api_key && String(conn.mode || '').toLowerCase() !== 'web_login') {
+      try {
+        const result = await fetchWhitenoiseSinglePhone(conn, n.number, {
+          bypassCooldown: true,
+          onDemand: true,
+          includeCount: true,
+          since: parseInt(req.body?.since, 10) || conn.since || 600,
+          service_name: req.body?.service_name || conn.service_name || ''
+        });
+        return res.json({ success: true, number: n.number, ...result });
+      } catch (apiErr) {
+        if (!hasWebCreds) throw apiErr;
+      }
+    }
 
-    res.json({ success: true, number: n.number, ...result });
+    const webRes = await pollWhitenoiseWebFeed(conn, { ingest: true, filterPhone: n.number, windowMinutes: 120 });
+    const matched = (webRes.rows || []).filter(r => phoneDigitsVariantsMatch(r.dst, n.number));
+    res.json({
+      success: true,
+      number: n.number,
+      checked: true,
+      new_sms: webRes.new_sms || 0,
+      fetched_count: matched.length,
+      latest_sms: matched
+    });
   } catch (err) {
     res.status(502).json({ success: false, error: err.message });
   }
@@ -15422,6 +16113,804 @@ app.all(['/api/sms/inbound', '/api/inbound', '/api/sms/receive'], (req, res) => 
   res.json(result);
 });
 
+// ═══════════════════════════════════════════════════════════════
+// LIVE CHAT ENGINE (WhatsApp-Style, Strictly Role- & Tenant-Isolated)
+// - Owner <-> Agents (1-to-1 ONLY; zero access to Agent-Client chats/groups)
+// - Agent <-> Owner (1-to-1), Agent <-> Own Clients (1-to-1 & Admin Groups)
+// - Client <-> Assigned Agent (1-to-1) & Joined Agent Groups ONLY
+// - Tiered Alerts: Silent badge by default; Sound + Live Alert on Admin SMS
+// ═══════════════════════════════════════════════════════════════
+
+const CHAT_ONLINE_COUNTS = new Map(); // actor_key -> active WS connection count
+const CHAT_LAST_SEEN = new Map();     // actor_key -> ISO string
+
+function chatActorRole(role) {
+  const r = String(role || '').toLowerCase();
+  if (r === 'owner' || r === 'admin') return 'owner';
+  if (r === 'agent') return 'agent';
+  return 'client';
+}
+
+function chatActorKey(role, id) {
+  return `${chatActorRole(role)}:${Number(id)}`;
+}
+
+function isActorOnline(key) {
+  return (CHAT_ONLINE_COUNTS.get(key) || 0) > 0;
+}
+
+function resolveLiveChatActor(sessionUser) {
+  if (!sessionUser) return null;
+  const role = chatActorRole(sessionUser.role);
+  const id = Number(sessionUser.id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+
+  if (role === 'owner') {
+    const users = readDb('users') || [];
+    const rec = users.find(u => Number(u.id) === id) || sessionUser;
+    return {
+      key: `owner:${id}`,
+      role: 'owner',
+      id,
+      username: rec.username || sessionUser.username || 'Owner',
+      display_name: rec.name || rec.username || sessionUser.username || 'Owner',
+      agent_id: null
+    };
+  }
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    const rec = agents.find(a => Number(a.id) === id) || sessionUser;
+    return {
+      key: `agent:${id}`,
+      role: 'agent',
+      id,
+      username: rec.username || sessionUser.username || `Agent #${id}`,
+      display_name: rec.name || rec.username || sessionUser.username || `Agent #${id}`,
+      agent_id: id
+    };
+  }
+  // Client — authoritative lookup from clients table so agent_id is always current
+  const clients = readDb('clients') || [];
+  const rec = clients.find(c => Number(c.id) === id);
+  const agentId = rec ? Number(rec.agent_id || 0) : Number(sessionUser.agent_id || 0);
+  return {
+    key: `client:${id}`,
+    role: 'client',
+    id,
+    username: (rec && rec.username) || sessionUser.username || `Client #${id}`,
+    display_name: (rec && (rec.name || rec.username)) || sessionUser.username || `Client #${id}`,
+    agent_id: agentId > 0 ? agentId : null
+  };
+}
+
+function resolveActorSummaryByKey(actorKey) {
+  const [role, rawId] = String(actorKey || '').split(':');
+  const id = Number(rawId);
+  if (!role || !Number.isFinite(id)) return null;
+  if (role === 'owner') {
+    const users = readDb('users') || [];
+    const u = users.find(x => Number(x.id) === id);
+    if (!u) return { key: actorKey, role: 'owner', id, username: 'Owner', display_name: 'Owner', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    return { key: actorKey, role: 'owner', id, username: u.username || 'Owner', display_name: u.name || u.username || 'Owner', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+  }
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    const a = agents.find(x => Number(x.id) === id);
+    if (!a) return null;
+    return { key: actorKey, role: 'agent', id, username: a.username || `Agent #${id}`, display_name: a.name || a.username || `Agent #${id}`, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+  }
+  if (role === 'client') {
+    const clients = readDb('clients') || [];
+    const c = clients.find(x => Number(x.id) === id);
+    if (!c) return null;
+    return { key: actorKey, role: 'client', id, username: c.username || `Client #${id}`, display_name: c.name || c.username || `Client #${id}`, agent_id: Number(c.agent_id || 0) || null, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+  }
+  return null;
+}
+
+function getAllowedChatContacts(actor) {
+  if (!actor) return [];
+  const list = [];
+  if (actor.role === 'owner') {
+    const agents = (readDb('agents') || []).filter(a => a && a.status !== 'deleted');
+    for (const a of agents) {
+      const key = `agent:${Number(a.id)}`;
+      list.push({
+        key,
+        role: 'agent',
+        id: Number(a.id),
+        username: a.username || `Agent #${a.id}`,
+        display_name: a.name || a.username || `Agent #${a.id}`,
+        online: isActorOnline(key),
+        last_seen: CHAT_LAST_SEEN.get(key) || null
+      });
+    }
+    return list;
+  }
+
+  if (actor.role === 'agent') {
+    const users = readDb('users') || [];
+    const owners = users.filter(u => {
+      const r = String(u.role || '').toLowerCase();
+      return (r === 'owner' || r === 'admin') && u.status !== 'deleted';
+    });
+    for (const o of owners) {
+      const key = `owner:${Number(o.id)}`;
+      list.push({
+        key,
+        role: 'owner',
+        id: Number(o.id),
+        username: o.username || 'Owner',
+        display_name: o.name || o.username || 'Owner',
+        online: isActorOnline(key),
+        last_seen: CHAT_LAST_SEEN.get(key) || null
+      });
+    }
+    const clients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
+    for (const c of clients) {
+      const key = `client:${Number(c.id)}`;
+      list.push({
+        key,
+        role: 'client',
+        id: Number(c.id),
+        username: c.username || `Client #${c.id}`,
+        display_name: c.name || c.username || `Client #${c.id}`,
+        agent_id: actor.id,
+        online: isActorOnline(key),
+        last_seen: CHAT_LAST_SEEN.get(key) || null
+      });
+    }
+    return list;
+  }
+
+  // Client: strictly their own assigned Agent ONLY
+  if (actor.role === 'client' && actor.agent_id) {
+    const agents = readDb('agents') || [];
+    const ag = agents.find(a => Number(a.id) === actor.agent_id);
+    if (ag) {
+      const key = `agent:${Number(ag.id)}`;
+      list.push({
+        key,
+        role: 'agent',
+        id: Number(ag.id),
+        username: ag.username || `Agent #${ag.id}`,
+        display_name: ag.name || ag.username || `Agent #${ag.id}`,
+        online: isActorOnline(key),
+        last_seen: CHAT_LAST_SEEN.get(key) || null
+      });
+    }
+  }
+  return list;
+}
+
+function canAccessConversation(actor, conv) {
+  if (!actor || !conv || !Array.isArray(conv.participants)) return false;
+  if (!conv.participants.includes(actor.key)) return false;
+
+  if (conv.type === 'owner_agent') {
+    return actor.role === 'owner' || actor.role === 'agent';
+  }
+  if (conv.type === 'agent_client' || conv.type === 'agent_group') {
+    if (actor.role === 'owner') return false; // Strict privacy wall: Owner NEVER accesses Agent-Client chats/groups
+    if (actor.role === 'agent') return Number(conv.owner_agent_id) === actor.id;
+    if (actor.role === 'client') return Boolean(actor.agent_id) && Number(conv.owner_agent_id) === Number(actor.agent_id);
+  }
+  return false;
+}
+
+function sendChatWsEvent(payload, allowedActorKeys) {
+  try {
+    const targets = allowedActorKeys instanceof Set ? allowedActorKeys : new Set(allowedActorKeys || []);
+    if (targets.size === 0) return;
+    const msg = JSON.stringify(payload);
+    wss.clients.forEach(client => {
+      if (client.readyState !== 1 || !client.user || !client.user.actor_key) return;
+      if (targets.has(client.user.actor_key)) {
+        try { client.send(msg); } catch (_) {}
+      }
+    });
+  } catch (e) {
+    console.error('sendChatWsEvent error:', e);
+  }
+}
+
+function getPresenceAudienceKeys(actor) {
+  const keys = new Set();
+  const contacts = getAllowedChatContacts(actor);
+  contacts.forEach(c => keys.add(c.key));
+  // Also include fellow members of any accessible agent_group
+  const convs = readDb('chat_conversations') || [];
+  for (const conv of convs) {
+    if (conv.type === 'agent_group' && canAccessConversation(actor, conv)) {
+      for (const pk of conv.participants || []) {
+        if (pk !== actor.key) keys.add(pk);
+      }
+    }
+  }
+  keys.delete(actor.key);
+  return keys;
+}
+
+function computeChatAlertPriority(conv, senderRole) {
+  if (conv.type === 'owner_agent' && senderRole === 'owner') return 'admin_alert';
+  if ((conv.type === 'agent_client' || conv.type === 'agent_group') && senderRole === 'agent') return 'admin_alert';
+  return 'silent';
+}
+
+function countUnreadForActor(conv, actorKey, allMessages) {
+  const cursors = conv.read_cursors || {};
+  const lastReadId = Number(cursors[actorKey] || 0);
+  let unread = 0;
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const m = allMessages[i];
+    if (Number(m.conversation_id) !== Number(conv.id)) continue;
+    if (Number(m.id) <= lastReadId) break;
+    if (m.sender_key !== actorKey && !m.deleted) unread++;
+  }
+  return unread;
+}
+
+function hydrateConversationForActor(conv, actor, allMessages) {
+  const unread = countUnreadForActor(conv, actor.key, allMessages);
+  const pinnedMsg = conv.pinned_message_id
+    ? allMessages.find(m => Number(m.conversation_id) === Number(conv.id) && Number(m.id) === Number(conv.pinned_message_id) && !m.deleted) || null
+    : null;
+
+  let peer = null;
+  let title = conv.title || '';
+  if (conv.type === 'owner_agent' || conv.type === 'agent_client') {
+    const otherKey = (conv.participants || []).find(k => k !== actor.key) || '';
+    peer = resolveActorSummaryByKey(otherKey);
+    title = (peer && (peer.display_name || peer.username)) || otherKey || 'Direct Chat';
+  }
+
+  const members = conv.type === 'agent_group'
+    ? (conv.participants || []).map(k => resolveActorSummaryByKey(k)).filter(Boolean)
+    : [];
+
+  return {
+    id: Number(conv.id),
+    type: conv.type,
+    owner_agent_id: conv.owner_agent_id ? Number(conv.owner_agent_id) : null,
+    title,
+    description: conv.description || '',
+    participants: conv.participants || [],
+    members,
+    peer,
+    admin_only: Boolean(conv.admin_only),
+    can_manage: conv.type === 'agent_group' && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id,
+    can_send: !(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent'),
+    pinned_message_id: pinnedMsg ? Number(pinnedMsg.id) : null,
+    pinned_message: pinnedMsg ? {
+      id: Number(pinnedMsg.id),
+      sender_name: pinnedMsg.sender_name,
+      sender_role: pinnedMsg.sender_role,
+      body: String(pinnedMsg.body || '').slice(0, 140),
+      created_at: pinnedMsg.created_at
+    } : null,
+    read_cursors: conv.read_cursors || {},
+    last_message_id: Number(conv.last_message_id || 0),
+    last_message_preview: conv.last_message_preview || '',
+    last_message_sender_key: conv.last_message_sender_key || '',
+    last_message_sender_name: conv.last_message_sender_name || '',
+    last_message_at: conv.last_message_at || conv.updated_at || conv.created_at,
+    unread_count: unread,
+    created_at: conv.created_at,
+    updated_at: conv.updated_at
+  };
+}
+
+// GET /api/chat/bootstrap — strictly scoped inbox + contacts + unread total
+app.get('/api/chat/bootstrap', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const contacts = getAllowedChatContacts(actor);
+  const allConvs = readDb('chat_conversations') || [];
+  const allMessages = readDb('chat_messages') || [];
+
+  const conversations = allConvs
+    .filter(c => canAccessConversation(actor, c))
+    .map(c => hydrateConversationForActor(c, actor, allMessages))
+    .sort((a, b) => new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0));
+
+  const total_unread = conversations.reduce((sum, c) => sum + (c.unread_count || 0), 0);
+
+  res.json({
+    me: actor,
+    contacts,
+    conversations,
+    total_unread
+  });
+});
+
+// POST /api/chat/direct — open or create a 1-to-1 direct conversation (strictly authorized)
+app.post('/api/chat/direct', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const targetKey = String((req.body && req.body.target_key) || '').trim();
+  const allowedContacts = getAllowedChatContacts(actor);
+  const target = allowedContacts.find(c => c.key === targetKey);
+  if (!target) {
+    return res.status(403).json({ error: 'You are not allowed to start a direct chat with this user.' });
+  }
+
+  let convType = null;
+  let ownerAgentId = null;
+  if ((actor.role === 'owner' && target.role === 'agent') || (actor.role === 'agent' && target.role === 'owner')) {
+    convType = 'owner_agent';
+    ownerAgentId = actor.role === 'agent' ? actor.id : target.id;
+  } else if ((actor.role === 'agent' && target.role === 'client') || (actor.role === 'client' && target.role === 'agent')) {
+    convType = 'agent_client';
+    ownerAgentId = actor.role === 'agent' ? actor.id : target.id;
+  } else {
+    return res.status(403).json({ error: 'Direct chat not permitted between these roles.' });
+  }
+
+  const convs = readDb('chat_conversations') || [];
+  let conv = convs.find(c =>
+    c.type === convType &&
+    Array.isArray(c.participants) &&
+    c.participants.length === 2 &&
+    c.participants.includes(actor.key) &&
+    c.participants.includes(target.key)
+  );
+
+  if (!conv) {
+    const now = new Date().toISOString();
+    conv = {
+      id: nextId(convs),
+      type: convType,
+      owner_agent_id: ownerAgentId,
+      title: '',
+      description: '',
+      participants: [actor.key, target.key],
+      admin_only: false,
+      pinned_message_id: null,
+      read_cursors: { [actor.key]: 0, [target.key]: 0 },
+      last_message_id: 0,
+      last_message_preview: '',
+      last_message_sender_key: '',
+      last_message_sender_name: '',
+      last_message_at: now,
+      created_at: now,
+      updated_at: now
+    };
+    convs.push(conv);
+    writeDb('chat_conversations', convs);
+  }
+
+  const allMessages = readDb('chat_messages') || [];
+  res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
+});
+
+// GET /api/chat/conversations/:id/messages — paginated messages + auto-mark-read
+app.get('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied to this conversation.' });
+  }
+
+  const limit = Math.min(200, Math.max(10, Number(req.query.limit) || 100));
+  const beforeId = Number(req.query.before_id || 0);
+  const allMessages = readDb('chat_messages') || [];
+  const convMsgs = allMessages.filter(m => Number(m.conversation_id) === convId);
+
+  const filtered = beforeId > 0 ? convMsgs.filter(m => Number(m.id) < beforeId) : convMsgs;
+  const page = filtered.slice(-limit);
+  const has_more = filtered.length > page.length;
+
+  // Mark read up to latest message in this conversation
+  const latestId = convMsgs.length ? Number(convMsgs[convMsgs.length - 1].id) : 0;
+  if (latestId > 0) {
+    if (!conv.read_cursors) conv.read_cursors = {};
+    const prevRead = Number(conv.read_cursors[actor.key] || 0);
+    if (latestId > prevRead) {
+      conv.read_cursors[actor.key] = latestId;
+      writeDb('chat_conversations', convs);
+      sendChatWsEvent({
+        type: 'chat:read',
+        conversation_id: convId,
+        actor_key: actor.key,
+        last_read_id: latestId
+      }, conv.participants);
+    }
+  }
+
+  res.json({
+    conversation: hydrateConversationForActor(conv, actor, allMessages),
+    messages: page,
+    has_more
+  });
+});
+
+// POST /api/chat/conversations/:id/messages — send sanitized text/emoji/reply message
+app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied to this conversation.' });
+  }
+
+  // Enforce Admin-Only Group Send Mode
+  if (conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+  }
+
+  const rawBody = String((req.body && req.body.body) || '').trim();
+  if (!rawBody) return res.status(400).json({ error: 'Message cannot be empty.' });
+  const body = rawBody.slice(0, 2000);
+
+  const allMessages = readDb('chat_messages') || [];
+  let reply_to = null;
+  const replyId = Number((req.body && req.body.reply_to_id) || 0);
+  if (replyId > 0) {
+    const targetMsg = allMessages.find(m => Number(m.id) === replyId && Number(m.conversation_id) === convId && !m.deleted);
+    if (targetMsg) {
+      reply_to = {
+        id: Number(targetMsg.id),
+        sender_key: targetMsg.sender_key,
+        sender_name: targetMsg.sender_name,
+        body_snippet: String(targetMsg.body || '').slice(0, 120)
+      };
+    }
+  }
+
+  const now = new Date().toISOString();
+  const msgRecord = {
+    id: nextId(allMessages),
+    conversation_id: convId,
+    sender_key: actor.key,
+    sender_role: actor.role,
+    sender_name: actor.display_name || actor.username,
+    body,
+    reply_to,
+    deleted: false,
+    created_at: now
+  };
+  allMessages.push(msgRecord);
+  writeDb('chat_messages', allMessages);
+
+  // Update conversation preview + sender read cursor
+  if (!conv.read_cursors) conv.read_cursors = {};
+  conv.read_cursors[actor.key] = msgRecord.id;
+  conv.last_message_id = msgRecord.id;
+  conv.last_message_preview = body.slice(0, 120);
+  conv.last_message_sender_key = actor.key;
+  conv.last_message_sender_name = msgRecord.sender_name;
+  conv.last_message_at = now;
+  conv.updated_at = now;
+  writeDb('chat_conversations', convs);
+
+  const alert_priority = computeChatAlertPriority(conv, actor.role);
+
+  // Strictly broadcast ONLY to members of this conversation (NEVER leaks to Owner or other Agents)
+  sendChatWsEvent({
+    type: 'chat:message',
+    conversation_id: convId,
+    conversation_type: conv.type,
+    conversation_title: conv.type === 'agent_group' ? conv.title : msgRecord.sender_name,
+    alert_priority,
+    message: msgRecord
+  }, conv.participants);
+
+  res.status(201).json({
+    message: msgRecord,
+    conversation: hydrateConversationForActor(conv, actor, allMessages)
+  });
+});
+
+// POST /api/chat/conversations/:id/read — mark conversation read
+app.post('/api/chat/conversations/:id/read', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  const latestId = Number((req.body && req.body.last_read_id) || conv.last_message_id || 0);
+  if (!conv.read_cursors) conv.read_cursors = {};
+  const prev = Number(conv.read_cursors[actor.key] || 0);
+  if (latestId > prev) {
+    conv.read_cursors[actor.key] = latestId;
+    writeDb('chat_conversations', convs);
+    sendChatWsEvent({
+      type: 'chat:read',
+      conversation_id: convId,
+      actor_key: actor.key,
+      last_read_id: latestId
+    }, conv.participants);
+  }
+  res.json({ success: true, last_read_id: Number(conv.read_cursors[actor.key] || 0) });
+});
+
+// DELETE /api/chat/conversations/:id/messages/:msgId — soft delete by sender or Group Admin
+app.delete('/api/chat/conversations/:id/messages/:msgId', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const msgId = Number(req.params.msgId);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  const allMessages = readDb('chat_messages') || [];
+  const msg = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+
+  const isGroupAdmin = conv.type === 'agent_group' && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id;
+  if (msg.sender_key !== actor.key && !isGroupAdmin) {
+    return res.status(403).json({ error: 'You can only delete your own messages.' });
+  }
+
+  msg.deleted = true;
+  msg.body = 'This message was deleted';
+  msg.reply_to = null;
+  writeDb('chat_messages', allMessages);
+
+  if (Number(conv.pinned_message_id) === msgId) {
+    conv.pinned_message_id = null;
+  }
+  if (Number(conv.last_message_id) === msgId) {
+    conv.last_message_preview = 'This message was deleted';
+  }
+  writeDb('chat_conversations', convs);
+
+  sendChatWsEvent({
+    type: 'chat:message_deleted',
+    conversation_id: convId,
+    message_id: msgId
+  }, conv.participants);
+
+  res.json({ success: true, message_id: msgId });
+});
+
+// ── Agent-Only Client Group Admin APIs ──────────────────────────
+// POST /api/chat/groups — Agent creates a private Client Group (own clients ONLY)
+app.post('/api/chat/groups', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only Agents can create Client Groups.' });
+  }
+
+  const title = String((req.body && req.body.title) || '').trim().slice(0, 80);
+  const description = String((req.body && req.body.description) || '').trim().slice(0, 240);
+  const adminOnly = Boolean(req.body && req.body.admin_only);
+  const rawMemberIds = Array.isArray(req.body && req.body.member_client_ids) ? req.body.member_client_ids : [];
+
+  if (!title) return res.status(400).json({ error: 'Group name is required.' });
+
+  const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
+  const myClientIdSet = new Set(myClients.map(c => Number(c.id)));
+
+  const participants = [actor.key];
+  const seen = new Set(participants);
+  for (const rawId of rawMemberIds) {
+    const cid = Number(rawId);
+    if (!myClientIdSet.has(cid)) {
+      return res.status(403).json({ error: 'You can only add your own assigned clients to a group.' });
+    }
+    const ck = `client:${cid}`;
+    if (!seen.has(ck)) {
+      seen.add(ck);
+      participants.push(ck);
+    }
+  }
+  if (participants.length < 2) {
+    return res.status(400).json({ error: 'Please select at least 1 of your clients.' });
+  }
+
+  const convs = readDb('chat_conversations') || [];
+  const now = new Date().toISOString();
+  const readCursors = {};
+  participants.forEach(pk => { readCursors[pk] = 0; });
+
+  const groupConv = {
+    id: nextId(convs),
+    type: 'agent_group',
+    owner_agent_id: actor.id,
+    title,
+    description,
+    participants,
+    admin_only: adminOnly,
+    pinned_message_id: null,
+    read_cursors: readCursors,
+    last_message_id: 0,
+    last_message_preview: 'Group created',
+    last_message_sender_key: actor.key,
+    last_message_sender_name: actor.display_name,
+    last_message_at: now,
+    created_at: now,
+    updated_at: now
+  };
+  convs.push(groupConv);
+  writeDb('chat_conversations', convs);
+
+  const allMessages = readDb('chat_messages') || [];
+  const hydrated = hydrateConversationForActor(groupConv, actor, allMessages);
+
+  sendChatWsEvent({
+    type: 'chat:group_created',
+    conversation_id: groupConv.id,
+    title: groupConv.title
+  }, participants);
+
+  res.status(201).json({ conversation: hydrated });
+});
+
+// PATCH /api/chat/groups/:id — Owning Agent updates title, description, or admin_only
+app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only the owning Agent can manage this group.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+
+  if (req.body && req.body.title !== undefined) {
+    const t = String(req.body.title || '').trim().slice(0, 80);
+    if (!t) return res.status(400).json({ error: 'Group name cannot be empty.' });
+    conv.title = t;
+  }
+  if (req.body && req.body.description !== undefined) {
+    conv.description = String(req.body.description || '').trim().slice(0, 240);
+  }
+  if (req.body && req.body.admin_only !== undefined) {
+    conv.admin_only = Boolean(req.body.admin_only);
+  }
+  conv.updated_at = new Date().toISOString();
+  writeDb('chat_conversations', convs);
+
+  const allMessages = readDb('chat_messages') || [];
+  sendChatWsEvent({
+    type: 'chat:group_updated',
+    conversation_id: convId,
+    title: conv.title,
+    description: conv.description,
+    admin_only: conv.admin_only,
+    pinned_message_id: conv.pinned_message_id
+  }, conv.participants);
+
+  res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
+});
+
+// POST /api/chat/groups/:id/members — Owning Agent adds or removes own Clients
+app.post('/api/chat/groups/:id/members', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only the owning Agent can manage group members.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+
+  const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
+  const myClientIdSet = new Set(myClients.map(c => Number(c.id)));
+
+  const addIds = Array.isArray(req.body && req.body.add_client_ids) ? req.body.add_client_ids : [];
+  const removeIds = Array.isArray(req.body && req.body.remove_client_ids) ? req.body.remove_client_ids : [];
+
+  const partSet = new Set(conv.participants || [actor.key]);
+  const addedKeys = [];
+  for (const rawId of addIds) {
+    const cid = Number(rawId);
+    if (!myClientIdSet.has(cid)) {
+      return res.status(403).json({ error: 'Cannot add a client that does not belong to you.' });
+    }
+    const ck = `client:${cid}`;
+    if (!partSet.has(ck)) {
+      partSet.add(ck);
+      addedKeys.push(ck);
+      if (!conv.read_cursors) conv.read_cursors = {};
+      conv.read_cursors[ck] = Number(conv.last_message_id || 0);
+    }
+  }
+
+  const removedKeys = [];
+  for (const rawId of removeIds) {
+    const cid = Number(rawId);
+    const ck = `client:${cid}`;
+    if (partSet.has(ck)) {
+      partSet.delete(ck);
+      removedKeys.push(ck);
+    }
+  }
+
+  // Always keep owning Agent in the group
+  partSet.add(actor.key);
+  conv.participants = Array.from(partSet);
+  conv.updated_at = new Date().toISOString();
+  writeDb('chat_conversations', convs);
+
+  if (removedKeys.length) {
+    sendChatWsEvent({ type: 'chat:group_removed', conversation_id: convId }, removedKeys);
+  }
+  sendChatWsEvent({ type: 'chat:group_updated', conversation_id: convId }, conv.participants);
+
+  const allMessages = readDb('chat_messages') || [];
+  res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
+});
+
+// POST /api/chat/groups/:id/pin — Owning Agent pins or unpins a message
+app.post('/api/chat/groups/:id/pin', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only the owning Agent can pin messages.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+
+  const msgId = req.body && req.body.message_id ? Number(req.body.message_id) : null;
+  const allMessages = readDb('chat_messages') || [];
+  if (msgId) {
+    const exists = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId && !m.deleted);
+    if (!exists) return res.status(404).json({ error: 'Message not found in this group.' });
+    conv.pinned_message_id = msgId;
+  } else {
+    conv.pinned_message_id = null;
+  }
+  conv.updated_at = new Date().toISOString();
+  writeDb('chat_conversations', convs);
+
+  sendChatWsEvent({
+    type: 'chat:group_updated',
+    conversation_id: convId,
+    pinned_message_id: conv.pinned_message_id
+  }, conv.participants);
+
+  res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
+});
+
+// DELETE /api/chat/groups/:id — Owning Agent deletes group
+app.delete('/api/chat/groups/:id', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only the owning Agent can delete this group.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const idx = convs.findIndex(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
+  if (idx === -1) return res.status(403).json({ error: 'Group not found or access denied.' });
+
+  const removed = convs.splice(idx, 1)[0];
+  writeDb('chat_conversations', convs);
+
+  const allMessages = readDb('chat_messages') || [];
+  const remaining = allMessages.filter(m => Number(m.conversation_id) !== convId);
+  if (remaining.length !== allMessages.length) {
+    writeDb('chat_messages', remaining);
+  }
+
+  sendChatWsEvent({ type: 'chat:group_removed', conversation_id: convId }, removed.participants || []);
+  res.json({ success: true, deleted_id: convId });
+});
+
 // ── WebSockets ────────────────────────────────────────────────
 
 function getReqIp(req) {
@@ -15467,10 +16956,77 @@ wss.on('connection', (ws, req) => {
   const open = wsConnPerIp.get(ip) || 0;
   if (open >= 10) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
   wsConnPerIp.set(ip, open + 1);
+
+  const actor = resolveLiveChatActor(user);
+  const actorKey = actor ? actor.key : chatActorKey(user.role, user.id);
+
   // The live-feed routing in broadcastWs relies on this (Owner: all; others: only their own id)
-  ws.user = { id: user.id, role: user.role, username: user.username };
+  ws.user = {
+    id: user.id,
+    role: user.role,
+    username: user.username,
+    agent_id: actor ? actor.agent_id : (user.agent_id || null),
+    actor_key: actorKey
+  };
+
+  // Live Chat presence tracking (strictly scoped to allowed peers)
+  const prevOnlineCount = CHAT_ONLINE_COUNTS.get(actorKey) || 0;
+  CHAT_ONLINE_COUNTS.set(actorKey, prevOnlineCount + 1);
+  if (prevOnlineCount === 0 && actor) {
+    const audience = getPresenceAudienceKeys(actor);
+    sendChatWsEvent({ type: 'chat:presence', actor_key: actorKey, online: true, last_seen: null }, audience);
+  }
+
   const now = new Date().toISOString();
-  ws.send(JSON.stringify({ type: 'connected', time: now, timestamp: now }));
+  ws.send(JSON.stringify({ type: 'connected', time: now, timestamp: now, actor_key: actorKey }));
+
+  // Live Chat inbound WebSocket signals (typing & read receipts)
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(String(raw || ''));
+      if (!msg || typeof msg !== 'object') return;
+      const curActor = resolveLiveChatActor(user);
+      if (!curActor) return;
+
+      if (msg.type === 'chat:typing') {
+        const convId = Number(msg.conversation_id);
+        const convs = readDb('chat_conversations') || [];
+        const conv = convs.find(c => Number(c.id) === convId);
+        if (!conv || !canAccessConversation(curActor, conv)) return;
+        if (conv.type === 'agent_group' && conv.admin_only && curActor.role !== 'agent') return;
+        const others = (conv.participants || []).filter(k => k !== curActor.key);
+        sendChatWsEvent({
+          type: 'chat:typing',
+          conversation_id: convId,
+          actor_key: curActor.key,
+          sender_name: curActor.display_name || curActor.username,
+          is_typing: Boolean(msg.is_typing)
+        }, others);
+        return;
+      }
+
+      if (msg.type === 'chat:read') {
+        const convId = Number(msg.conversation_id);
+        const lastReadId = Number(msg.last_read_id || 0);
+        if (!convId || !lastReadId) return;
+        const convs = readDb('chat_conversations') || [];
+        const conv = convs.find(c => Number(c.id) === convId);
+        if (!conv || !canAccessConversation(curActor, conv)) return;
+        if (!conv.read_cursors) conv.read_cursors = {};
+        if (lastReadId > Number(conv.read_cursors[curActor.key] || 0)) {
+          conv.read_cursors[curActor.key] = lastReadId;
+          writeDb('chat_conversations', convs);
+          sendChatWsEvent({
+            type: 'chat:read',
+            conversation_id: convId,
+            actor_key: curActor.key,
+            last_read_id: lastReadId
+          }, conv.participants);
+        }
+      }
+    } catch (_) { /* ignore malformed ws frames */ }
+  });
+
   ws.on('error', () => { /* ignore unhandled socket drops */ });
   const interval = setInterval(() => {
     if (ws.readyState === 1) {
@@ -15489,7 +17045,23 @@ wss.on('connection', (ws, req) => {
       }));
     }
   }, 3000);
-  ws.on('close', () => { clearInterval(interval); wsConnPerIp.set(ip, Math.max(0, (wsConnPerIp.get(ip) || 1) - 1)); });
+  ws.on('close', () => {
+    clearInterval(interval);
+    wsConnPerIp.set(ip, Math.max(0, (wsConnPerIp.get(ip) || 1) - 1));
+    const nextOnlineCount = Math.max(0, (CHAT_ONLINE_COUNTS.get(actorKey) || 1) - 1);
+    if (nextOnlineCount === 0) {
+      CHAT_ONLINE_COUNTS.delete(actorKey);
+      const seenTs = new Date().toISOString();
+      CHAT_LAST_SEEN.set(actorKey, seenTs);
+      const curActor = resolveLiveChatActor(user);
+      if (curActor) {
+        const audience = getPresenceAudienceKeys(curActor);
+        sendChatWsEvent({ type: 'chat:presence', actor_key: actorKey, online: false, last_seen: seenTs }, audience);
+      }
+    } else {
+      CHAT_ONLINE_COUNTS.set(actorKey, nextOnlineCount);
+    }
+  });
 });
 
 // ── Read-Only Owner Orphans Report (Fix 12) ───────────────────

@@ -182,8 +182,8 @@ try {
     .filter(r => String(r.provider || '').toLowerCase().includes('whitenoise'));
   check('Non-WN Agent cannot see Whitenoise ranges in /api/numbers/sms-ranges', wnRangesHiddenForAg1.length === 0);
 
-  // Test Client inheritance rule: Client whitenoise_access=true while Parent Agent whitenoise_access=false -> still denied!
-  await srv.api('PATCH', '/api/clients/1', { cookie: own.cookie, body: { whitenoise_access: true } });
+  // Test Client inheritance rule: Client whitenoise_access=true (set by owning Agent) while Parent Agent whitenoise_access=false -> still denied!
+  await srv.api('PATCH', '/api/clients/1', { cookie: ag1Init.cookie, body: { whitenoise_access: true } });
   const cl1 = await srv.login('client_one', 'clientpass1');
   const meCl1NoParent = await srv.api('GET', '/api/auth/me', { cookie: cl1.cookie });
   const cdr2Cl1NoParent = await srv.api('GET', '/api/cdr2/logs', { cookie: cl1.cookie });
@@ -191,9 +191,10 @@ try {
     meCl1NoParent.data?.whitenoise_access === false && cdr2Cl1NoParent.status === 403
   );
 
-  // 4. Enable whitenoise_access for agent_one ONLY (agent_two stays false)
+  // 4. Enable whitenoise_access for agent_one ONLY (agent_two stays false), then agent_one enables client_one
   const patchAg1 = await srv.api('PATCH', '/api/agents/1', { cookie: own.cookie, body: { whitenoise_access: true } });
   check('Owner enables whitenoise_access on agent_one', patchAg1.status === 200 && patchAg1.data?.whitenoise_access === true);
+  await srv.api('PATCH', '/api/clients/1', { cookie: ag1Init.cookie, body: { whitenoise_access: true } });
 
   const meAg1After = await srv.api('GET', '/api/auth/me', { cookie: ag1Init.cookie });
   const meCl1AfterParent = await srv.api('GET', '/api/auth/me', { cookie: cl1.cookie });
@@ -238,7 +239,7 @@ try {
   });
   check('WN Agent sets Client PKR rate for Whitenoise range', setRate.status === 200);
 
-  const assignToCl1 = await srv.api('POST', '/api/numbers/bulk-assign-many', {
+  const assignToCl1WeeklyBad = await srv.api('POST', '/api/numbers/bulk-assign-many', {
     cookie: ag1Init.cookie,
     body: {
       number_ids: [numClient.id],
@@ -248,10 +249,21 @@ try {
       payterm: 'Weekly'
     }
   });
+  check('Weekly payterm is strictly rejected (400) on Whitenoise number allocation to client_one', assignToCl1WeeklyBad.status === 400);
+
+  const assignToCl1 = await srv.api('POST', '/api/numbers/bulk-assign-many', {
+    cookie: ag1Init.cookie,
+    body: {
+      number_ids: [numClient.id],
+      target_type: 'client',
+      target_id: 1,
+      client_payterm: 'Monthly'
+    }
+  });
   check('Agent allocates Whitenoise number to client_one', assignToCl1.status === 200);
   const numsAfterClAssign = readJson(dir, 'numbers');
   const updatedNumCl = numsAfterClAssign.find(x => Number(x.id) === Number(numClient.id));
-  check('Monthly (30/5) {W} forced on Whitenoise number allocation to client_one (overrode Weekly)',
+  check('Monthly (30/5) {W} stamped on Whitenoise number allocation to client_one',
     updatedNumCl && updatedNumCl.payterm === 'Monthly' && updatedNumCl.client_payterm === 'Monthly' && updatedNumCl.payout_schedule === 'monthly30_5'
   );
 

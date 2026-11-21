@@ -322,12 +322,35 @@ function writeDb(name, data) {
   }
 }
 
-function nextId(data) {
-  if (!Array.isArray(data) || data.length === 0) return 1;
+function bumpIdCounter(tableName, idVal) {
+  if (!tableName) return;
+  const n = Number(idVal);
+  if (!Number.isFinite(n) || n <= 0) return;
+  const meta = readMeta();
+  if (!meta.id_counters || typeof meta.id_counters !== 'object') meta.id_counters = {};
+  const prev = Number(meta.id_counters[tableName] || 0);
+  if (n > prev) {
+    meta.id_counters[tableName] = n;
+    writeMeta(meta);
+  }
+}
+
+function nextId(data, tableName = null) {
   let max = 0;
-  for (let i = 0; i < data.length; i++) {
-    const n = Number(data[i] && data[i].id);
-    if (Number.isFinite(n) && n > 0 && n > max) max = n;
+  if (Array.isArray(data)) {
+    for (let i = 0; i < data.length; i++) {
+      const n = Number(data[i] && data[i].id);
+      if (Number.isFinite(n) && n > 0 && n > max) max = n;
+    }
+  }
+  if (tableName) {
+    const meta = readMeta();
+    if (!meta.id_counters || typeof meta.id_counters !== 'object') meta.id_counters = {};
+    const stored = Number(meta.id_counters[tableName] || 0);
+    const next = Math.max(max, Number.isFinite(stored) ? stored : 0) + 1;
+    meta.id_counters[tableName] = next;
+    writeMeta(meta);
+    return next;
   }
   return max + 1;
 }
@@ -620,7 +643,7 @@ function bootstrapFreshDataDir() {
         footer_text: '© 2026 HUMAX SMS. All rights reserved.',
         default_currency: 'USD',
         timezone: 'Asia/Karachi',
-        payterms: ['Weekly', 'Biweekly', 'Monthly'],
+        payterms: ['Weekly', 'Monthly'],
         default_theme_key: 'cobalt_emerald',
         theme_mode: 'light',
         font_family: 'jakarta',
@@ -713,9 +736,8 @@ function normalizeNotificationPrefs(raw) {
 function formatNotifPayterm(ptKey, isWn = false) {
   const k = String(ptKey || 'Weekly').trim().toLowerCase();
   if (isWn || k.includes('month') || k === '30/5' || k === 'monthly30_5') {
-    return isWn ? 'Monthly (30/5) {W}' : 'Monthly (30/5)';
+    return 'Monthly (30/5) {W}';
   }
-  if (k.includes('biweek') || k === '15/3') return 'Biweekly (15/3)';
   return 'Weekly (7/3)';
 }
 
@@ -1047,12 +1069,14 @@ function getDateRangeBuckets() {
   yesterdaySet.delete(utcToday);
   yesterdaySet.delete(localToday);
 
-  const dayOfWeek = (now.getDay() + 6) % 7;
-  const startOfWeekObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek);
-  const weekStartStr = `${startOfWeekObj.getFullYear()}-${String(startOfWeekObj.getMonth() + 1).padStart(2, '0')}-${String(startOfWeekObj.getDate()).padStart(2, '0')}`;
+  // Standardize week/month/year boundaries on UTC Monday 00:00 (Monday 05:00 AM PKT)
+  // matching getAgentClientWeeklyPkrStats and period-stats so server TZ never causes drift.
+  const utcDayOfWeek = (now.getUTCDay() + 6) % 7;
+  const startOfWeekUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - utcDayOfWeek));
+  const weekStartStr = startOfWeekUtc.toISOString().slice(0, 10);
 
-  const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-  const yearStartStr = `${now.getFullYear()}-01-01`;
+  const monthStartStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  const yearStartStr = `${now.getUTCFullYear()}-01-01`;
 
   return { todaySet, yesterdaySet, weekStartStr, monthStartStr, yearStartStr, now, todayStr: utcToday, yesterdayStr: yestUtc };
 }
@@ -1138,8 +1162,8 @@ function getRangeCompanyCost(rng) {
   return 0;
 }
 
-// ── Master 3-Payterm System (Weekly 7/3, Biweekly 15/3, Monthly 30/5 {W}) ──
-const DEFAULT_PAYTERMS = ['Weekly', 'Biweekly', 'Monthly'];
+// ── Master 2-Payterm System (Weekly 7/3 for standard, Monthly 30/5 {W} for Whitenoise) ──
+const DEFAULT_PAYTERMS = ['Weekly', 'Monthly'];
 
 const PAYTERM_DEFINITIONS = {
   Weekly: {
@@ -1150,15 +1174,6 @@ const PAYTERM_DEFINITIONS = {
     hold_days: 3,
     schedule: 'weekly7_3',
     description: 'Weekly payment · 3 day hold'
-  },
-  Biweekly: {
-    key: 'Biweekly',
-    code: '15/3',
-    label: 'Biweekly (15/3)',
-    cycle_days: 15,
-    hold_days: 3,
-    schedule: 'biweekly15_3',
-    description: '2 weeks payment · 3 day hold'
   },
   Monthly: {
     key: 'Monthly',
@@ -1181,7 +1196,10 @@ function getMasterPayterms() {
   try {
     const settings = readDb('settings');
     if (settings && Array.isArray(settings.payterms) && settings.payterms.length > 0) {
-      return settings.payterms;
+      const cleaned = Array.from(new Set(
+        settings.payterms.map(p => normalizePaytermKey(String(p || '').trim())).filter(p => p && p !== 'Biweekly')
+      ));
+      if (cleaned.length > 0) return cleaned;
     }
   } catch (e) {}
   return [...DEFAULT_PAYTERMS];
@@ -1191,9 +1209,8 @@ function normalizePaytermKey(k) {
   if (!k || typeof k !== 'string') return k;
   const s = k.trim();
   const sl = s.toLowerCase().replace(/\s+/g, ' ');
-  if (sl === 'weekly' || sl === '7/3' || sl === 'weekly 7/3' || sl === 'weekly (7/3)') return 'Weekly';
-  if (sl === 'biweekly' || sl === 'bi-weekly' || sl === 'bi weekly' || sl === '15/3' || sl === 'biweekly 15/3' || sl === 'biweekly (15/3)') return 'Biweekly';
-  if (sl === 'monthly' || sl === '30/5' || sl === '30/5 {w}' || sl === 'monthly 30/5' || sl === 'monthly (30/5)' || sl === 'monthly 30/5 {w}' || sl === 'monthly (30/5) {w}') return 'Monthly';
+  if (sl === 'weekly' || sl === '7/3' || sl === 'weekly 7/3' || sl === 'weekly (7/3)' || sl === 'weekly7_3') return 'Weekly';
+  if (sl === 'monthly' || sl === '30/5' || sl === '30/5 {w}' || sl === 'monthly 30/5' || sl === 'monthly (30/5)' || sl === 'monthly 30/5 {w}' || sl === 'monthly (30/5) {w}' || sl === 'monthly30_5') return 'Monthly';
   return s;
 }
 
@@ -1202,8 +1219,7 @@ function migrateLegacyPayterm(k) {
   const norm = normalizePaytermKey(k);
   if (DEFAULT_PAYTERMS.includes(norm)) return norm;
   const sl = k.trim().toLowerCase();
-  if (['1/1', '7/1', '7/7', 'daily', 'weekly (7/1)'].includes(sl)) return 'Weekly';
-  if (['15/1', '15/15', '15/30', 'bi-weekly'].includes(sl)) return 'Biweekly';
+  if (['1/1', '7/1', '7/7', 'daily', 'weekly (7/1)', 'biweekly', 'bi-weekly', 'bi weekly', '15/3', 'biweekly 15/3', 'biweekly (15/3)', 'biweekly15_3', '15/1', '15/15', '15/30'].includes(sl)) return 'Weekly';
   if (['30/1', '30/15', '30/30', '30/45', '30/60', 'monthly60', 'monthly10', '30/10', 'monthly (30/30)', 'monthly (10th fixed)', 'monthly10 (10th fixed)', '10th'].includes(sl)) return 'Monthly';
   return norm;
 }
@@ -1211,6 +1227,8 @@ function migrateLegacyPayterm(k) {
 function isValidPayterm(term) {
   if (!term || typeof term !== 'string') return false;
   const s = term.trim();
+  const sl = s.toLowerCase();
+  if (sl.includes('biweek') || sl === '15/3' || sl === 'biweekly15_3') return false;
   const list = getMasterPayterms();
   const norm = normalizePaytermKey(s);
   return list.includes(s) || list.includes(norm);
@@ -1218,7 +1236,7 @@ function isValidPayterm(term) {
 
 function runPaytermMigration() {
   try {
-    // 1. Settings -> clean up legacy extra payterms to the 3 active terms
+    // 1. Settings -> clean up legacy & Biweekly payterms to active Weekly & Monthly terms
     let settings = readDb('settings');
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
     let settingsChanged = false;
@@ -1226,40 +1244,48 @@ function runPaytermMigration() {
       settings.payterms = [...DEFAULT_PAYTERMS];
       settingsChanged = true;
     } else {
-      const migrated = Array.from(new Set(settings.payterms.map(migrateLegacyPayterm).filter(Boolean)));
-      if (JSON.stringify(migrated) !== JSON.stringify(settings.payterms)) {
-        settings.payterms = migrated;
+      const migrated = Array.from(new Set(
+        settings.payterms
+          .map(migrateLegacyPayterm)
+          .filter(k => k && k !== 'Biweekly')
+      ));
+      const finalTerms = migrated.length ? migrated : [...DEFAULT_PAYTERMS];
+      if (!finalTerms.includes('Weekly')) finalTerms.unshift('Weekly');
+      if (!finalTerms.includes('Monthly')) finalTerms.push('Monthly');
+      if (JSON.stringify(finalTerms) !== JSON.stringify(settings.payterms)) {
+        settings.payterms = finalTerms;
         settingsChanged = true;
       }
     }
     if (settingsChanged) writeDb('settings', settings);
 
-    // 2. SMS Ranges -> migrate payterms object & default payterm cleanly
+    // 2. SMS Ranges -> enforce Whitenoise = Monthly only, Non-Whitenoise = Weekly only, remove Biweekly
     let ranges = readDb('sms_ranges') || [];
     let rangesChanged = false;
+    const wnTags = getWhitenoiseProviderTags();
     ranges.forEach(r => {
-      if (r.payterms && typeof r.payterms === 'object') {
-        const newPts = {};
-        for (const [k, v] of Object.entries(r.payterms)) {
-          const normK = migrateLegacyPayterm(k);
-          if (newPts[normK] === undefined) newPts[normK] = v;
-        }
-        if (JSON.stringify(newPts) !== JSON.stringify(r.payterms)) {
-          r.payterms = newPts;
-          rangesChanged = true;
-        }
-      }
-      if (r.payterm) {
-        const norm = migrateLegacyPayterm(r.payterm);
-        if (norm !== r.payterm) {
-          r.payterm = norm;
-          rangesChanged = true;
-        }
+      const isWn = isWhitenoiseRecord(r, null, wnTags);
+      const ptInfo = resolveRangeActivePayterms(r, isWn);
+      const ptMeta = getPaytermMeta(ptInfo.primary_payterm);
+      if (
+        r.payterm !== ptMeta.key ||
+        r.payout_schedule !== ptMeta.schedule ||
+        JSON.stringify(r.active_payterms || []) !== JSON.stringify(ptInfo.active_payterms) ||
+        JSON.stringify(r.payterms || {}) !== JSON.stringify(ptInfo.payterms)
+      ) {
+        r.payterm = ptMeta.key;
+        r.active_payterms = ptInfo.active_payterms;
+        r.payterms = ptInfo.payterms;
+        r.payout_schedule = ptMeta.schedule;
+        r.cycle_days = ptMeta.cycle_days;
+        r.hold_days = ptMeta.hold_days;
+        if (isWn) r.is_whitenoise = true;
+        rangesChanged = true;
       }
     });
     if (rangesChanged) writeDb('sms_ranges', ranges);
 
-    // 3. Numbers -> migrate payterm & client_payterm cleanly
+    // 3. Numbers -> migrate payterm & client_payterm cleanly (strip Biweekly -> Weekly)
     let numbers = readDb('numbers') || [];
     let numbersChanged = false;
     numbers.forEach(n => {
@@ -1292,12 +1318,8 @@ function getRangeAgentRate(rng, payterm = 'Weekly') {
       const v = rng.payterms['Weekly'] ?? rng.payterms['7/3'];
       if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
     }
-    if (normPt === 'Biweekly') {
-      const v = rng.payterms['Biweekly'] ?? rng.payterms['15/3'] ?? rng.payterms['Weekly'];
-      if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
-    }
     if (normPt === 'Monthly') {
-      const v = rng.payterms['Monthly'] ?? rng.payterms['30/5'] ?? rng.payterms['Biweekly'] ?? rng.payterms['Weekly'];
+      const v = rng.payterms['Monthly'] ?? rng.payterms['30/5'] ?? rng.payterms['Weekly'];
       if (v !== undefined && v !== 'NA' && !isNaN(Number(v))) return Number(v);
     }
     if (rng.payterms['Weekly'] !== undefined && rng.payterms['Weekly'] !== 'NA' && !isNaN(Number(rng.payterms['Weekly']))) {
@@ -1312,6 +1334,44 @@ function getRangeAgentRate(rng, payterm = 'Weekly') {
   if (rng.payout !== undefined && rng.payout !== null && !isNaN(Number(rng.payout))) return Number(rng.payout);
   if (rng.sell_rate !== undefined && rng.sell_rate !== null && !isNaN(Number(rng.sell_rate))) return Number(rng.sell_rate);
   return 0;
+}
+
+// Resolve strictly configured payterms on a range (Owner -> Agent -> Client).
+// Strict Business Rule:
+//   - Whitenoise ranges -> ONLY Monthly (30/5) {W}
+//   - Standard (non-Whitenoise) ranges -> ONLY Weekly (7/3)
+//   - Biweekly (15/3) is permanently removed.
+function resolveRangeActivePayterms(rng, isWnOverride = null) {
+  if (!rng || typeof rng !== 'object') {
+    return { active_payterms: ['Weekly'], primary_payterm: 'Weekly', payterms: {} };
+  }
+  const wnTags = getWhitenoiseProviderTags();
+  const isWn = isWnOverride !== null ? Boolean(isWnOverride) : isWhitenoiseRecord(rng, null, wnTags);
+  const readNum = (v) => {
+    if (v === null || v === undefined || v === '' || v === 'NA' || v === 'N/A') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const srcPts = (rng.payterms && typeof rng.payterms === 'object') ? rng.payterms : {};
+  const rawW = readNum(srcPts['Weekly'] !== undefined ? srcPts['Weekly'] : srcPts['7/3']);
+  const rawM = readNum(srcPts['Monthly'] !== undefined ? srcPts['Monthly'] : srcPts['30/5']);
+  const fallbackRate = readNum(rng.payout) ?? readNum(rng.rate) ?? readNum(rng.sell_rate) ?? 0;
+
+  if (isWn) {
+    const mRate = rawM !== null ? rawM : (rawW !== null ? rawW : fallbackRate);
+    return {
+      active_payterms: ['Monthly'],
+      primary_payterm: 'Monthly',
+      payterms: { Monthly: mRate }
+    };
+  }
+
+  const wRate = rawW !== null ? rawW : (rawM !== null ? rawM : fallbackRate);
+  return {
+    active_payterms: ['Weekly'],
+    primary_payterm: 'Weekly',
+    payterms: { Weekly: wRate }
+  };
 }
 
 const round2 = v => Math.round((Number(v) || 0) * 100) / 100;
@@ -1565,7 +1625,6 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
   const monthlyCfg = getMonthlyCycleConfig(refDate);
   const byTerm = {
     Weekly: { ...PAYTERM_DEFINITIONS.Weekly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null },
-    Biweekly: { ...PAYTERM_DEFINITIONS.Biweekly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null },
     Monthly: { ...PAYTERM_DEFINITIONS.Monthly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null }
   };
   let clearedUsd = 0, heldUsd = 0, clearedPkr = 0, heldPkr = 0;
@@ -1726,6 +1785,123 @@ function getAgentRangeClientPkrRate(acr, payterm = 'Weekly') {
     if (acr.payterms[payterm] !== undefined && Number(acr.payterms[payterm]) > 0) return round2(acr.payterms[payterm]);
   }
   return round2(acr.client_rate_pkr || 0);
+}
+
+// Per-Range Client Limits (NO cross-range limit; strictly enforced per individual range):
+// - Max 25 numbers added/requested per UTC day per range
+// - Max 50 active (+ pending) numbers held at a time per range
+// - Max 3 additions/requests per rolling 7-day week per range
+const CLIENT_RANGE_DAILY_NUMBERS_MAX = 25;
+const CLIENT_RANGE_ACTIVE_HOLD_MAX = 50;
+const CLIENT_RANGE_WEEKLY_ADDS_MAX = 3;
+const CLIENT_RANGE_WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function matchesRangeRef(item, rangeId, rangeName) {
+  if (!item) return false;
+  const rid = rangeId != null && rangeId !== '' ? Number(rangeId) : null;
+  const rNameLc = String(rangeName || '').trim().toLowerCase();
+  if (rid && item.range_id != null && Number(item.range_id) === rid) return true;
+  const itemNameLc = String(item.range_name || item.name || '').trim().toLowerCase();
+  if (rNameLc && itemNameLc && itemNameLc === rNameLc) return true;
+  return false;
+}
+
+function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null) {
+  const cid = Number(clientId);
+  const numbers = (preloaded && preloaded.numbers) || readDb('numbers') || [];
+  const requests = (preloaded && preloaded.requests) || readDb('number_requests') || [];
+  const history = (preloaded && preloaded.history) || readDb('allocation_history') || [];
+  const nowMs = Date.now();
+  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const weekCutoffMs = nowMs - CLIENT_RANGE_WEEKLY_WINDOW_MS;
+
+  const heldCount = numbers.filter(n =>
+    n && Number(n.client_id) === cid && matchesRangeRef(n, rangeId, rangeName)
+  ).length;
+
+  const clientRangeReqs = requests.filter(r => {
+    if (!r || Number(r.client_id) !== cid) return false;
+    if (String(r.status || '').toLowerCase() === 'rejected') return false;
+    return matchesRangeRef(r, rangeId, rangeName);
+  });
+
+  const pendingReqs = clientRangeReqs
+    .filter(r => String(r.status || '').toLowerCase() === 'pending');
+  const pendingRequestCount = pendingReqs.length;
+  const hasPendingRequest = pendingRequestCount > 0;
+  const pendingQty = pendingReqs
+    .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
+
+  const todayReqNums = clientRangeReqs
+    .filter(r => String(r.created || r.timestamp || '').slice(0, 10) === todayIso)
+    .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
+
+  // Direct allocations (self-allocate or manual agent assign) not originating from a number request
+  const directTodayNums = numbers.filter(n => {
+    if (!n || Number(n.client_id) !== cid) return false;
+    if (!matchesRangeRef(n, rangeId, rangeName)) return false;
+    const assignedDay = String(n.client_assigned_at || n.assigned_at || n.assigned_date || '').slice(0, 10);
+    if (assignedDay !== todayIso) return false;
+    if (String(n.notes || '').startsWith('Allocated via Request #')) return false;
+    return true;
+  }).length;
+
+  const todayNumbers = todayReqNums + directTodayNums;
+
+  const weeklyEventsMs = [];
+  for (const r of clientRangeReqs) {
+    const ts = Date.parse(r.created || r.timestamp || '');
+    if (Number.isFinite(ts) && ts >= weekCutoffMs) weeklyEventsMs.push(ts);
+  }
+  for (const h of history) {
+    if (!h) continue;
+    const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
+      || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
+    if (!isThisClient) continue;
+    if (h.request_id || /^(Allocated via Request #|Request #\d+)/i.test(String(h.notes || '').trim())) continue;
+    if (!matchesRangeRef(h, rangeId, rangeName)) continue;
+    const ts = Date.parse(h.timestamp || h.created || '');
+    if (Number.isFinite(ts) && ts >= weekCutoffMs) weeklyEventsMs.push(ts);
+  }
+  weeklyEventsMs.sort((a, b) => a - b);
+
+  const weeklyAddsUsed = weeklyEventsMs.length;
+  const dailyRemaining = Math.max(0, CLIENT_RANGE_DAILY_NUMBERS_MAX - todayNumbers);
+  const holdRemaining = Math.max(0, CLIENT_RANGE_ACTIVE_HOLD_MAX - heldCount - pendingQty);
+  const weeklyAddsRemaining = Math.max(0, CLIENT_RANGE_WEEKLY_ADDS_MAX - weeklyAddsUsed);
+  const maxRequestableNow = weeklyAddsRemaining > 0 ? Math.min(dailyRemaining, holdRemaining) : 0;
+  const canRequestNow = maxRequestableNow > 0 && !hasPendingRequest;
+
+  let blockReason = null;
+  if (!canRequestNow) {
+    if (holdRemaining <= 0) blockReason = 'hold_limit';
+    else if (weeklyAddsRemaining <= 0) blockReason = 'weekly_limit';
+    else if (dailyRemaining <= 0) blockReason = 'daily_limit';
+    else if (hasPendingRequest) blockReason = 'pending_request';
+  }
+
+  const nextWeeklySlotAt = (weeklyAddsRemaining <= 0 && weeklyEventsMs.length > 0)
+    ? new Date(weeklyEventsMs[0] + CLIENT_RANGE_WEEKLY_WINDOW_MS).toISOString()
+    : null;
+
+  return {
+    daily_numbers_limit: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+    today_numbers: todayNumbers,
+    daily_remaining: dailyRemaining,
+    max_hold_limit: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+    held_count: heldCount,
+    pending_qty: pendingQty,
+    pending_request_count: pendingRequestCount,
+    has_pending_request: hasPendingRequest,
+    hold_remaining: holdRemaining,
+    weekly_adds_limit: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+    weekly_adds_used: weeklyAddsUsed,
+    weekly_adds_remaining: weeklyAddsRemaining,
+    next_weekly_slot_at: nextWeeklySlotAt,
+    max_requestable_now: maxRequestableNow,
+    can_request_now: canRequestNow,
+    block_reason: blockReason
+  };
 }
 
 function getAgentClientWeeklyPkrStats(agentId) {
@@ -4029,7 +4205,88 @@ function resolveNumberOwnershipForDate(numberDigits, dateYmd, ctx) {
   };
 }
 
-function parseExcelDateYmd(val) {
+const WN_MONTH_MAP = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12
+};
+
+function daysInUtcMonth(year, month1To12) {
+  return new Date(Date.UTC(year, month1To12, 0)).getUTCDate();
+}
+
+function enumerateDatesYmd(startYmd, endYmd) {
+  if (!startYmd || !endYmd || startYmd > endYmd) return [];
+  const out = [];
+  const cur = new Date(`${startYmd}T00:00:00Z`);
+  const end = new Date(`${endYmd}T00:00:00Z`);
+  let guard = 0;
+  while (cur.getTime() <= end.getTime() && guard < 400) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+    guard++;
+  }
+  return out;
+}
+
+function extractFilenameDateHints(filename) {
+  const fn = String(filename || '');
+  const now = new Date();
+  let hintYear = now.getUTCFullYear();
+  let hintMonth = now.getUTCMonth() + 1;
+  let fallbackFileDate = null;
+  let hasDateRange = false;
+
+  // Detect explicit multi-day range patterns in filename: e.g. 01.11.2026-15.11.2026, 2026-11-01_2026-11-15, 1-15.11.2026, 15-19.11.2026
+  const rangeFullDm = fn.match(/(\d{1,2})[.-](\d{1,2})[.-](\d{4})\s*(?:to|-|_|–)\s*(\d{1,2})[.-](\d{1,2})[.-](\d{4})/i);
+  const rangeFullIso = fn.match(/(\d{4})-(\d{2})-(\d{2})\s*(?:to|-|_|–)\s*(\d{4})-(\d{2})-(\d{2})/i);
+  const rangeShortDm = fn.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})[.-](\d{1,2})[.-](\d{4})/);
+  const rangeDayWord = fn.match(/(?:^|[^0-9])(1\s*[-–]\s*15|01\s*[-–]\s*15|16\s*[-–]\s*(?:28|29|30|31))(?:[^0-9]|$)/);
+
+  if (rangeFullDm) {
+    hasDateRange = true;
+    hintYear = Number(rangeFullDm[6]);
+    hintMonth = Number(rangeFullDm[5]);
+    fallbackFileDate = parseExcelDateYmd(`${rangeFullDm[4]}.${rangeFullDm[5]}.${rangeFullDm[6]}`);
+  } else if (rangeFullIso) {
+    hasDateRange = true;
+    hintYear = Number(rangeFullIso[4]);
+    hintMonth = Number(rangeFullIso[5]);
+    fallbackFileDate = `${rangeFullIso[4]}-${rangeFullIso[5]}-${rangeFullIso[6]}`;
+  } else if (rangeShortDm) {
+    hasDateRange = true;
+    hintYear = Number(rangeShortDm[4]);
+    hintMonth = Number(rangeShortDm[3]);
+    fallbackFileDate = parseExcelDateYmd(`${rangeShortDm[2]}.${rangeShortDm[3]}.${rangeShortDm[4]}`);
+  } else {
+    const fnMatch = fn.match(/(\d{1,2})[.-](\d{1,2})[.-](\d{4})/);
+    if (fnMatch) {
+      fallbackFileDate = parseExcelDateYmd(`${fnMatch[1]}.${fnMatch[2]}.${fnMatch[3]}`);
+      if (fallbackFileDate) {
+        hintYear = Number(fallbackFileDate.slice(0, 4));
+        hintMonth = Number(fallbackFileDate.slice(5, 7));
+      }
+    } else {
+      const fnIso = fn.match(/(\d{4})-(\d{2})-(\d{2})/);
+      if (fnIso) {
+        fallbackFileDate = `${fnIso[1]}-${fnIso[2]}-${fnIso[3]}`;
+        hintYear = Number(fnIso[1]);
+        hintMonth = Number(fnIso[2]);
+      } else {
+        const fnYm = fn.match(/(\d{4})[-_.](0?[1-9]|1[0-2])(?:\b|[^0-9])/);
+        if (fnYm) {
+          hintYear = Number(fnYm[1]);
+          hintMonth = Number(fnYm[2]);
+        }
+      }
+    }
+    if (rangeDayWord) hasDateRange = true;
+  }
+
+  return { hintYear, hintMonth, fallbackFileDate, hasDateRange };
+}
+
+function parseExcelDateYmd(val, opts = {}) {
   if (val === null || val === undefined || val === '') return null;
   if (val instanceof Date && !Number.isNaN(val.getTime())) {
     const y = val.getUTCFullYear();
@@ -4051,7 +4308,7 @@ function parseExcelDateYmd(val) {
   // Numeric string Excel serial
   if (/^\d{5}(\.\d+)?$/.test(s)) {
     const n = Number(s);
-    if (n > 25000 && n < 75000) return parseExcelDateYmd(n);
+    if (n > 25000 && n < 75000) return parseExcelDateYmd(n, opts);
   }
   // YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD (optionally with time)
   let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT].*)?$/);
@@ -4065,15 +4322,14 @@ function parseExcelDateYmd(val) {
   m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[\sT].*)?$/);
   if (m) {
     let a = Number(m[1]), b = Number(m[2]), y = Number(m[3]);
-    // If second part > 12 and first <= 12, it's MM/DD/YYYY; otherwise treat as DD.MM.YYYY
     let d = a, mo = b;
     if (b > 12 && a <= 12) { mo = a; d = b; }
     if (y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
       return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
   }
-  // DD.MM.YY or DD/MM/YY
-  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$/);
+  // DD.MM.YY or DD/MM/YY or DD-MM-YY (optionally with time)
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?:[\sT].*)?$/);
   if (m) {
     let d = Number(m[1]), mo = Number(m[2]), y = 2000 + Number(m[3]);
     if (mo > 12 && d <= 12) { const tmp = d; d = mo; mo = tmp; }
@@ -4081,12 +4337,75 @@ function parseExcelDateYmd(val) {
       return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
   }
+  // Text month formats: "15 Nov 2026", "15-Nov-2026", "15/Nov/26", "15 Nov"
+  m = s.match(/^(\d{1,2})[\s./-]+([A-Za-z]{3,9})(?:[\s,./-]+(\d{2,4}))?(?:[\sT].*)?$/);
+  if (m) {
+    const d = Number(m[1]);
+    const mo = WN_MONTH_MAP[m[2].toLowerCase()];
+    const rawY = m[3] ? Number(m[3]) : (opts.hintYear || new Date().getUTCFullYear());
+    const y = rawY < 100 ? (2000 + rawY) : rawY;
+    if (mo && y >= 2000 && y <= 2100 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  // Text month formats: "Nov 15, 2026", "November 15 2026", "Nov-15-26", "Nov 15"
+  m = s.match(/^([A-Za-z]{3,9})[\s./-]+(\d{1,2})(?:st|nd|rd|th)?(?:[\s,./-]+(\d{2,4}))?(?:[\sT].*)?$/);
+  if (m) {
+    const mo = WN_MONTH_MAP[m[1].toLowerCase()];
+    const d = Number(m[2]);
+    const rawY = m[3] ? Number(m[3]) : (opts.hintYear || new Date().getUTCFullYear());
+    const y = rawY < 100 ? (2000 + rawY) : rawY;
+    if (mo && y >= 2000 && y <= 2100 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  // Short DD.MM or DD/MM (pivot headers or short date cells when year hint is available)
+  if (opts.allowShortDate) {
+    m = s.match(/^(\d{1,2})[./-](\d{1,2})$/);
+    if (m) {
+      let d = Number(m[1]), mo = Number(m[2]);
+      if (mo > 12 && d <= 12) { const tmp = d; d = mo; mo = tmp; }
+      const y = opts.hintYear || new Date().getUTCFullYear();
+      if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+        return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      }
+    }
+    // "Day 1" .. "Day 31"
+    m = s.match(/^day\s*(\d{1,2})$/i);
+    if (m && opts.hintYear && opts.hintMonth) {
+      const d = Number(m[1]);
+      if (d >= 1 && d <= daysInUtcMonth(opts.hintYear, opts.hintMonth)) {
+        return `${opts.hintYear}-${String(opts.hintMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      }
+    }
+  }
   return null;
 }
 
-function detectSheetColumnMapping(rowsMatrix) {
+function buildWorksheetMatrix(ws) {
+  const rawMatrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  const fmtMatrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+  // Merge formatted strings for date-formatted cells when raw value isn't obviously parseable or is a serial
+  return rawMatrix.map((row, rIdx) => {
+    const fmtRow = fmtMatrix[rIdx] || [];
+    return (row || []).map((cell, cIdx) => {
+      if (cell === '' || cell === null || cell === undefined) return '';
+      if (typeof cell === 'number' && cell > 25000 && cell < 75000) {
+        const fmtVal = String(fmtRow[cIdx] || '').trim();
+        // Only treat numeric serial as date if formatted cell actually looks like a date (not a count or phone)
+        if (fmtVal && /[./-\sA-Za-z]/.test(fmtVal) && parseExcelDateYmd(fmtVal)) {
+          return parseExcelDateYmd(fmtVal);
+        }
+      }
+      return cell;
+    });
+  });
+}
+
+function detectSheetColumnMapping(rowsMatrix, dateHints = {}) {
   let headerRowIdx = 0;
   let bestRowScore = -1;
+  const headerParseOpts = { hintYear: dateHints.hintYear, hintMonth: dateHints.hintMonth, allowShortDate: true };
 
   const maxScan = Math.min(rowsMatrix.length, 15);
   for (let r = 0; r < maxScan; r++) {
@@ -4098,14 +4417,14 @@ function detectSheetColumnMapping(rowsMatrix) {
     for (const cell of row) {
       const h = String(cell ?? '').trim().toLowerCase();
       if (!h) continue;
-      if (parseExcelDateYmd(cell)) dateHeaderCols++;
-      if (/\b(date|day|time|period|created|sent)\b/.test(h)) score += 3;
+      if (parseExcelDateYmd(cell, headerParseOpts)) dateHeaderCols++;
+      if (/\b(date|day|time|period|created|sent|datetime|timestamp)\b/.test(h)) score += 3;
       if (/\b(number|phone|msisdn|did|dst|destination|to|sms_to|recipient|num)\b/.test(h)) score += 4;
       if (/\b(service|cli|sender|app|source|src|sid|origin|brand|product)\b/.test(h)) score += 3;
       if (/\b(count|sms|qty|quantity|total|messages|msgs|hits|delivered|volume|amount)\b/.test(h)) score += 3;
       if (/\b(range|country|route|prefix|operator)\b/.test(h)) score += 1;
     }
-    if (dateHeaderCols >= 2) score += 6;
+    if (dateHeaderCols >= 2) score += 8;
     if (score > bestRowScore) {
       bestRowScore = score;
       headerRowIdx = r;
@@ -4113,7 +4432,7 @@ function detectSheetColumnMapping(rowsMatrix) {
   }
 
   const rawHeaders = (rowsMatrix[headerRowIdx] || []).map((c, idx) => {
-    const dYmd = parseExcelDateYmd(c);
+    const dYmd = parseExcelDateYmd(c, headerParseOpts);
     if (dYmd && typeof c === 'number') return dYmd;
     const s = String(c ?? '').trim();
     return s || `Col ${idx + 1}`;
@@ -4124,12 +4443,12 @@ function detectSheetColumnMapping(rowsMatrix) {
 
   rawHeaders.forEach((hdr, idx) => {
     const h = hdr.toLowerCase();
-    const parsedHeaderDate = parseExcelDateYmd(rowsMatrix[headerRowIdx]?.[idx]);
+    const parsedHeaderDate = parseExcelDateYmd(rowsMatrix[headerRowIdx]?.[idx], headerParseOpts);
     if (parsedHeaderDate) {
       datePivotCols.push({ idx, date_ymd: parsedHeaderDate, label: hdr });
       return;
     }
-    if (colMap.date === -1 && /(^|[\s_-])(date|day|sms_date|stat_date|report_date|time|period)([\s_-]|$)/.test(h)) {
+    if (colMap.date === -1 && /(^|[\s_-])(date|day|sms_date|stat_date|report_date|created|created_at|sent_at|datetime|timestamp|time|period)([\s_-]|$)/.test(h)) {
       colMap.date = idx;
     } else if (colMap.number === -1 && /(number|phone|msisdn|did|dst|destination|sms_to|recipient|tel|mobile)/.test(h)) {
       colMap.number = idx;
@@ -4142,8 +4461,9 @@ function detectSheetColumnMapping(rowsMatrix) {
     }
   });
 
-  // Content-based fallback heuristic on first 20 data rows if any key column wasn't named cleanly
-  const sampleRows = rowsMatrix.slice(headerRowIdx + 1, headerRowIdx + 25);
+  // Content-based fallback heuristic on first 25 data rows if any key column wasn't named cleanly
+  const sampleRows = rowsMatrix.slice(headerRowIdx + 1, headerRowIdx + 26);
+  const cellParseOpts = { hintYear: dateHints.hintYear, hintMonth: dateHints.hintMonth, allowShortDate: true };
   if (sampleRows.length > 0) {
     const colCount = rawHeaders.length;
     if (colMap.number === -1) {
@@ -4154,7 +4474,7 @@ function detectSheetColumnMapping(rowsMatrix) {
           const d = normalizePhoneDigits(r[c]);
           if (String(r[c] ?? '').trim() !== '') {
             valid++;
-            if (d.length >= 8 && d.length <= 16) phoneHits++;
+            if (d.length >= 8 && d.length <= 16 && !parseExcelDateYmd(r[c], cellParseOpts)) phoneHits++;
           }
         }
         if (valid > 0 && phoneHits / valid >= 0.6) { colMap.number = c; break; }
@@ -4167,10 +4487,10 @@ function detectSheetColumnMapping(rowsMatrix) {
         for (const r of sampleRows) {
           if (String(r[c] ?? '').trim() !== '') {
             valid++;
-            if (parseExcelDateYmd(r[c])) dateHits++;
+            if (parseExcelDateYmd(r[c], cellParseOpts)) dateHits++;
           }
         }
-        if (valid > 0 && dateHits / valid >= 0.6) { colMap.date = c; break; }
+        if (valid > 0 && dateHits / valid >= 0.5) { colMap.date = c; break; }
       }
     }
     if (colMap.sms_count === -1 && datePivotCols.length === 0) {
@@ -4216,19 +4536,28 @@ function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) 
     throw new Error('Workbook contains no readable sheets.');
   }
 
+  const dateHints = extractFilenameDateHints(filename);
+  const cellDateOpts = { hintYear: dateHints.hintYear, hintMonth: dateHints.hintMonth, allowShortDate: true };
+
   const sheetInfos = wb.SheetNames.map(name => {
     const ws = wb.Sheets[name];
-    const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
-    const det = detectSheetColumnMapping(matrix);
+    const matrix = buildWorksheetMatrix(ws);
+    const det = detectSheetColumnMapping(matrix, dateHints);
+    const sheetDateYmd = parseExcelDateYmd(name, { ...cellDateOpts, allowShortDate: true });
     return {
       name,
       matrix,
+      sheetDateYmd,
       ...det
     };
   });
 
+  // Auto-detect multi-sheet date-per-tab workbooks (e.g. tabs named 01.11.2026 .. 15.11.2026)
+  const dateNamedSheets = sheetInfos.filter(s => s.sheetDateYmd && s.colMap.number !== -1 && s.dataRowCount > 0);
+  const useMultiDateSheets = !opts.sheetName && dateNamedSheets.length >= 2;
+
   let selected = null;
-  if (opts.sheetName) {
+  if (opts.sheetName && opts.sheetName !== '__ALL_DATE_SHEETS__') {
     selected = sheetInfos.find(s => s.name === opts.sheetName) || null;
   }
   if (!selected) {
@@ -4244,84 +4573,76 @@ function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) 
     range: opts.colMap && opts.colMap.range !== undefined ? Number(opts.colMap.range) : selected.colMap.range
   };
 
-  // Determine layout (respect user override if they explicitly mapped a Date column)
-  const usePivot = (effectiveMap.date === -1 && selected.datePivotCols.length >= 1 && effectiveMap.number !== -1);
   const warnings = [];
   const aggregated = new Map();
   let rawParsedRows = 0;
   let skippedInvalidRows = 0;
 
-  // Fallback date from filename if no date column exists (e.g. sms_stats_19.11.2026.xlsx)
-  let fallbackFileDate = null;
-  const fnMatch = String(filename || '').match(/(\d{1,2})[.-](\d{1,2})[.-](\d{4})/);
-  if (fnMatch) {
-    fallbackFileDate = parseExcelDateYmd(`${fnMatch[1]}.${fnMatch[2]}.${fnMatch[3]}`);
-  } else {
-    const fnIso = String(filename || '').match(/(\d{4})-(\d{2})-(\d{2})/);
-    if (fnIso) fallbackFileDate = `${fnIso[1]}-${fnIso[2]}-${fnIso[3]}`;
-  }
+  const parseSheetIntoAgg = (sh, mapToUse, fallbackDate) => {
+    const isPivot = (mapToUse.date === -1 && sh.datePivotCols.length >= 1 && mapToUse.number !== -1);
+    const dataRows = sh.matrix.slice(sh.headerRowIdx + 1);
+    if (mapToUse.number === -1) return;
 
-  const dataRows = selected.matrix.slice(selected.headerRowIdx + 1);
-  if (effectiveMap.number === -1) {
-    warnings.push('Could not auto-detect Number column — please select the Number column below.');
-  } else if (usePivot) {
-    for (let i = 0; i < dataRows.length; i++) {
-      const row = dataRows[i];
-      if (!Array.isArray(row) || row.every(c => String(c ?? '').trim() === '')) continue;
-      const digits = normalizePhoneDigits(row[effectiveMap.number]);
-      if (digits.length < 6) { skippedInvalidRows++; continue; }
-      const serviceRaw = effectiveMap.service >= 0 ? String(row[effectiveMap.service] ?? '').trim() : '';
-      const serviceLabel = serviceRaw || 'General';
-      const serviceNorm = normalizeServiceKey(serviceLabel);
-      const rangeHint = effectiveMap.range >= 0 ? String(row[effectiveMap.range] ?? '').trim() : '';
+    if (isPivot) {
+      for (let i = 0; i < dataRows.length; i++) {
+        const row = dataRows[i];
+        if (!Array.isArray(row) || row.every(c => String(c ?? '').trim() === '')) continue;
+        const firstCellStr = String(row[0] ?? '').trim().toLowerCase();
+        if (firstCellStr === 'total' || firstCellStr === 'grand total' || firstCellStr.startsWith('total:')) continue;
+        const digits = normalizePhoneDigits(row[mapToUse.number]);
+        if (digits.length < 6) { skippedInvalidRows++; continue; }
+        const serviceRaw = mapToUse.service >= 0 ? String(row[mapToUse.service] ?? '').trim() : '';
+        const serviceLabel = serviceRaw || 'General';
+        const serviceNorm = normalizeServiceKey(serviceLabel);
+        const rangeHint = mapToUse.range >= 0 ? String(row[mapToUse.range] ?? '').trim() : '';
 
-      for (const dc of selected.datePivotCols) {
-        const cnt = Number(row[dc.idx]);
-        if (!Number.isFinite(cnt) || cnt <= 0) continue;
-        const intCnt = Math.round(cnt);
-        rawParsedRows++;
-        const statKey = `${dc.date_ymd}|${digits}|${serviceNorm}`;
-        const prev = aggregated.get(statKey);
-        if (prev) {
-          prev.sms_count += intCnt;
-        } else {
-          aggregated.set(statKey, {
-            stat_key: statKey,
-            date_ymd: dc.date_ymd,
-            number_digits: digits,
-            service: serviceLabel,
-            service_normalized: serviceNorm,
-            sms_count: intCnt,
-            range_hint: rangeHint
-          });
+        for (const dc of sh.datePivotCols) {
+          const cnt = Number(String(row[dc.idx] ?? '').replace(/,/g, '').trim());
+          if (!Number.isFinite(cnt) || cnt <= 0) continue;
+          const intCnt = Math.round(cnt);
+          rawParsedRows++;
+          const statKey = `${dc.date_ymd}|${digits}|${serviceNorm}`;
+          const prev = aggregated.get(statKey);
+          if (prev) {
+            prev.sms_count += intCnt;
+          } else {
+            aggregated.set(statKey, {
+              stat_key: statKey,
+              date_ymd: dc.date_ymd,
+              number_digits: digits,
+              service: serviceLabel,
+              service_normalized: serviceNorm,
+              sms_count: intCnt,
+              range_hint: rangeHint
+            });
+          }
         }
       }
+      return;
     }
-  } else {
-    if (effectiveMap.date === -1 && !fallbackFileDate) {
-      warnings.push('Could not auto-detect Date column — please map the Date column below.');
-    }
+
     for (let i = 0; i < dataRows.length; i++) {
       const row = dataRows[i];
       if (!Array.isArray(row) || row.every(c => String(c ?? '').trim() === '')) continue;
-      // Ignore footer "Total" rows
       const firstCellStr = String(row[0] ?? '').trim().toLowerCase();
       if (firstCellStr === 'total' || firstCellStr === 'grand total' || firstCellStr.startsWith('total:')) continue;
 
-      const digits = normalizePhoneDigits(row[effectiveMap.number]);
+      const digits = normalizePhoneDigits(row[mapToUse.number]);
       if (digits.length < 6) { skippedInvalidRows++; continue; }
 
-      const dateYmd = effectiveMap.date >= 0 ? parseExcelDateYmd(row[effectiveMap.date]) : fallbackFileDate;
+      const dateYmd = mapToUse.date >= 0
+        ? parseExcelDateYmd(row[mapToUse.date], cellDateOpts)
+        : (sh.sheetDateYmd || fallbackDate);
       if (!dateYmd) { skippedInvalidRows++; continue; }
 
-      const serviceRaw = effectiveMap.service >= 0 ? String(row[effectiveMap.service] ?? '').trim() : '';
+      const serviceRaw = mapToUse.service >= 0 ? String(row[mapToUse.service] ?? '').trim() : '';
       const serviceLabel = serviceRaw || 'General';
       const serviceNorm = normalizeServiceKey(serviceLabel);
-      const rangeHint = effectiveMap.range >= 0 ? String(row[effectiveMap.range] ?? '').trim() : '';
+      const rangeHint = mapToUse.range >= 0 ? String(row[mapToUse.range] ?? '').trim() : '';
 
       let cnt = 1;
-      if (effectiveMap.sms_count >= 0) {
-        const rawCnt = row[effectiveMap.sms_count];
+      if (mapToUse.sms_count >= 0) {
+        const rawCnt = row[mapToUse.sms_count];
         const parsedCnt = Number(String(rawCnt ?? '').replace(/,/g, '').trim());
         if (!Number.isFinite(parsedCnt) || parsedCnt < 0) { skippedInvalidRows++; continue; }
         cnt = Math.round(parsedCnt);
@@ -4345,6 +4666,25 @@ function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) 
         });
       }
     }
+  };
+
+  let usedLayout = 'tabular';
+  if (useMultiDateSheets) {
+    usedLayout = 'multi_date_sheets';
+    for (const sh of dateNamedSheets) {
+      parseSheetIntoAgg(sh, sh.colMap, sh.sheetDateYmd);
+    }
+  } else {
+    const usePivot = (effectiveMap.date === -1 && selected.datePivotCols.length >= 1 && effectiveMap.number !== -1);
+    usedLayout = usePivot ? 'date_pivot' : 'tabular';
+    if (effectiveMap.number === -1) {
+      warnings.push('Could not auto-detect Number column — please select the Number column below.');
+    } else {
+      if (!usePivot && effectiveMap.date === -1 && !selected.sheetDateYmd && !dateHints.fallbackFileDate) {
+        warnings.push('Could not auto-detect Date column — please map the Date column below.');
+      }
+      parseSheetIntoAgg(selected, effectiveMap, dateHints.fallbackFileDate);
+    }
   }
 
   if (skippedInvalidRows > 0) {
@@ -4357,6 +4697,15 @@ function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) 
     return a.service.localeCompare(b.service);
   });
 
+  const distinctDates = Array.from(new Set(canonicalRows.map(r => r.date_ymd))).sort();
+  let dateRangeCollapsedWarning = false;
+  if (dateHints.hasDateRange && distinctDates.length <= 1 && effectiveMap.date === -1 && !useMultiDateSheets && usedLayout !== 'date_pivot') {
+    dateRangeCollapsedWarning = true;
+    warnings.push(
+      `This file's name indicates a multi-day range, but the sheet has no per-day Date column or date columns — all rows fell onto a single date (${distinctDates[0] || dateHints.fallbackFileDate || 'unknown'}). Export a daily/date-column report or map the Date column so each date is recorded date-to-date.`
+    );
+  }
+
   return {
     filename,
     sheets: sheetInfos.map(s => ({
@@ -4364,13 +4713,16 @@ function parseWhitenoiseExcelBuffer(buffer, filename = 'stats.xlsx', opts = {}) 
       row_count: s.dataRowCount,
       score: s.sheetScore,
       layout: s.layout,
+      sheet_date_ymd: s.sheetDateYmd || null,
       headers: s.headers,
       detected_col_map: s.colMap
     })),
-    selected_sheet: selected.name,
-    layout: usePivot ? 'date_pivot' : 'tabular',
+    selected_sheet: useMultiDateSheets ? `All ${dateNamedSheets.length} Date Sheets` : selected.name,
+    layout: usedLayout,
     headers: selected.headers,
     col_map: effectiveMap,
+    distinct_dates: distinctDates,
+    date_range_collapsed_warning: dateRangeCollapsedWarning,
     raw_parsed_rows: rawParsedRows,
     skipped_invalid_rows: skippedInvalidRows,
     warnings,
@@ -4539,15 +4891,91 @@ function evaluateWhitenoiseExcelUpload(buffer, filename, opts = {}) {
     });
   }
 
+  // Build Day-by-Day Verification Matrix & Half-Month (1-15 / 16-End) Missing-Day Gap Detection
+  const existingSmsByDate = new Map();
+  for (const st of existingStats) {
+    if (!st || !st.date_ymd) continue;
+    existingSmsByDate.set(st.date_ymd, (existingSmsByDate.get(st.date_ymd) || 0) + (Number(st.sms_count) || 0));
+  }
+  const existingDatesAll = Array.from(existingSmsByDate.keys()).sort();
+  const existingMinAll = existingDatesAll[0] || null;
+  const existingMaxAll = existingDatesAll[existingDatesAll.length - 1] || null;
+
+  const perDateMap = new Map();
+  for (const r of evaluatedRows) {
+    const d = r.date_ymd;
+    if (!perDateMap.has(d)) {
+      const dayNum = Number(d.slice(8, 10)) || 1;
+      perDateMap.set(d, {
+        date_ymd: d,
+        day: dayNum,
+        half_period: dayNum <= 15 ? '1-15' : '16-end',
+        existing_sms: existingSmsByDate.get(d) || 0,
+        file_sms: 0,
+        delta_sms: 0,
+        new_rows: 0,
+        updated_rows: 0,
+        unchanged_rows: 0,
+        status: 'new_day'
+      });
+    }
+    const bucket = perDateMap.get(d);
+    bucket.file_sms += Number(r.sms_count) || 0;
+    bucket.delta_sms += Number(r.delta_sms) || 0;
+    if (r.action === 'new') bucket.new_rows++;
+    else if (r.action === 'updated') bucket.updated_rows++;
+    else bucket.unchanged_rows++;
+  }
+
+  const missingDaysFilled = [];
+  const perDateSummary = Array.from(perDateMap.values()).sort((a, b) => a.date_ymd.localeCompare(b.date_ymd));
+  for (const dRow of perDateSummary) {
+    const wasMissingGap = dRow.existing_sms === 0 && existingMinAll && existingMaxAll &&
+      ((dRow.date_ymd > existingMinAll && dRow.date_ymd < existingMaxAll) ||
+       (dRow.date_ymd < existingMaxAll && dRow.date_ymd.slice(0, 7) === existingMaxAll.slice(0, 7)));
+    if (wasMissingGap) {
+      dRow.status = 'missing_day_filled';
+      missingDaysFilled.push(dRow.date_ymd);
+    } else if (dRow.existing_sms === 0) {
+      dRow.status = 'new_day';
+    } else if (dRow.new_rows === 0 && dRow.updated_rows === 0 && dRow.delta_sms === 0) {
+      dRow.status = 'verified_match';
+    } else {
+      dRow.status = 'updated';
+    }
+  }
+
+  // Detect any remaining missing dates inside the file span [dateMin..dateMax]
+  const fileDateSet = new Set(perDateSummary.map(d => d.date_ymd));
+  const missingDatesRemaining = [];
+  if (dateMin && dateMax) {
+    for (const dYmd of enumerateDatesYmd(dateMin, dateMax)) {
+      if (!fileDateSet.has(dYmd) && !(existingSmsByDate.get(dYmd) > 0)) {
+        missingDatesRemaining.push(dYmd);
+      }
+    }
+  }
+
+  const targetMonth = (dateMax || existingMaxAll || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  const halfMonthCoverage = buildWhitenoiseMonthCoverage(targetMonth, existingStats, perDateSummary);
+
   return {
     parsed,
     date_min: dateMin,
     date_max: dateMax,
+    distinct_dates: perDateSummary.map(d => d.date_ymd),
+    per_date_summary: perDateSummary,
+    missing_days_filled: missingDaysFilled,
+    missing_dates_remaining: missingDatesRemaining,
+    half_month_coverage: halfMonthCoverage,
     summary: {
       total_rows: evaluatedRows.length,
+      distinct_dates_count: perDateSummary.length,
       new_rows: newRows,
       updated_rows: updatedRows,
       unchanged_rows: unchangedRows,
+      missing_days_filled_count: missingDaysFilled.length,
+      missing_dates_remaining_count: missingDatesRemaining.length,
       matched_client: matchedClient,
       agent_pool: agentPool,
       unassigned: unassigned + unknownNumbers,
@@ -4560,6 +4988,87 @@ function evaluateWhitenoiseExcelUpload(buffer, filename, opts = {}) {
       net_owner_profit_delta_usd: netOwnerProfitDelta
     },
     evaluated_rows: evaluatedRows
+  };
+}
+
+function buildWhitenoiseMonthCoverage(monthYm, statsList = null, previewDateSummary = null) {
+  const stats = statsList || (readDb('whitenoise_daily_stats') || []);
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  const safeYm = /^\d{4}-\d{2}$/.test(String(monthYm || '')) ? String(monthYm) : todayYmd.slice(0, 7);
+  const year = Number(safeYm.slice(0, 4));
+  const month = Number(safeYm.slice(5, 7));
+  const totalDays = daysInUtcMonth(year, month);
+
+  const smsByDate = new Map();
+  for (const st of stats) {
+    if (!st || !st.date_ymd || !String(st.date_ymd).startsWith(safeYm)) continue;
+    smsByDate.set(st.date_ymd, (smsByDate.get(st.date_ymd) || 0) + (Number(st.sms_count) || 0));
+  }
+  const previewByDate = new Map();
+  if (Array.isArray(previewDateSummary)) {
+    for (const d of previewDateSummary) {
+      if (d && d.date_ymd && d.date_ymd.startsWith(safeYm)) previewByDate.set(d.date_ymd, d);
+    }
+  }
+
+  const allUploadedDates = Array.from(smsByDate.keys()).sort();
+  const maxUploadedInMonth = allUploadedDates[allUploadedDates.length - 1] || null;
+  const maxCheckYmd = maxUploadedInMonth && maxUploadedInMonth > todayYmd ? maxUploadedInMonth : todayYmd;
+
+  const buildPeriod = (startDay, endDay) => {
+    const days = [];
+    let uploadedDays = 0;
+    let missingDays = 0;
+    let totalSms = 0;
+    const missingDates = [];
+
+    for (let day = startDay; day <= endDay; day++) {
+      const ymd = `${safeYm}-${String(day).padStart(2, '0')}`;
+      const existingSms = smsByDate.get(ymd) || 0;
+      const prevInfo = previewByDate.get(ymd) || null;
+      const effectiveSms = prevInfo ? Math.max(existingSms, prevInfo.file_sms) : existingSms;
+
+      let status = 'future';
+      if (existingSms > 0) {
+        status = prevInfo && prevInfo.status === 'updated' ? 'updated' : 'uploaded';
+        uploadedDays++;
+        totalSms += existingSms;
+      } else if (prevInfo && prevInfo.file_sms > 0) {
+        status = prevInfo.status === 'missing_day_filled' ? 'missing_day_filled' : 'incoming';
+        uploadedDays++;
+        totalSms += prevInfo.file_sms;
+      } else if (ymd <= maxCheckYmd && (maxUploadedInMonth ? ymd <= maxUploadedInMonth : ymd <= todayYmd)) {
+        status = 'missing';
+        missingDays++;
+        missingDates.push(ymd);
+      }
+
+      days.push({
+        day,
+        date_ymd: ymd,
+        status,
+        existing_sms: existingSms,
+        sms_count: effectiveSms
+      });
+    }
+
+    return {
+      label: startDay === 1 ? '1 – 15' : `16 – ${endDay}`,
+      start_day: startDay,
+      end_day: endDay,
+      uploaded_days: uploadedDays,
+      missing_days: missingDays,
+      missing_dates: missingDates,
+      total_sms: totalSms,
+      days
+    };
+  };
+
+  return {
+    month: safeYm,
+    total_days: totalDays,
+    period_1_15: buildPeriod(1, Math.min(15, totalDays)),
+    period_16_end: buildPeriod(16, totalDays)
   };
 }
 
@@ -4690,6 +5199,9 @@ function commitWhitenoiseExcelEvaluation(evalRes, actorUsername = 'Owner') {
     uploaded_at: nowIso,
     date_min: evalRes.date_min,
     date_max: evalRes.date_max,
+    distinct_dates: evalRes.distinct_dates || [],
+    missing_days_filled: evalRes.missing_days_filled || [],
+    per_date_summary: evalRes.per_date_summary || [],
     total_rows: evalRes.summary.total_rows,
     rows_inserted: evalRes.summary.new_rows,
     rows_updated: evalRes.summary.updated_rows,
@@ -5533,6 +6045,7 @@ function sendInjectedHtml(res, filePath, req = null) {
 
     let userThemeKey = '';
     let userThemeMode = '';
+    let userLang = 'en';
     let isOwnerSession = false;
     if (req) {
       try {
@@ -5547,6 +6060,9 @@ function sendInjectedHtml(res, filePath, req = null) {
             }
             if (found.user.theme_mode === 'dark' || found.user.theme_mode === 'light' || found.user.theme_mode === 'system') {
               userThemeMode = found.user.theme_mode;
+            }
+            if (found.user.language === 'roman_ur' || found.user.language === 'en') {
+              userLang = found.user.language;
             }
           }
         }
@@ -5589,7 +6105,7 @@ function sendInjectedHtml(res, filePath, req = null) {
       content = content.replace(/<html([^>]*)>/i, `<html$1 data-chrome-tone="${effectiveTheme.structure_tone}" data-role-theme="${escHtml(effectiveTheme.key)}">`);
     }
 
-    const userThemePayload = { theme_key: userThemeKey, theme_mode: userThemeMode };
+    const userThemePayload = { theme_key: userThemeKey, theme_mode: userThemeMode, language: userLang };
     const isProdEnv = process.env.NODE_ENV === 'production';
     const guardEnabled = isProdEnv && process.env.CLIENT_GUARD_ENABLED === 'true';
     const protectOwner = process.env.GUARD_PROTECT_OWNER === 'true';
@@ -6154,6 +6670,8 @@ const CLIENT_ALLOW = [
   { m: new Set(['GET']), p: /^\/numbers\/sms-ranges$/ },
   { m: new Set(['GET']), p: /^\/numbers\/rate-card$/ },
   { m: new Set(['GET']), p: /^\/numbers\/allocation-policy$/ },
+  { m: new Set(['GET']), p: /^\/numbers\/range-return-batches$/ },
+  { m: new Set(['POST']), p: /^\/numbers\/return-by-date$/ },
   { m: new Set(['POST']), p: /^\/numbers\/\d+\/whitenoise-fetch$/ },
   { m: new Set(['GET']), p: /^\/client\/rate-card$/ },
   { m: new Set(['POST']), p: /^\/numbers\/(agent-allocate|request)$/ },
@@ -6505,7 +7023,7 @@ app.post('/api/user/profile/update', (req, res) => {
   const found = findUserAnywhere(sessionUser.username);
   if (!found) return res.status(404).json({ success: false, error: 'User not found' });
 
-  const { full_name, phone, teams, email, theme_mode, theme_key } = req.body || {};
+  const { full_name, phone, teams, email, theme_mode, theme_key, language } = req.body || {};
   const updates = {};
   const changedFields = [];
   if (full_name !== undefined) {
@@ -6535,6 +7053,13 @@ app.post('/api/user/profile/update', (req, res) => {
     }
     updates.theme_mode = cleanTheme;
   }
+  if (language !== undefined) {
+    const cleanLang = String(language).trim().toLowerCase();
+    if (!['en', 'roman_ur'].includes(cleanLang)) {
+      return res.status(400).json({ success: false, error: 'Invalid language preference' });
+    }
+    updates.language = cleanLang;
+  }
   if (theme_key !== undefined) {
     const rawKey = String(theme_key || '').trim();
     if (!rawKey || rawKey === 'default' || rawKey === 'system_default') {
@@ -6561,7 +7086,8 @@ app.post('/api/user/profile/update', (req, res) => {
       phone: updates.phone !== undefined ? updates.phone : (found.user.phone || found.user.contact || ''),
       teams: updates.teams !== undefined ? updates.teams : (found.user.teams || ''),
       theme_mode: updates.theme_mode !== undefined ? updates.theme_mode : (found.user.theme_mode || ''),
-      theme_key: updates.theme_key !== undefined ? updates.theme_key : (found.user.theme_key || '')
+      theme_key: updates.theme_key !== undefined ? updates.theme_key : (found.user.theme_key || ''),
+      language: updates.language !== undefined ? updates.language : (found.user.language || 'en')
     }
   });
 });
@@ -7274,7 +7800,10 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
 
   const allRanges = readDb('sms_ranges') || [];
   const numbers = readDb('numbers') || [];
+  const allRequests = readDb('number_requests') || [];
+  const allHistory = readDb('allocation_history') || [];
   const isOwner = role === 'owner' || role === 'admin';
+  const isAgent = role === 'agent';
   const isClient = role === 'client';
   const wnAllowed = isOwner || hasWhitenoiseAccess(_viewer);
   const wnTags = getWhitenoiseProviderTags();
@@ -7287,12 +7816,6 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
     const myAgentId = clRec.agent_id || _viewer.agent_id || null;
     const fx = getUsdToPkrRate();
     const acrList = myAgentId ? getAgentClientRates(myAgentId) : [];
-    const todayIso = new Date().toISOString().slice(0, 10);
-    const reqs = (readDb('number_requests') || []).filter(r =>
-      r && Number(r.client_id) === Number(_viewer.id) &&
-      String(r.status || '').toLowerCase() !== 'rejected' &&
-      String(r.created || r.timestamp || '').slice(0, 10) === todayIso
-    );
 
     const out = [];
     for (const r of ranges) {
@@ -7301,18 +7824,16 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
                   acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
       if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
 
-      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
-      const dailyLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
-      const reqTodayCount = reqs.filter(q =>
-        (q.range_id && Number(q.range_id) === Number(r.id)) ||
-        String(q.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase()
-      ).length;
-      const poolAvailable = numbers.filter(n =>
-        (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
-        Number(n.agent_id) === Number(myAgentId) && !n.client_id
+      const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+      const ptInfo = resolveRangeActivePayterms(r, isWnRng);
+      const quota = getClientRangeQuota(_viewer.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory });
+      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
+      const effAllowedQty = allowedQty.length ? allowedQty : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
+      const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
+      const poolAvailable = rangeNums.filter(n =>
+        myAgentId ? (Number(n.agent_id) === Number(myAgentId) && !n.client_id) : (!n.agent_id && !n.client_id)
       ).length;
 
-      const isWnRng = isWhitenoiseRecord(r, null, wnTags);
       const visRangeName = scrubWhitenoiseName(rangeName, isOwner);
       out.push({
         id: r.id,
@@ -7322,19 +7843,25 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
         prefix: r.prefix || '',
         provider: maskProviderLabel(r.provider || '', isOwner, wnTags),
         is_whitenoise: isWnRng,
-        payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
+        payterm: ptInfo.primary_payterm,
+        active_payterms: ptInfo.active_payterms,
         currency: 'PKR',
         rate: round2(acr.client_rate_pkr),
         payout: round2(acr.client_rate_pkr),
         client_rate_pkr: round2(acr.client_rate_pkr),
         usd_to_pkr_rate: fx,
-        allowed_quantities: allowedQty,
-        daily_request_limit: dailyLimit,
-        requests_today: reqTodayCount,
-        requested_today: reqTodayCount >= dailyLimit,
-        can_request_today: reqTodayCount < dailyLimit,
+        allowed_quantities: effAllowedQty,
+        daily_request_limit: 1,
+        ...quota,
+        requests_today: quota.today_numbers,
+        requested_today: !quota.can_request_now,
+        can_request_today: quota.can_request_now,
         available: poolAvailable,
-        total_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id))).length
+        free_count: poolAvailable,
+        unassigned_count: poolAvailable,
+        agent_free_count: poolAvailable,
+        total_count: rangeNums.length,
+        numbers_count: rangeNums.length
       });
     }
     return res.json(out);
@@ -7343,8 +7870,14 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
   const enriched = ranges.map(r => {
     const rangeName = r.range_name || r.name || r.country || 'Range';
     const visRangeName = scrubWhitenoiseName(rangeName, isOwner);
-    const agentRate = Number(r.rate || r.payout || 0.01);
     const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+    const ptInfo = resolveRangeActivePayterms(r, isWnRng);
+    const agentRate = getRangeAgentRate(r, ptInfo.primary_payterm) || Number(r.rate || r.payout || 0.01);
+
+    const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
+    const totalCount = rangeNums.length;
+    const ownerFreeCount = rangeNums.filter(n => !n.agent_id && !n.client_id).length;
+    const heldCount = totalCount - ownerFreeCount;
 
     const base = {
       ...r,
@@ -7352,18 +7885,53 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
       name: visRangeName,
       provider: maskProviderLabel(r.provider || '', isOwner, wnTags),
       is_whitenoise: isWnRng,
-      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
-      unassigned_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id)) && !n.agent_id && !n.client_id).length,
-      total_count: numbers.filter(n => (n.range_name ? n.range_name === rangeName : Number(n.range_id) === Number(r.id))).length
+      payterm: ptInfo.primary_payterm,
+      active_payterms: ptInfo.active_payterms,
+      payterms: ptInfo.payterms,
+      unassigned_count: ownerFreeCount,
+      free_count: ownerFreeCount,
+      owner_free_count: ownerFreeCount,
+      available: ownerFreeCount,
+      held_count: heldCount,
+      total_count: totalCount,
+      numbers_count: totalCount
     };
 
     if (isOwner) {
       return base;
     } else {
-      // Agent sees only Owner-set master agent rate (never leaks owner buy_rate or internal margins)
+      // Agent sees Owner's real free pool + Agent's own held/free breakdown & pending status
+      // (never leaks owner buy_rate or internal margins)
       const { cost, buy_rate, carrier_rate, company_rate, company_cost, ...rest } = base;
+      let agentExtras = {};
+      if (isAgent && _viewer && _viewer.id != null) {
+        const aid = Number(_viewer.id);
+        const agentFreeCount = rangeNums.filter(n => Number(n.agent_id) === aid && !n.client_id).length;
+        const agentClientHeldCount = rangeNums.filter(n => Number(n.agent_id) === aid && Boolean(n.client_id)).length;
+        const agentTotalHeld = agentFreeCount + agentClientHeldCount;
+        const agPendingReqs = allRequests.filter(reqItem =>
+          reqItem &&
+          String(reqItem.requester_role || '').toLowerCase() === 'agent' &&
+          Number(reqItem.agent_id || reqItem.requester_id) === aid &&
+          String(reqItem.status || '').toLowerCase() === 'pending' &&
+          matchesRangeRef(reqItem, r.id, rangeName)
+        );
+        agentExtras = {
+          available: ownerFreeCount,
+          owner_free_count: ownerFreeCount,
+          free_count: ownerFreeCount,
+          agent_free_count: agentFreeCount,
+          agent_client_held_count: agentClientHeldCount,
+          agent_held_count: agentTotalHeld,
+          held_count: agentTotalHeld,
+          pending_request_count: agPendingReqs.length,
+          has_pending_request: agPendingReqs.length > 0,
+          pending_qty: agPendingReqs.reduce((sum, x) => sum + (parseInt(x.quantity, 10) || 0), 0)
+        };
+      }
       return {
         ...rest,
+        ...agentExtras,
         rate: agentRate,
         agent_rate: agentRate,
         currency: r.currency || 'USD'
@@ -7383,11 +7951,11 @@ app.get('/api/rates/agent-card', requireAuth, (req, res) => {
   const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
 
   const card = ranges.map(r => {
-    const pts = r.payterms || {};
     const isWnRng = isWhitenoiseRecord(r, null, wnTags);
-    const weeklyRate = Number(pts['Weekly'] !== undefined ? pts['Weekly'] : (r.rate || r.payout || 0.01));
-    const biweeklyRate = Number(pts['Biweekly'] !== undefined ? pts['Biweekly'] : weeklyRate);
-    const monthlyRate = Number(pts['Monthly'] !== undefined ? pts['Monthly'] : (Math.round(weeklyRate * 1.05 * 10000) / 10000));
+    const ptInfo = resolveRangeActivePayterms(r, isWnRng);
+    const weeklyRate = ptInfo.payterms['Weekly'] !== undefined ? Number(ptInfo.payterms['Weekly']) : null;
+    const monthlyRate = ptInfo.payterms['Monthly'] !== undefined ? Number(ptInfo.payterms['Monthly']) : null;
+    const primaryRate = Number(ptInfo.payterms[ptInfo.primary_payterm] ?? r.payout ?? r.rate ?? 0);
 
     return {
       id: r.id,
@@ -7396,20 +7964,15 @@ app.get('/api/rates/agent-card', requireAuth, (req, res) => {
       prefix: r.prefix,
       provider: maskProviderLabel(r.provider || '', _isOwner, wnTags),
       is_whitenoise: isWnRng,
-      agent_rate: isWnRng ? monthlyRate : weeklyRate,
+      agent_rate: primaryRate,
       weekly_rate: weeklyRate,
-      biweekly_rate: biweeklyRate,
       monthly_rate: monthlyRate,
       weekly_term: 'Weekly (7/3)',
-      biweekly_term: 'Biweekly (15/3)',
       monthly_term: 'Monthly (30/5) {W}',
-      payterms: isWnRng ? { 'Monthly': monthlyRate } : {
-        'Weekly': weeklyRate,
-        'Biweekly': biweeklyRate,
-        'Monthly': monthlyRate
-      },
+      active_payterms: ptInfo.active_payterms,
+      payterms: ptInfo.payterms,
       currency: r.currency || 'USD',
-      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly')
+      payterm: ptInfo.primary_payterm
     };
   });
   res.json({ success: true, ranges: card });
@@ -7434,7 +7997,8 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
   const items = ranges.map(r => {
     const rangeName = r.range_name || r.name || r.country || 'Range';
     const isWnRng = isWhitenoiseRecord(r, null, wnTags);
-    const effPayterm = isWnRng ? 'Monthly' : (r.payterm || 'Weekly');
+    const ptInfo = resolveRangeActivePayterms(r, isWnRng);
+    const effPayterm = ptInfo.primary_payterm;
     const agentRateUsd = getRangeAgentRate(r, effPayterm);
     const agentRatePkr = round2(agentRateUsd * fx);
     const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
@@ -7456,7 +8020,8 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
       is_whitenoise: isWnRng,
       active: r.active !== false,
       payterm: effPayterm,
-      payterms: r.payterms || {},
+      active_payterms: ptInfo.active_payterms,
+      payterms: ptInfo.payterms,
       max_sms_day: r.max_sms_day ?? r.otp_limit ?? null,
       memo: r.memo || '',
       cli_list: r.cli_list || (Array.isArray(r.clis) && r.clis.length ? r.clis.join(', ') : (r.cli || 'All CLIs')),
@@ -7468,7 +8033,7 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
       margin_pkr: marginPkr,
       published: acr ? acr.published !== false : false,
       configured: isConfigured,
-      allowed_quantities: acr ? normalizeAllowedQuantities(acr.allowed_quantities) : [25, 50],
+      allowed_quantities: acr ? normalizeAllowedQuantities(acr.allowed_quantities) : [25],
       daily_request_limit: acr ? Math.max(1, parseInt(acr.daily_request_limit, 10) || 1) : 1,
       pool_available: poolAvailable,
       updated_at: acr ? (acr.updated_at || acr.created || '') : ''
@@ -7528,7 +8093,10 @@ function handleSaveAgentClientRates(req, res) {
       return res.status(400).json({ error: `Valid positive PKR rate is required for "${rng.range_name || rng.name}".` });
     }
 
-    const agentRateUsd = getRangeAgentRate(rng, rng.payterm || 'Weekly');
+    const wnTags = getWhitenoiseProviderTags();
+    const isWnRng = isWhitenoiseRecord(rng, null, wnTags);
+    const ptInfo = resolveRangeActivePayterms(rng, isWnRng);
+    const agentRateUsd = getRangeAgentRate(rng, ptInfo.primary_payterm);
     const agentRatePkr = round2(agentRateUsd * fx);
     if (agentRateUsd > 0 && clientRatePkr >= agentRatePkr) {
       return res.status(400).json({
@@ -7633,70 +8201,72 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
   const allRanges = readDb('sms_ranges') || [];
   const ranges = wnAllowed ? allRanges : allRanges.filter(r => !isWhitenoiseRecord(r, null, wnTags));
   const numbers = readDb('numbers') || [];
+  const allRequests = readDb('number_requests') || [];
+  const allHistory = readDb('allocation_history') || [];
   const acrList = targetAgentId ? getAgentClientRates(targetAgentId) : [];
   const fx = getUsdToPkrRate();
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const clientTodayReqs = role === 'client'
-    ? (readDb('number_requests') || []).filter(r =>
-        r && Number(r.client_id) === Number(sessionUser.id) &&
-        String(r.status || '').toLowerCase() !== 'rejected' &&
-        String(r.created || r.timestamp || '').slice(0, 10) === todayIso
-      )
-    : [];
 
   const card = [];
   for (const r of ranges) {
     const rangeName = r.range_name || r.name || r.country || 'Range';
     const isWnRng = isWhitenoiseRecord(r, null, wnTags);
+    const ptInfo = resolveRangeActivePayterms(r, isWnRng);
     const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
                 acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
     if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
 
-    const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
-    const dailyLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
-    const reqTodayCount = clientTodayReqs.filter(q =>
-      (q.range_id && Number(q.range_id) === Number(r.id)) ||
-      String(q.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase()
-    ).length;
+    const rawAllowed = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
+    const allowedQty = rawAllowed.length ? rawAllowed : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
     const poolAvailable = numbers.filter(n =>
-      (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
-      Number(n.agent_id) === Number(targetAgentId) && !n.client_id
+      n && matchesRangeRef(n, r.id, rangeName) &&
+      (targetAgentId ? (Number(n.agent_id) === Number(targetAgentId) && !n.client_id) : (!n.agent_id && !n.client_id))
     ).length;
-    const heldCount = role === 'client'
-      ? numbers.filter(n =>
-          (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
-          Number(n.client_id) === Number(sessionUser.id)
-        ).length
-      : 0;
 
-    const baseClientPkr = round2(acr.client_rate_pkr);
-    const agBaseUsd = getRangeAgentRate(r, isWnRng ? 'Monthly' : (r.payterm || 'Weekly'));
-    const srcPts = r.payterms || {};
-    const scalePkr = (key, fallbackKey) => {
-      const rawUsd = srcPts[key] !== undefined ? Number(srcPts[key]) : (fallbackKey && srcPts[fallbackKey] !== undefined ? Number(srcPts[fallbackKey]) : null);
-      if (rawUsd !== null && Number.isFinite(rawUsd) && rawUsd > 0 && agBaseUsd > 0) {
-        return round2(baseClientPkr * (rawUsd / agBaseUsd));
-      }
-      return baseClientPkr;
-    };
-    const paytermsPkr = isWnRng
-      ? { 'Monthly': scalePkr('Monthly', 'Weekly') }
+    const quota = role === 'client'
+      ? getClientRangeQuota(sessionUser.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory })
       : {
-          'Weekly': scalePkr('Weekly'),
-          'Biweekly': scalePkr('Biweekly', 'Weekly'),
-          'Monthly': scalePkr('Monthly', 'Weekly')
+          daily_numbers_limit: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+          today_numbers: 0,
+          daily_remaining: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+          max_hold_limit: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+          held_count: 0,
+          pending_qty: 0,
+          pending_request_count: 0,
+          has_pending_request: false,
+          hold_remaining: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+          weekly_adds_limit: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+          weekly_adds_used: 0,
+          weekly_adds_remaining: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+          next_weekly_slot_at: null,
+          max_requestable_now: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+          can_request_now: true,
+          block_reason: null
         };
 
+    const baseClientPkr = round2(acr.client_rate_pkr);
+    const agBaseUsd = getRangeAgentRate(r, ptInfo.primary_payterm);
+    const paytermsPkr = {};
+    for (const ptKey of ptInfo.active_payterms) {
+      const rawUsd = ptInfo.payterms[ptKey] !== undefined ? Number(ptInfo.payterms[ptKey]) : null;
+      if (rawUsd !== null && Number.isFinite(rawUsd) && rawUsd > 0 && agBaseUsd > 0) {
+        paytermsPkr[ptKey] = round2(baseClientPkr * (rawUsd / agBaseUsd));
+      } else {
+        paytermsPkr[ptKey] = baseClientPkr;
+      }
+    }
+
+    const visRangeName = scrubWhitenoiseName(rangeName, false);
     card.push({
       id: r.id,
       range_id: r.id,
-      range_name: rangeName,
-      name: rangeName,
+      range_name: visRangeName,
+      name: visRangeName,
       country: r.country || '',
       prefix: r.prefix || '',
       is_whitenoise: isWnRng,
       active: r.active !== false,
-      payterm: isWnRng ? 'Monthly' : (r.payterm || 'Weekly'),
+      payterm: ptInfo.primary_payterm,
+      active_payterms: ptInfo.active_payterms,
       payterms_pkr: paytermsPkr,
       max_sms_day: r.max_sms_day ?? r.otp_limit ?? null,
       memo: r.memo || '',
@@ -7706,12 +8276,14 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
       payout: baseClientPkr,
       client_rate_pkr: baseClientPkr,
       allowed_quantities: allowedQty,
-      daily_request_limit: dailyLimit,
-      requests_today: reqTodayCount,
-      requested_today: reqTodayCount >= dailyLimit,
-      can_request_today: reqTodayCount < dailyLimit,
-      held_count: heldCount,
-      available: poolAvailable
+      daily_request_limit: 1,
+      ...quota,
+      requests_today: quota.today_numbers,
+      requested_today: !quota.can_request_now,
+      can_request_today: quota.can_request_now,
+      available: poolAvailable,
+      free_count: poolAvailable,
+      agent_free_count: poolAvailable
     });
   }
 
@@ -7720,6 +8292,11 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
     currency: 'PKR',
     usd_to_pkr_rate: fx,
     payterm_schedules: PAYTERM_DEFINITIONS,
+    per_range_limits: {
+      daily_numbers_max: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+      active_hold_max: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+      weekly_adds_max: CLIENT_RANGE_WEEKLY_ADDS_MAX
+    },
     ranges: card
   });
 });
@@ -7736,7 +8313,9 @@ app.post('/api/numbers/sms-ranges', (req, res) => {
       if (!masterList.includes(normK)) {
         return res.status(400).json({ error: `Invalid payterm "${k}". Allowed payterms: ${masterList.join(', ')}` });
       }
-      migrated[normK] = v;
+      if (v !== '' && v !== null && v !== undefined && v !== 'NA' && v !== 'N/A' && !isNaN(Number(v))) {
+        migrated[normK] = Number(v);
+      }
     }
     req.body.payterms = migrated;
   }
@@ -7751,14 +8330,16 @@ app.post('/api/numbers/sms-ranges', (req, res) => {
   const ranges = readDb('sms_ranges') || [];
   const rangeName = (req.body.range_name || req.body.name || req.body.country || 'Range').trim();
   const isWnRng = isWhitenoiseRecord({ ...req.body, range_name: rangeName });
-  const effPt = isWnRng ? 'Monthly' : (req.body.payterm || 'Weekly');
-  const ptMeta = getPaytermMeta(effPt);
+  const ptInfo = resolveRangeActivePayterms({ ...req.body, range_name: rangeName }, isWnRng);
+  const ptMeta = getPaytermMeta(ptInfo.primary_payterm);
   const entry = {
-    id: nextId(ranges),
+    id: nextId(ranges, 'sms_ranges'),
     ...req.body,
     range_name: rangeName,
     name: rangeName,
     payterm: ptMeta.key,
+    active_payterms: ptInfo.active_payterms,
+    payterms: ptInfo.payterms,
     payout_schedule: ptMeta.schedule,
     cycle_days: ptMeta.cycle_days,
     hold_days: ptMeta.hold_days,
@@ -7784,7 +8365,9 @@ app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
       if (!masterList.includes(normK)) {
         return res.status(400).json({ error: `Invalid payterm "${k}". Allowed payterms: ${masterList.join(', ')}` });
       }
-      migrated[normK] = v;
+      if (v !== '' && v !== null && v !== undefined && v !== 'NA' && v !== 'N/A' && !isNaN(Number(v))) {
+        migrated[normK] = Number(v);
+      }
     }
     req.body.payterms = migrated;
   }
@@ -7801,15 +8384,21 @@ app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
   const idx = ranges.findIndex(r => r.id === id);
   if (idx === -1) return res.status(404).json({ error: 'Range not found' });
   const rangeName = (req.body.range_name || req.body.name || ranges[idx].range_name || ranges[idx].name || '').trim();
-  const isWnRng = isWhitenoiseRecord({ ...ranges[idx], ...req.body, range_name: rangeName });
-  const effPt = isWnRng ? 'Monthly' : (req.body.payterm || ranges[idx].payterm || 'Weekly');
-  const ptMeta = getPaytermMeta(effPt);
+  const mergedForPt = { ...ranges[idx], ...req.body, range_name: rangeName };
+  if (req.body.payterms !== undefined && req.body.active_payterms === undefined) {
+    delete mergedForPt.active_payterms;
+  }
+  const isWnRng = isWhitenoiseRecord(mergedForPt);
+  const ptInfo = resolveRangeActivePayterms(mergedForPt, isWnRng);
+  const ptMeta = getPaytermMeta(ptInfo.primary_payterm);
   ranges[idx] = {
     ...ranges[idx],
     ...req.body,
     range_name: rangeName || ranges[idx].country || 'Range',
     name: rangeName || ranges[idx].country || 'Range',
     payterm: ptMeta.key,
+    active_payterms: ptInfo.active_payterms,
+    payterms: ptInfo.payterms,
     payout_schedule: ptMeta.schedule,
     cycle_days: ptMeta.cycle_days,
     hold_days: ptMeta.hold_days,
@@ -9219,10 +9808,10 @@ app.get('/api/hierarchy', requireAuth, (req, res) => {
     }]);
   }
 
+  // Strict Owner Privacy Wall: Owner sees ONLY Direct Agents (NEVER Agent's private Clients)
   const ownerRec = users.find(u => (u.role || '').toLowerCase() === 'owner' || u.username === 'Kamran_Bhatti') || { id: 1, username: 'Kamran_Bhatti', role: 'Owner', status: 'active' };
   const agentNodes = agents.map(ag => ({
-    ...safeUser(ag),
-    clients: clients.filter(c => Number(c.agent_id) === Number(ag.id) || (c.agent_username && String(c.agent_username).toLowerCase() === String(ag.username).toLowerCase())).map(safeClientForOwner)
+    ...safeUser(ag)
   }));
 
   res.json([{
@@ -9270,6 +9859,319 @@ function hasAccountHistory(tableName, targetId, username) {
   return false;
 }
 
+// Complete cascade cleanup & tombstoning when an Agent, Client, or User account is deleted.
+// Ensures deleted account IDs and usernames NEVER leak clients, numbers, balances, requests,
+// SMS/CDR logs, payouts, notifications, or chat history onto any newly created account.
+function cleanupDeletedAccountData(tableName, target, opts = {}) {
+  if (!target || !['agents', 'clients', 'users'].includes(tableName)) return;
+  const tid = Number(target.id);
+  const uName = String(target.username || '').trim();
+  const uLc = uName.toLowerCase();
+  const roleKey = tableName === 'agents' ? 'agent' : (tableName === 'clients' ? 'client' : String(target.role || 'user').toLowerCase());
+  const tombstoneTag = `__deleted_${roleKey}_${tid}_${Date.now()}`;
+  const nowIso = new Date().toISOString();
+
+  // 1. Lock ID counter so this ID can NEVER be reused
+  bumpIdCounter(tableName, tid);
+
+  // 2. Revoke active sessions for this account immediately
+  try {
+    let sessChanged = false;
+    for (const [tok, sess] of Array.from(activeSessions.entries())) {
+      if (!sess) continue;
+      const sRole = String(sess.role || '').toLowerCase();
+      if (sRole === roleKey && (Number(sess.id) === tid || (uLc && String(sess.username || '').toLowerCase() === uLc))) {
+        activeSessions.delete(tok);
+        sessChanged = true;
+      }
+    }
+    if (sessChanged) savePersistedSessions();
+  } catch (e) { console.error('[CLEANUP] sessions error:', e.message); }
+
+  // 3. If deleting an Agent, cascade-delete all subordinate Clients under that Agent first
+  if (tableName === 'agents') {
+    const clients = readDb('clients') || [];
+    const subClients = clients.filter(c =>
+      c && (Number(c.agent_id) === tid || (uLc && String(c.agent_username || '').toLowerCase() === uLc))
+    );
+    for (const sub of subClients) {
+      cleanupDeletedAccountData('clients', sub, { parentAgentDeleted: true });
+    }
+    if (subClients.length > 0) {
+      const subIdSet = new Set(subClients.map(c => Number(c.id)));
+      writeDb('clients', clients.filter(c => !subIdSet.has(Number(c.id))));
+    }
+  }
+
+  // 4. Release numbers back to upstream pool cleanly
+  try {
+    const numbers = readDb('numbers') || [];
+    let numChanged = false;
+    const updatedNumbers = numbers.map(n => {
+      if (!n) return n;
+      if (tableName === 'agents') {
+        const matchAg = Number(n.agent_id) === tid || (uLc && String(n.agent_username || n.agent_name || '').toLowerCase() === uLc);
+        if (!matchAg) return n;
+        numChanged = true;
+        return {
+          ...n,
+          agent_id: null,
+          agent_name: '',
+          agent_username: '',
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          user: '',
+          client_rate: null,
+          client_payout: null,
+          client_rate_pkr: null,
+          client_payterm: null,
+          assigned_at: null,
+          assigned_date: null,
+          client_assigned_at: null,
+          allocated_at: null,
+          status: 'active',
+          updated_at: nowIso
+        };
+      }
+      if (tableName === 'clients') {
+        const matchCl = Number(n.client_id) === tid
+          || (uLc && (String(n.client_username || n.client_name || '').toLowerCase() === uLc || String(n.user || '').toLowerCase() === uLc));
+        if (!matchCl) return n;
+        numChanged = true;
+        if (opts.parentAgentDeleted) {
+          return {
+            ...n,
+            agent_id: null,
+            agent_name: '',
+            agent_username: '',
+            client_id: null,
+            client_name: '',
+            client_username: '',
+            user: '',
+            client_rate: null,
+            client_payout: null,
+            client_rate_pkr: null,
+            client_payterm: null,
+            assigned_at: null,
+            assigned_date: null,
+            client_assigned_at: null,
+            allocated_at: null,
+            status: 'active',
+            updated_at: nowIso
+          };
+        }
+        return {
+          ...n,
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          user: '',
+          client_rate: null,
+          client_payout: null,
+          client_rate_pkr: null,
+          client_payterm: null,
+          client_assigned_at: null,
+          status: n.agent_id ? 'assigned' : 'active',
+          updated_at: nowIso
+        };
+      }
+      return n;
+    });
+    if (numChanged) writeDb('numbers', updatedNumbers);
+  } catch (e) { console.error('[CLEANUP] numbers error:', e.message); }
+
+  // 5. Remove agent_client_rates and bank_accounts for deleted Agent
+  if (tableName === 'agents') {
+    try {
+      const rates = readDb('agent_client_rates') || [];
+      const keptRates = rates.filter(r => !(r && (Number(r.agent_id) === tid || (uLc && String(r.agent_username || '').toLowerCase() === uLc))));
+      if (keptRates.length !== rates.length) writeDb('agent_client_rates', keptRates);
+    } catch (_) {}
+    try {
+      const banks = readDb('bank_accounts') || [];
+      const keptBanks = banks.filter(b => !(b && (Number(b.agent_id) === tid || (uLc && String(b.username || '').toLowerCase() === uLc))));
+      if (keptBanks.length !== banks.length) writeDb('bank_accounts', keptBanks);
+    } catch (_) {}
+  }
+
+  // 6. Remove number_requests, payout_requests, credit_notes, notifications, support_tickets, transfers, history
+  const pruneTable = (dbName, matcher) => {
+    try {
+      const rows = readDb(dbName);
+      if (!Array.isArray(rows) || !rows.length) return;
+      const kept = rows.filter(row => !matcher(row));
+      if (kept.length !== rows.length) writeDb(dbName, kept);
+    } catch (_) {}
+  };
+
+  if (tableName === 'agents') {
+    pruneTable('number_requests', r => r && (
+      Number(r.agent_id) === tid ||
+      (String(r.requester_role || '').toLowerCase() === 'agent' && (Number(r.requester_id) === tid || (uLc && String(r.requester_username || '').toLowerCase() === uLc))) ||
+      (uLc && String(r.agent_username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('payout_requests', p => p && (
+      Number(p.agent_id) === tid ||
+      (String(p.role || p.recipient_role || '').toLowerCase() === 'agent' && (Number(p.user_id) === tid || (uLc && String(p.username || p.user || '').toLowerCase() === uLc)))
+    ));
+    pruneTable('credit_notes', c => c && (
+      Number(c.agent_id) === tid ||
+      (String(c.role || '').toLowerCase() === 'agent' && (Number(c.user_id) === tid || (uLc && String(c.username || '').toLowerCase() === uLc)))
+    ));
+    pruneTable('notifications', n => n && String(n.recipient_role || '').toLowerCase() === 'agent' && (
+      Number(n.recipient_id) === tid || (uLc && String(n.recipient_username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('support_tickets', t => t && String(t.role || '').toLowerCase() === 'agent' && (
+      Number(t.user_id) === tid || (uLc && String(t.username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('allocation_history', h => h && (
+      Number(h.agent_id) === tid ||
+      (String(h.to_role || '').toLowerCase() === 'agent' && (Number(h.to_user_id) === tid || Number(h.target_id) === tid || (uLc && String(h.to_user || '').toLowerCase() === uLc))) ||
+      (uLc && String(h.from_user || '').toLowerCase() === uLc)
+    ));
+    pruneTable('number_transfers', t => t && (
+      (String(t.to_role || '').toLowerCase() === 'agent' && (Number(t.to_user_id) === tid || (uLc && String(t.to_username || '').toLowerCase() === uLc))) ||
+      (String(t.from_role || '').toLowerCase() === 'agent' && (Number(t.from_user_id) === tid || (uLc && String(t.from_username || '').toLowerCase() === uLc)))
+    ));
+  } else if (tableName === 'clients') {
+    pruneTable('number_requests', r => r && (
+      Number(r.client_id) === tid ||
+      (String(r.requester_role || '').toLowerCase() === 'client' && (Number(r.requester_id) === tid || (uLc && String(r.requester_username || '').toLowerCase() === uLc))) ||
+      (uLc && String(r.client_username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('payout_requests', p => p && (
+      Number(p.client_id) === tid ||
+      (String(p.role || p.recipient_role || '').toLowerCase() === 'client' && (Number(p.user_id) === tid || (uLc && String(p.username || p.user || '').toLowerCase() === uLc)))
+    ));
+    pruneTable('credit_notes', c => c && (
+      Number(c.client_id) === tid ||
+      (String(c.role || '').toLowerCase() === 'client' && (Number(c.user_id) === tid || (uLc && String(c.username || '').toLowerCase() === uLc)))
+    ));
+    pruneTable('notifications', n => n && String(n.recipient_role || '').toLowerCase() === 'client' && (
+      Number(n.recipient_id) === tid || (uLc && String(n.recipient_username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('support_tickets', t => t && String(t.role || '').toLowerCase() === 'client' && (
+      Number(t.user_id) === tid || (uLc && String(t.username || '').toLowerCase() === uLc)
+    ));
+    pruneTable('allocation_history', h => h && (
+      String(h.to_role || '').toLowerCase() === 'client' && (Number(h.to_user_id) === tid || Number(h.target_id) === tid || (uLc && String(h.to_user || '').toLowerCase() === uLc))
+    ));
+    pruneTable('number_transfers', t => t && (
+      (String(t.to_role || '').toLowerCase() === 'client' && (Number(t.to_user_id) === tid || (uLc && String(t.to_username || '').toLowerCase() === uLc))) ||
+      (String(t.from_role || '').toLowerCase() === 'client' && (Number(t.from_user_id) === tid || (uLc && String(t.from_username || '').toLowerCase() === uLc)))
+    ));
+  }
+
+  // 7. Clean Live Chat conversations/memberships so a recreated account never sees dead chats
+  try {
+    const memberKey = `${roleKey}:${tid}`;
+    const convs = readDb('chat_conversations') || [];
+    if (Array.isArray(convs) && convs.length) {
+      const removedConvIds = new Set();
+      const nextConvs = [];
+      let convChanged = false;
+      for (const c of convs) {
+        if (!c) continue;
+        const parts = Array.isArray(c.participants) ? c.participants : [];
+        const hasMember = parts.some(p =>
+          p && (String(p.key || '') === memberKey || (String(p.role || '').toLowerCase() === roleKey && (Number(p.id) === tid || (uLc && String(p.username || '').toLowerCase() === uLc))))
+        );
+        if (!hasMember) {
+          nextConvs.push(c);
+          continue;
+        }
+        convChanged = true;
+        if (c.type === 'group') {
+          const keptParts = parts.filter(p =>
+            !(p && (String(p.key || '') === memberKey || (String(p.role || '').toLowerCase() === roleKey && (Number(p.id) === tid || (uLc && String(p.username || '').toLowerCase() === uLc)))))
+          );
+          if (keptParts.length > 0) {
+            nextConvs.push({ ...c, participants: keptParts });
+          } else {
+            removedConvIds.add(Number(c.id));
+          }
+        } else {
+          removedConvIds.add(Number(c.id));
+        }
+      }
+      if (convChanged) {
+        writeDb('chat_conversations', nextConvs);
+        if (removedConvIds.size > 0) {
+          const msgs = readDb('chat_messages') || [];
+          const keptMsgs = msgs.filter(m => !removedConvIds.has(Number(m.conversation_id)));
+          if (keptMsgs.length !== msgs.length) writeDb('chat_messages', keptMsgs);
+        }
+      }
+    }
+  } catch (e) { console.error('[CLEANUP] chat error:', e.message); }
+
+  // 8. Tombstone SMS logs, Whitenoise daily stats & ownership ledger so recreated ID/username inherits ZERO old CDR/earnings
+  try {
+    const sms = readDb('sms_log') || [];
+    let smsChanged = false;
+    for (let i = 0; i < sms.length; i++) {
+      const s = sms[i];
+      if (!s) continue;
+      if (tableName === 'agents') {
+        if (Number(s.agent_id) === tid || (uLc && String(s.agent_username || '').toLowerCase() === uLc)) {
+          s.agent_id = null;
+          s.agent_username = tombstoneTag;
+          smsChanged = true;
+        }
+      } else if (tableName === 'clients') {
+        if (Number(s.client_id) === tid || (uLc && (String(s.client_username || '').toLowerCase() === uLc || String(s.user || '').toLowerCase() === uLc))) {
+          s.client_id = null;
+          s.client_username = tombstoneTag;
+          s.user = tombstoneTag;
+          smsChanged = true;
+        }
+      }
+    }
+    if (smsChanged) writeDb('sms_log', sms);
+  } catch (e) { console.error('[CLEANUP] sms_log error:', e.message); }
+
+  try {
+    const wnStats = readDb('whitenoise_daily_stats') || [];
+    let wnChanged = false;
+    for (let i = 0; i < wnStats.length; i++) {
+      const st = wnStats[i];
+      if (!st) continue;
+      if (tableName === 'agents' && (Number(st.agent_id) === tid || (uLc && String(st.agent_username || '').toLowerCase() === uLc))) {
+        st.agent_id = null;
+        st.agent_username = tombstoneTag;
+        wnChanged = true;
+      } else if (tableName === 'clients' && (Number(st.client_id) === tid || (uLc && String(st.client_username || '').toLowerCase() === uLc))) {
+        st.client_id = null;
+        st.client_username = tombstoneTag;
+        wnChanged = true;
+      }
+    }
+    if (wnChanged) writeDb('whitenoise_daily_stats', wnStats);
+  } catch (e) { console.error('[CLEANUP] wn_stats error:', e.message); }
+
+  try {
+    const ledger = readDb('number_ownership_ledger') || [];
+    let ledChanged = false;
+    for (let i = 0; i < ledger.length; i++) {
+      const rec = ledger[i];
+      if (!rec) continue;
+      if (tableName === 'agents' && (Number(rec.agent_id) === tid || (uLc && String(rec.agent_username || '').toLowerCase() === uLc))) {
+        rec.agent_id = null;
+        rec.agent_username = tombstoneTag;
+        if (!rec.ended_at) rec.ended_at = nowIso;
+        ledChanged = true;
+      } else if (tableName === 'clients' && (Number(rec.client_id) === tid || (uLc && String(rec.client_username || '').toLowerCase() === uLc))) {
+        rec.client_id = null;
+        rec.client_username = tombstoneTag;
+        if (!rec.ended_at) rec.ended_at = nowIso;
+        ledChanged = true;
+      }
+    }
+    if (ledChanged) writeDb('number_ownership_ledger', ledger);
+  } catch (e) { console.error('[CLEANUP] ownership_ledger error:', e.message); }
+}
+
 // ── PAGINATED OBJECT ENDPOINTS { data: [...], total: ... } ───
 function registerPaginatedCrud(routePath, tableName) {
   const isAccountTable = ['users', 'agents', 'clients'].includes(tableName);
@@ -9315,6 +10217,9 @@ function registerPaginatedCrud(routePath, tableName) {
         return res.status(403).json({ error: 'Access denied.' });
       }
     } else if (tableName === 'clients') {
+      if (isOwner) {
+        return res.status(403).json({ error: 'Access denied. Client accounts are strictly private to their managing Agent.' });
+      }
       if (isAgent) {
         data = data.filter(c => Number(c.agent_id) === Number(sessionUser.id));
       } else if (isClient) {
@@ -9603,7 +10508,7 @@ function registerPaginatedCrud(routePath, tableName) {
     }
 
     const nowIso = new Date().toISOString();
-    const item = { id: nextId(data), ...req.body, created: nowIso, timestamp: nowIso, created_at: nowIso };
+    const item = { id: nextId(data, tableName), ...req.body, created: nowIso, timestamp: nowIso, created_at: nowIso };
 
     // Strictly enforce role and zero initial balance on creation
     if (tableName === 'agents') {
@@ -9794,7 +10699,7 @@ function registerPaginatedCrud(routePath, tableName) {
 
   app.get(`/api/${routePath}/:id`, requireAuth, (req, res, next) => {
     const rawId = req.params.id;
-    if (['sms-ranges', 'rate-card', 'blacklist', 'bulk', 'download', 'stats', 'earnings', 'adjust-balance', 'allocation-policy', 'no-rate-ranges', 'allocation-history'].includes(rawId)) {
+    if (['sms-ranges', 'rate-card', 'blacklist', 'bulk', 'download', 'stats', 'earnings', 'adjust-balance', 'allocation-policy', 'no-rate-ranges', 'allocation-history', 'range-return-batches'].includes(rawId)) {
       return next();
     }
     let data = readDb(tableName);
@@ -9851,15 +10756,15 @@ function registerPaginatedCrud(routePath, tableName) {
           return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
         }
       }
+    } else if (tableName === 'clients') {
+      return res.status(403).json({ error: 'Access denied. Client accounts are strictly private to their managing Agent.' });
     } else if (tableName === 'payout_requests') {
       if (String(item.role || item.recipient_role || '').toLowerCase() === 'client') {
         return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
       }
     }
 
-    let safeItem = (tableName === 'clients' && isOwner)
-      ? safeClientForOwner(item)
-      : (isAccountTable ? safeUser(item) : { ...item });
+    let safeItem = isAccountTable ? safeUser(item) : { ...item };
     if (tableName === 'numbers' && !isOwner) {
       safeItem = sanitizeNumberForRole(safeItem, false);
     }
@@ -9870,6 +10775,9 @@ function registerPaginatedCrud(routePath, tableName) {
     const sessionUser = req.sessionUser;
     const sRole = (sessionUser.role || '').toLowerCase();
     const isOwner = sRole === 'owner' || sRole === 'admin';
+    if (tableName === 'clients' && isOwner) {
+      return res.status(403).json({ error: 'Access denied. Client accounts are strictly private and managed exclusively by their Agent.' });
+    }
 
     // Strict non-Owner protection: check forbidden fields
     const FORBIDDEN_NON_OWNER_PATCH_FIELDS = [
@@ -9972,10 +10880,34 @@ function registerPaginatedCrud(routePath, tableName) {
           return res.status(403).json({ error: 'Forbidden. Agents cannot approve/manage their own payout requests and can only manage downline client payouts.' });
         }
       }
+    } else if (tableName === 'clients') {
+      return res.status(403).json({ error: 'Access denied. Client accounts are strictly private and managed exclusively by their Agent.' });
     } else if (tableName === 'payout_requests') {
       const reqTargetRole = String(existing.role || existing.recipient_role || '').trim().toLowerCase();
       if (reqTargetRole === 'client') {
         return res.status(403).json({ error: 'Forbidden. Client PKR payouts are managed exclusively by their Agent.' });
+      }
+    }
+
+    // Strict 2FA Guard on Agent Password / 2FA changes — even Owner CANNOT bypass Agent's live 2FA
+    if (tableName === 'agents' && existing && existing.two_fa && existing.two_fa_secret) {
+      const wantsPasswordChange = req.body && req.body.password !== undefined && String(req.body.password).trim() !== '';
+      const wants2faChange = req.body && (
+        ('two_fa' in req.body && Boolean(req.body.two_fa) !== Boolean(existing.two_fa)) ||
+        ('two_fa_secret' in req.body) ||
+        ('two_fa_backup_codes' in req.body)
+      );
+      if (wantsPasswordChange || wants2faChange) {
+        const providedOtp = String(
+          req.body.two_fa_code || req.body.agent_totp_code || req.body.otp_code || ''
+        ).trim().replace(/\s+/g, '');
+        const otpValid = providedOtp.length === 6 && verifyTotp(providedOtp, existing.two_fa_secret, 1);
+        if (!otpValid) {
+          return res.status(403).json({
+            error: 'Agent 2FA verification required. Enter the live 6-digit code from this Agent\'s Authenticator app to change password or modify 2FA.',
+            require_agent_2fa: true
+          });
+        }
       }
     }
 
@@ -10015,6 +10947,9 @@ function registerPaginatedCrud(routePath, tableName) {
     }
 
     const updates = { ...req.body };
+    delete updates.two_fa_code;
+    delete updates.agent_totp_code;
+    delete updates.otp_code;
     if (['agents', 'clients'].includes(tableName) && ('whitenoise_access' in updates)) {
       updates.whitenoise_access = Boolean(updates.whitenoise_access);
     }
@@ -10190,6 +11125,10 @@ function registerPaginatedCrud(routePath, tableName) {
     const isAgent = sRole === 'agent';
     const isClient = sRole === 'client';
 
+    if (tableName === 'clients' && isOwner) {
+      return res.status(403).json({ error: 'Access denied. Client accounts are strictly private and managed exclusively by their Agent.' });
+    }
+
     const target = data.find(x => x.id === numId || String(x.id) === rawId);
     if (target) {
       if (tableName === 'payout_requests' && isOwner && String(target.role || target.recipient_role || '').toLowerCase() === 'client') {
@@ -10203,9 +11142,17 @@ function registerPaginatedCrud(routePath, tableName) {
           if (isClient) return res.status(403).json({ error: 'Access denied.' });
         }
       }
-      if (tableName === 'agents' || tableName === 'clients') {
+      if (tableName === 'agents') {
         if (!isOwner) {
-          return res.status(403).json({ error: 'Forbidden. Agents may only deactivate or reactivate their own downline, never delete.' });
+          return res.status(403).json({ error: 'Forbidden. Only Owner can delete agent accounts.' });
+        }
+      }
+      if (tableName === 'clients') {
+        if (isOwner) {
+          return res.status(403).json({ error: 'Access denied. Client accounts are strictly private and managed exclusively by their Agent.' });
+        }
+        if (!isAgent || Number(target.agent_id) !== Number(sessionUser.id)) {
+          return res.status(403).json({ error: 'Forbidden. You can only manage your own clients.' });
         }
       }
       if (tableName === 'users' && !isOwner) {
@@ -10233,8 +11180,8 @@ function registerPaginatedCrud(routePath, tableName) {
         }
       }
 
-      // Deactivation required before Owner can delete an account with history
-      if (isOwner && ['users', 'agents', 'clients'].includes(tableName)) {
+      // Deactivation required before deleting an account with history
+      if (['users', 'agents', 'clients'].includes(tableName)) {
         if (hasAccountHistory(tableName, target.id, target.username)) {
           const isDeactivated = (target.status || '').toLowerCase() === 'inactive' || (target.status || '').toLowerCase() === 'deactivated';
           if (!isDeactivated) {
@@ -10244,6 +11191,11 @@ function registerPaginatedCrud(routePath, tableName) {
       }
     }
 
+    // Cascade-clean & tombstone all related records when deleting Agent/Client/User
+    if (target && ['agents', 'clients', 'users'].includes(tableName)) {
+      cleanupDeletedAccountData(tableName, target);
+    }
+
     const filtered = data.filter(x => {
       if (!isNaN(numId) && x.id === numId) return false;
       if (String(x.id) === rawId) return false;
@@ -10251,7 +11203,7 @@ function registerPaginatedCrud(routePath, tableName) {
       return true;
     });
     writeDb(tableName, filtered);
-    logAudit(sessionUser.username || 'Owner', `Delete ${tableName}`, `Deleted item #${rawId}`, tableName);
+    logAudit(sessionUser.username || 'Owner', `Delete ${tableName}`, `Deleted item #${rawId}${target && target.username ? ` (${target.username})` : ''}`, tableName);
     res.json({ success: true });
   });
 }
@@ -10684,6 +11636,251 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
   }
 });
 
+// Date-grouped active number batches strictly for a SINGLE range (Client or Agent)
+app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = String(sessionUser?.role || '').toLowerCase();
+    const isClient = sRole === 'client';
+    const isAgent = sRole === 'agent';
+    if (!isClient && !isAgent) {
+      return res.status(403).json({ error: 'Only Client or Agent accounts can return range numbers.' });
+    }
+
+    const rangeId = req.query.range_id ? Number(req.query.range_id) : null;
+    const rangeName = String(req.query.range_name || '').trim();
+    if (!rangeId && !rangeName) {
+      return res.status(400).json({ error: 'range_id or range_name is required.' });
+    }
+
+    const ranges = readDb('sms_ranges') || [];
+    const matchedRng = (rangeId && ranges.find(r => Number(r.id) === rangeId))
+      || (rangeName && ranges.find(r => String(r.range_name || r.name || '').trim().toLowerCase() === rangeName.toLowerCase()))
+      || null;
+    const effRangeId = matchedRng ? Number(matchedRng.id) : rangeId;
+    const effRangeName = (matchedRng && (matchedRng.range_name || matchedRng.name)) || rangeName || `Range #${effRangeId}`;
+
+    const numbers = readDb('numbers') || [];
+    const heldInRange = numbers.filter(n => {
+      if (!n) return false;
+      if (isClient && Number(n.client_id) !== Number(sessionUser.id)) return false;
+      if (isAgent && Number(n.agent_id) !== Number(sessionUser.id)) return false;
+      return matchesRangeRef(n, effRangeId, effRangeName);
+    });
+
+    const groups = new Map();
+    for (const n of heldInRange) {
+      const rawTs = isClient
+        ? (n.client_assigned_at || n.assigned_at || n.assigned_date || n.allocated_at || n.created || '')
+        : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
+      const dateStr = /^\d{4}-\d{2}-\d{2}/.test(String(rawTs)) ? String(rawTs).slice(0, 10) : 'Unknown';
+      if (!groups.has(dateStr)) {
+        groups.set(dateStr, { date: dateStr, count: 0, nums: [], payterms: new Set(), assigned_to_clients: 0 });
+      }
+      const g = groups.get(dateStr);
+      g.count++;
+      g.nums.push(String(n.number || n.id));
+      const pt = n.client_payterm || n.payterm || '';
+      if (pt) g.payterms.add(pt);
+      if (isAgent && n.client_id) g.assigned_to_clients++;
+    }
+
+    const batches = Array.from(groups.values())
+      .map(g => {
+        g.nums.sort();
+        return {
+          date: g.date,
+          count: g.count,
+          sample_start: g.nums[0] || '',
+          sample_end: g.nums[g.nums.length - 1] || '',
+          payterms: Array.from(g.payterms),
+          assigned_to_clients: g.assigned_to_clients
+        };
+      })
+      .sort((a, b) => (a.date === 'Unknown' ? 1 : (b.date === 'Unknown' ? -1 : b.date.localeCompare(a.date))));
+
+    const validDates = batches.map(b => b.date).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+
+    res.json({
+      success: true,
+      range_id: effRangeId,
+      range_name: effRangeName,
+      total_held: heldInRange.length,
+      min_date: validDates[0] || '',
+      max_date: validDates[validDates.length - 1] || '',
+      batches
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Return numbers strictly for a SINGLE range filtered by selected assignment date(s) or date-to-date range
+app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    const sRole = String(sessionUser?.role || '').toLowerCase();
+    const isClient = sRole === 'client';
+    const isAgent = sRole === 'agent';
+    if (!isClient && !isAgent) {
+      return res.status(403).json({ error: 'Only Client or Agent accounts can return range numbers.' });
+    }
+
+    const { range_id, range_name, dates, from_date, to_date } = req.body || {};
+    const rangeId = range_id ? Number(range_id) : null;
+    const rangeName = String(range_name || '').trim();
+    if (!rangeId && !rangeName) {
+      return res.status(400).json({ error: 'range_id or range_name is required.' });
+    }
+
+    const dateSet = new Set(
+      (Array.isArray(dates) ? dates : [])
+        .map(d => String(d || '').trim())
+        .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d) || d === 'Unknown')
+    );
+    const cleanFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(from_date || '').trim()) ? String(from_date).trim() : '';
+    const cleanTo = /^\d{4}-\d{2}-\d{2}$/.test(String(to_date || '').trim()) ? String(to_date).trim() : '';
+
+    if (dateSet.size === 0 && !cleanFrom && !cleanTo) {
+      return res.status(400).json({ error: 'Please select at least one date or a valid From/To date range.' });
+    }
+    if (cleanFrom && cleanTo && cleanFrom > cleanTo) {
+      return res.status(400).json({ error: 'From Date cannot be later than To Date.' });
+    }
+
+    const ranges = readDb('sms_ranges') || [];
+    const matchedRng = (rangeId && ranges.find(r => Number(r.id) === rangeId))
+      || (rangeName && ranges.find(r => String(r.range_name || r.name || '').trim().toLowerCase() === rangeName.toLowerCase()))
+      || null;
+    const effRangeId = matchedRng ? Number(matchedRng.id) : rangeId;
+    const effRangeName = (matchedRng && (matchedRng.range_name || matchedRng.name)) || rangeName || `Range #${effRangeId}`;
+
+    let numbers = readDb('numbers') || [];
+    const returnedIds = [];
+    const returnedDates = new Set();
+    let remainingInRange = 0;
+    let upstreamAgentId = null;
+
+    numbers = numbers.map(n => {
+      if (!n) return n;
+      const ownedByUser = isClient
+        ? Number(n.client_id) === Number(sessionUser.id)
+        : Number(n.agent_id) === Number(sessionUser.id);
+      if (!ownedByUser) return n;
+      if (!matchesRangeRef(n, effRangeId, effRangeName)) return n;
+
+      const rawTs = isClient
+        ? (n.client_assigned_at || n.assigned_at || n.assigned_date || n.allocated_at || n.created || '')
+        : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
+      const dateStr = /^\d{4}-\d{2}-\d{2}/.test(String(rawTs)) ? String(rawTs).slice(0, 10) : 'Unknown';
+
+      let matchesDate = false;
+      if (dateSet.size > 0) {
+        matchesDate = dateSet.has(dateStr);
+      } else if (dateStr !== 'Unknown') {
+        const geFrom = !cleanFrom || dateStr >= cleanFrom;
+        const leTo = !cleanTo || dateStr <= cleanTo;
+        matchesDate = geFrom && leTo;
+      }
+
+      if (!matchesDate) {
+        remainingInRange++;
+        return n;
+      }
+
+      returnedIds.push(n.id);
+      returnedDates.add(dateStr);
+      if (isClient) {
+        if (n.agent_id) upstreamAgentId = Number(n.agent_id);
+        return {
+          ...n,
+          client_id: null,
+          client_name: '',
+          client_username: '',
+          user: '',
+          client_assigned_at: null,
+          status: n.agent_id ? 'assigned' : 'active'
+        };
+      }
+      return {
+        ...n,
+        agent_id: null,
+        agent_name: '',
+        agent_username: '',
+        client_id: null,
+        client_name: '',
+        client_username: '',
+        user: '',
+        assigned_at: null,
+        assigned_date: null,
+        client_assigned_at: null,
+        status: 'active'
+      };
+    });
+
+    if (returnedIds.length === 0) {
+      return res.status(400).json({ error: `No active numbers matched the selected date(s) in range "${effRangeName}".` });
+    }
+
+    writeDb('numbers', numbers);
+
+    const nowIso = new Date().toISOString();
+    const datesArr = Array.from(returnedDates).sort();
+    try {
+      const transfers = readDb('number_transfers') || [];
+      transfers.unshift({
+        id: nextId(transfers, 'number_transfers'),
+        from_user_id: sessionUser.id,
+        from_username: sessionUser.username,
+        from_role: isClient ? 'Client' : 'Agent',
+        to_user_id: isClient ? upstreamAgentId : 1,
+        to_username: isClient ? 'Agent Pool' : 'Owner Pool',
+        to_role: isClient ? 'Agent' : 'Owner',
+        range_id: effRangeId,
+        range_name: effRangeName,
+        dates_returned: datesArr,
+        number_ids: returnedIds,
+        count: returnedIds.length,
+        timestamp: nowIso,
+        action: 'return_by_date',
+        status: 'completed'
+      });
+      writeDb('number_transfers', transfers);
+    } catch (_) {}
+
+    logAudit(sessionUser.username, 'Return Range Numbers by Date', `Returned ${returnedIds.length} number(s) from "${effRangeName}" (${datesArr.join(', ')})`, 'Numbers');
+
+    sendInstantNotification({
+      recipient_role: isClient ? (upstreamAgentId ? 'agent' : 'owner') : 'owner',
+      recipient_id: isClient ? (upstreamAgentId || null) : null,
+      title: `${isClient ? 'Client' : 'Agent'} Returned ${returnedIds.length} Numbers`,
+      message: `${isClient ? 'Client' : 'Agent'} ${sessionUser.username} returned ${returnedIds.length} number(s) in range "${effRangeName}" (Dates: ${datesArr.join(', ')}).`,
+      type: 'revocation',
+      category: 'numbers',
+      action_page: isClient ? 'numbers' : 'numbers',
+      status: 'returned',
+      count: returnedIds.length,
+      range_id: effRangeId,
+      range_name: effRangeName,
+      actor_role: isClient ? 'Client' : 'Agent',
+      actor_name: sessionUser.username,
+      metadata: { dates: datesArr, returned: returnedIds.length }
+    });
+
+    res.json({
+      success: true,
+      returned: returnedIds.length,
+      returned_count: returnedIds.length,
+      range_id: effRangeId,
+      range_name: effRangeName,
+      dates_returned: datesArr,
+      remaining_in_range: remainingInRange
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Single number assign (Direct 3-Tier: Owner -> Agent -> Client)
 app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
   try {
@@ -10788,13 +11985,29 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
         return res.status(403).json({ error: isOwner ? `Client "${cl.username}" (or their parent Agent) does not have Whitenoise access enabled.` : `Client "${cl.username}" does not have CDR 2 / Monthly Route access enabled.` });
       }
 
-      const clientPayterm = isWnNumber ? 'Monthly' : normalizePaytermKey(req.body.client_payterm || req.body.payterm || n.client_payterm || n.payterm || 'Weekly');
-      const ptMeta = getPaytermMeta(clientPayterm);
       const ranges = readDb('sms_ranges') || [];
       const rng = ranges.find(r => Number(r.id) === Number(n.range_id)) || ranges.find(r => r.range_name === n.range_name);
+      const rngPtInfo = rng ? resolveRangeActivePayterms(rng, isWnNumber) : null;
+      const rawReqPt = req.body.client_payterm || req.body.payterm;
+      const clientPayterm = isWnNumber
+        ? 'Monthly'
+        : normalizePaytermKey(rawReqPt || (rngPtInfo ? rngPtInfo.primary_payterm : (n.client_payterm || n.payterm || 'Weekly')));
+      if (rngPtInfo && rawReqPt && !isWnNumber && !rngPtInfo.active_payterms.includes(clientPayterm)) {
+        return res.status(400).json({ error: `Payterm "${clientPayterm}" is not available on range "${rng.range_name || rng.name}". Allowed: ${rngPtInfo.active_payterms.join(', ')}.` });
+      }
+      // Enforce max 50 active numbers per range per client
+      const curHeldInRange = numbers.filter(x =>
+        x && Number(x.client_id) === Number(targetId) &&
+        Number(x.id) !== Number(n.id) &&
+        matchesRangeRef(x, n.range_id || (rng && rng.id), n.range_name || (rng && rng.range_name))
+      ).length;
+      if (curHeldInRange + 1 > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+        return res.status(400).json({ error: `Client "${cl.username}" already holds ${curHeldInRange}/${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in this range (max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} per range).` });
+      }
+      const ptMeta = getPaytermMeta(clientPayterm);
       const agentRate = (n.agent_rate !== undefined && n.agent_rate !== null && Number(n.agent_rate) > 0)
         ? Number(n.agent_rate)
-        : getRangeAgentRate(rng, isWnNumber ? 'Monthly' : (n.payterm || 'Weekly'));
+        : getRangeAgentRate(rng, isWnNumber ? 'Monthly' : (rngPtInfo ? rngPtInfo.primary_payterm : (n.payterm || 'Weekly')));
 
       const rawClientRate = req.body.client_rate !== undefined ? req.body.client_rate : req.body.client_payout;
       const ratePair = resolveClientRatePair({
@@ -11034,6 +12247,37 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
     }
 
     const bulkRanges = readDb('sms_ranges') || [];
+    const explicitBulkPayterm = req.body.client_payterm || req.body.payterm || null;
+
+    // Enforce strict active payterms & max 50 held per range per client
+    if (targetType === 'client' && bulkClientRecord) {
+      const perRangeCounts = new Map();
+      for (const n of numbers) {
+        if (!numberIds.has(Number(n.id))) continue;
+        const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
+        const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+        if (explicitBulkPayterm && rObj) {
+          const ptInfo = resolveRangeActivePayterms(rObj, isWn);
+          if (!ptInfo.active_payterms.includes(normalizePaytermKey(explicitBulkPayterm))) {
+            return res.status(400).json({
+              error: `Payterm "${explicitBulkPayterm}" is not active on range "${rObj.range_name || rObj.name}". Allowed: ${ptInfo.active_payterms.join(', ')}.`
+            });
+          }
+        }
+        const key = n.range_id ? `id:${n.range_id}` : `name:${String(n.range_name || '').trim().toLowerCase()}`;
+        if (!perRangeCounts.has(key)) perRangeCounts.set(key, { rid: n.range_id, rname: n.range_name || (rObj && rObj.range_name) || '', add: 0 });
+        perRangeCounts.get(key).add++;
+      }
+      for (const info of perRangeCounts.values()) {
+        const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && !numberIds.has(Number(x.id)) && matchesRangeRef(x, info.rid, info.rname)).length;
+        if (curHeld + info.add > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+          return res.status(400).json({
+            error: `Client "${bulkClientRecord.username}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
+          });
+        }
+      }
+    }
+
     let updatedCount = 0;
     const assignedIds = [];
     const bulkAssignedIso = new Date().toISOString();
@@ -11043,10 +12287,12 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
         updatedCount++;
         assignedIds.push(n.id);
         const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+        const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
+        const ptInfo = rObj ? resolveRangeActivePayterms(rObj, isWn) : { active_payterms: [isWn ? 'Monthly' : 'Weekly'], primary_payterm: isWn ? 'Monthly' : 'Weekly' };
         if (targetType === 'agent') {
-          const effPayterm = isWn ? 'Monthly' : normalizePaytermKey(n.payterm || 'Weekly');
+          const candTerm = normalizePaytermKey(req.body.payterm || n.payterm || ptInfo.primary_payterm);
+          const effPayterm = isWn ? 'Monthly' : (ptInfo.active_payterms.includes(candTerm) ? candTerm : ptInfo.primary_payterm);
           const ptMeta = getPaytermMeta(effPayterm);
-          const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
           const agRate = isWn ? getRangeAgentRate(rObj, 'Monthly') : (n.agent_rate || getRangeAgentRate(rObj, ptMeta.key));
           return {
             ...n,
@@ -11069,10 +12315,10 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
           };
         } else {
           const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
-          const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
-          const effPayterm = isWn ? 'Monthly' : clientPaytermToSet;
+          const candClTerm = explicitBulkPayterm ? normalizePaytermKey(explicitBulkPayterm) : normalizePaytermKey(n.payterm || ptInfo.primary_payterm);
+          const effPayterm = isWn ? 'Monthly' : (ptInfo.active_payterms.includes(candClTerm) ? candClTerm : ptInfo.primary_payterm);
           const ptMeta = getPaytermMeta(effPayterm);
-          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, isWn ? 'Monthly' : (n.payterm || clientPaytermToSet));
+          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, effPayterm);
           const rp = resolveClientRatePair({
             agentId: effAgId,
             rangeId: n.range_id || (rObj && rObj.id),
@@ -11316,10 +12562,10 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const qty = parseInt(count ?? quantity, 10) || 1;
     if (qty <= 0) return res.status(400).json({ error: 'Quantity must be at least 1' });
 
-    if (!isOwner && policy.daily_remaining !== null && qty > policy.daily_remaining) {
+    if (!isOwner && !isClient && policy.daily_remaining !== null && qty > policy.daily_remaining) {
       return res.status(400).json({ error: `Daily self-allocate limit exceeded. Remaining today: ${policy.daily_remaining}` });
     }
-    if (!isOwner && policy.total_remaining !== null && qty > policy.total_remaining) {
+    if (!isOwner && !isClient && policy.total_remaining !== null && qty > policy.total_remaining) {
       return res.status(400).json({ error: `Overall allocation limit exceeded. Remaining allowed: ${policy.total_remaining}` });
     }
 
@@ -11330,18 +12576,43 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const wnTags = getWhitenoiseProviderTags();
     const matchedRng = (rId && wnRangesMap.get(rId)) || (readDb('sms_ranges') || []).find(r => cleanRangeName && String(r.range_name || r.name || '').trim().toLowerCase() === cleanRangeName);
     const wnAllowed = hasWhitenoiseAccess(sessionUser);
+    const isWnMatched = (matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(cleanRangeName);
 
-    if (!isOwner && !wnAllowed && ((matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(cleanRangeName))) {
+    if (!isOwner && !wnAllowed && isWnMatched) {
       return res.status(403).json({ error: 'Forbidden. CDR 2 / Monthly Route access is not enabled for your account.' });
     }
 
+    const ptInfo = matchedRng ? resolveRangeActivePayterms(matchedRng, isWnMatched) : { active_payterms: ['Weekly'], primary_payterm: 'Weekly' };
+    const targetPayterm = isWnMatched ? 'Monthly' : normalizePaytermKey(payterm || ptInfo.primary_payterm);
+    if (matchedRng && payterm && !isWnMatched && !ptInfo.active_payterms.includes(targetPayterm)) {
+      return res.status(400).json({ error: `Payterm "${targetPayterm}" is not available on "${matchedRng.range_name || range_name}". Allowed: ${ptInfo.active_payterms.join(', ')}.` });
+    }
+
+    if (isClient) {
+      const effRid = matchedRng ? Number(matchedRng.id) : rId;
+      const effRname = (matchedRng && (matchedRng.range_name || matchedRng.name)) || range_name || '';
+      const quota = getClientRangeQuota(sessionUser.id, effRid, effRname, { numbers });
+      if (quota.weekly_adds_remaining <= 0) {
+        return res.status(429).json({ error: `Weekly limit reached for "${effRname}": max ${CLIENT_RANGE_WEEKLY_ADDS_MAX} additions per week (${quota.weekly_adds_used}/${CLIENT_RANGE_WEEKLY_ADDS_MAX} used).` });
+      }
+      if (qty > CLIENT_RANGE_DAILY_NUMBERS_MAX || qty > quota.daily_remaining) {
+        return res.status(quota.daily_remaining <= 0 ? 429 : 400).json({
+          error: `Daily limit for "${effRname}": max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers/day (used ${quota.today_numbers}/${CLIENT_RANGE_DAILY_NUMBERS_MAX}, remaining ${quota.daily_remaining}).`
+        });
+      }
+      if (qty > quota.hold_remaining) {
+        return res.status(400).json({
+          error: `Active holding limit for "${effRname}": max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers per range (currently ${quota.held_count} held + ${quota.pending_qty} pending). Return numbers first to add more.`
+        });
+      }
+    }
+
+    const effMatchRid = matchedRng ? Number(matchedRng.id) : rId;
+    const effMatchRname = (matchedRng && (matchedRng.range_name || matchedRng.name)) || range_name || '';
     const available = numbers.filter(n => {
       if (!n || n.client_id) return false;
       if (!isOwner && !wnAllowed && isWhitenoiseRecord(n, wnRangesMap, wnTags)) return false;
-      const nRange = String(n.range_name || n.name || '').trim().toLowerCase();
-      const nRid = n.range_id ? Number(n.range_id) : null;
-      const matchesRange = (rId && nRid === rId) || (cleanRangeName && (nRange === cleanRangeName || nRange.includes(cleanRangeName)));
-      if (!matchesRange) return false;
+      if (!matchesRangeRef(n, effMatchRid, effMatchRname)) return false;
 
       if (isClient) {
         if (sessionUser.agent_id) {
@@ -11353,12 +12624,15 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     });
 
     if (available.length === 0) {
-      return res.status(400).json({ error: 'No available numbers in this range to allocate right now.' });
+      return res.status(400).json({
+        error: isClient
+          ? 'No free numbers are currently available in this range from your Agent. Please choose another range or try again later.'
+          : 'No free numbers are currently available in the Owner pool for this range.'
+      });
     }
 
     const toAllocate = available.slice(0, qty);
     const now = new Date().toISOString();
-    const targetPayterm = normalizePaytermKey(payterm || 'Weekly');
 
     toAllocate.forEach(n => {
       const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
@@ -11370,6 +12644,8 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
         n.client_name = sessionUser.full_name || sessionUser.username;
         n.user = sessionUser.username;
         n.agent_id = sessionUser.agent_id || n.agent_id || null;
+        n.client_payterm = ptMeta.key;
+        n.client_assigned_at = now;
       } else if (isAgent) {
         n.agent_id = sessionUser.id;
         n.agent_username = sessionUser.username;
@@ -11522,6 +12798,24 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
     const selectedNumbers = pool.slice(0, allocCount);
     const hasWnSelected = selectedNumbers.some(n => isWhitenoiseRecord(n, wnRangesMap, wnTags)) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags));
 
+    // Enforce max 50 active held numbers per range per client on bulk allocation
+    if (targetType === 'client' && targetClientRec) {
+      const perRangeAddCounts = new Map();
+      for (const sn of selectedNumbers) {
+        const key = sn.range_id ? `id:${sn.range_id}` : `name:${String(sn.range_name || '').trim().toLowerCase()}`;
+        if (!perRangeAddCounts.has(key)) perRangeAddCounts.set(key, { rid: sn.range_id, rname: sn.range_name || (rng && rng.range_name) || '', add: 0 });
+        perRangeAddCounts.get(key).add++;
+      }
+      for (const info of perRangeAddCounts.values()) {
+        const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && matchesRangeRef(x, info.rid, info.rname)).length;
+        if (curHeld + info.add > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+          return res.status(400).json({
+            error: `Client "${targetClientRec.username}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
+          });
+        }
+      }
+    }
+
     if (hasWnSelected) {
       if (!wnAllowed) {
         return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
@@ -11542,25 +12836,38 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
       ? Number(req.body.client_rate)
       : ((req.body.client_payout !== undefined && req.body.client_payout !== null && !isNaN(Number(req.body.client_payout))) ? Number(req.body.client_payout) : null);
 
+    if (rng) {
+      const isWnRangeObj = isWhitenoiseRecord(rng, wnRangesMap, wnTags);
+      const rngPtInfo = resolveRangeActivePayterms(rng, isWnRangeObj);
+      if (allocPayterm && !rngPtInfo.active_payterms.includes(allocPayterm)) {
+        return res.status(400).json({ error: `Payterm "${allocPayterm}" is not active on range "${rng.range_name || rng.name}". Allowed: ${rngPtInfo.active_payterms.join(', ')}.` });
+      }
+      if (req.body.client_payterm && !rngPtInfo.active_payterms.includes(req.body.client_payterm)) {
+        return res.status(400).json({ error: `Client payterm "${req.body.client_payterm}" is not active on range "${rng.range_name || rng.name}". Allowed: ${rngPtInfo.active_payterms.join(', ')}.` });
+      }
+    }
+
     const bulkAllocNowIso = new Date().toISOString();
     numbers = numbers.map(n => {
       if (selectedIds.has(n.id)) {
         const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags));
-        const effTargetTerm = isWn ? 'Monthly' : (allocPayterm || n.payterm || 'Weekly');
+        const rObj = rng || allRangesBulk.find(r => Number(r.id) === Number(n.range_id)) || allRangesBulk.find(r => r.range_name === n.range_name);
+        const ptInfo = rObj ? resolveRangeActivePayterms(rObj, isWn) : { active_payterms: [isWn ? 'Monthly' : 'Weekly'], primary_payterm: isWn ? 'Monthly' : 'Weekly' };
+        const candTargetTerm = normalizePaytermKey(allocPayterm || n.payterm || ptInfo.primary_payterm);
+        const effTargetTerm = isWn ? 'Monthly' : (ptInfo.active_payterms.includes(candTargetTerm) ? candTargetTerm : ptInfo.primary_payterm);
         const ptMeta = getPaytermMeta(effTargetTerm);
         const paytermUpdate = isWn
           ? { payterm: 'Monthly', is_whitenoise: true, payout_schedule: 'monthly30_5', cycle_days: 30, hold_days: 5 }
-          : (allocPayterm ? { payterm: ptMeta.key, payout_schedule: ptMeta.schedule, cycle_days: ptMeta.cycle_days, hold_days: ptMeta.hold_days } : {});
+          : { payterm: ptMeta.key, payout_schedule: ptMeta.schedule, cycle_days: ptMeta.cycle_days, hold_days: ptMeta.hold_days };
         if (targetType === 'agent') {
-          const rObj = rng || allRangesBulk.find(r => Number(r.id) === Number(n.range_id)) || allRangesBulk.find(r => r.range_name === n.range_name);
           const agRate = getRangeAgentRate(rObj, ptMeta.key);
           return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', user: toUsername, status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
         } else {
           const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
-          const rObj = rng || allRangesBulk.find(r => Number(r.id) === Number(n.range_id)) || allRangesBulk.find(r => r.range_name === n.range_name);
-          const effClientPayterm = isWn ? 'Monthly' : normalizePaytermKey(req.body.client_payterm || allocPayterm || n.client_payterm || n.payterm || 'Weekly');
+          const candClTerm = normalizePaytermKey(req.body.client_payterm || allocPayterm || n.client_payterm || n.payterm || ptInfo.primary_payterm);
+          const effClientPayterm = isWn ? 'Monthly' : (ptInfo.active_payterms.includes(candClTerm) ? candClTerm : ptInfo.primary_payterm);
           const clPtMeta = getPaytermMeta(effClientPayterm);
-          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, isWn ? 'Monthly' : (allocPayterm || n.payterm || 'Weekly'));
+          const agRate = Number(n.agent_rate || 0) || getRangeAgentRate(rObj, effTargetTerm);
           const rp = resolveClientRatePair({
             agentId: effAgId,
             rangeId: n.range_id || (rObj && rObj.id),
@@ -12465,10 +13772,11 @@ function handleCreateNumberRequest(req, res) {
       return res.status(400).json({ error: 'Please enter a valid quantity of numbers' });
     }
 
-    if (!isOwner && policy.daily_remaining !== null && qty > policy.daily_remaining) {
+    // Clients have NO cross-range global cap; they are governed strictly per range below.
+    if (!isOwner && !isClient && policy.daily_remaining !== null && qty > policy.daily_remaining) {
       return res.status(400).json({ error: `Daily request limit exceeded. Remaining today: ${policy.daily_remaining}` });
     }
-    if (!isOwner && policy.total_remaining !== null && qty > policy.total_remaining) {
+    if (!isOwner && !isClient && policy.total_remaining !== null && qty > policy.total_remaining) {
       return res.status(400).json({ error: `Overall number limit exceeded. Remaining allowed: ${policy.total_remaining}` });
     }
 
@@ -12493,9 +13801,19 @@ function handleCreateNumberRequest(req, res) {
     if (isWnRange && !isOwner && !hasWhitenoiseAccess(sessionUser)) {
       return res.status(403).json({ error: 'Forbidden. Whitenoise access is not enabled for your account.' });
     }
-    const effectivePayterm = isWnRange ? 'Monthly' : normalizePaytermKey(payterm || 'Weekly');
-    if (!isWnRange && payterm && !isValidPayterm(effectivePayterm)) {
+
+    const rngPtInfo = matchedRng ? resolveRangeActivePayterms(matchedRng, isWnRange) : { active_payterms: [isWnRange ? 'Monthly' : 'Weekly'], primary_payterm: isWnRange ? 'Monthly' : 'Weekly' };
+    const hasExplicitPayterm = payterm !== undefined && payterm !== null && String(payterm).trim() !== '';
+    const effectivePayterm = hasExplicitPayterm
+      ? normalizePaytermKey(payterm)
+      : (isWnRange ? 'Monthly' : (rngPtInfo.primary_payterm || 'Weekly'));
+    if (hasExplicitPayterm && !isValidPayterm(effectivePayterm)) {
       return res.status(400).json({ error: `Invalid payterm "${payterm}". Must be one of: ${getMasterPayterms().join(', ')}` });
+    }
+    if ((matchedRng || isWnRange) && !rngPtInfo.active_payterms.includes(effectivePayterm)) {
+      return res.status(400).json({
+        error: `Payterm "${effectivePayterm}" is not enabled on range "${resolvedRangeName}". Allowed payterm(s): ${rngPtInfo.active_payterms.join(', ')}.`
+      });
     }
     const reqPtMeta = getPaytermMeta(effectivePayterm);
 
@@ -12506,30 +13824,57 @@ function handleCreateNumberRequest(req, res) {
       if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) {
         return res.status(400).json({ error: 'This range is not enabled by your Agent yet.' });
       }
-      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities);
-      if (!allowedQty.includes(qty)) {
-        return res.status(400).json({ error: `Allowed request quantities for "${resolvedRangeName}": ${allowedQty.join(' or ')} numbers.` });
+      if (qty > CLIENT_RANGE_DAILY_NUMBERS_MAX) {
+        return res.status(400).json({ error: `Daily limit per range is max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers. You requested ${qty}.` });
       }
-      const dailyRangeLimit = Math.max(1, parseInt(acr.daily_request_limit, 10) || 1);
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const sameRangeToday = requests.filter(r => {
-        if (!r || Number(r.client_id) !== Number(sessionUser.id)) return false;
-        if (String(r.status || '').toLowerCase() === 'rejected') return false;
-        if (String(r.created || r.timestamp || '').slice(0, 10) !== todayIso) return false;
-        if (resolvedRangeId && r.range_id && Number(r.range_id) === resolvedRangeId) return true;
-        return String(r.range_name || '').trim().toLowerCase() === resolvedRangeName.toLowerCase();
-      }).length;
-      if (sameRangeToday >= dailyRangeLimit) {
-        return res.status(429).json({ error: `Daily limit reached: you can only submit ${dailyRangeLimit} request(s) per day for "${resolvedRangeName}".` });
+
+      const quota = getClientRangeQuota(sessionUser.id, resolvedRangeId, resolvedRangeName, { requests });
+      if (quota.weekly_adds_remaining <= 0) {
+        return res.status(429).json({
+          error: `Weekly limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_WEEKLY_ADDS_MAX} additions per week (${quota.weekly_adds_used}/${CLIENT_RANGE_WEEKLY_ADDS_MAX} used in last 7 days).`
+        });
+      }
+      if (quota.daily_remaining <= 0 || qty > quota.daily_remaining) {
+        return res.status(quota.daily_remaining <= 0 ? 429 : 400).json({
+          error: `Daily limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers per day (${quota.today_numbers}/${CLIENT_RANGE_DAILY_NUMBERS_MAX} used today, remaining ${quota.daily_remaining}).`
+        });
+      }
+      if (qty > quota.hold_remaining) {
+        return res.status(400).json({
+          error: `Active holding limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers per range (${quota.held_count} held + ${quota.pending_qty} pending). Return numbers in this range first.`
+        });
+      }
+      if (quota.has_pending_request) {
+        return res.status(409).json({
+          error: `You already have a pending request for "${resolvedRangeName}". Please wait for your Agent to review it before submitting another request.`
+        });
+      }
+      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
+      const effAllowed = allowedQty.length ? allowedQty : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
+      if (!effAllowed.includes(qty) && qty !== Math.min(quota.daily_remaining, quota.hold_remaining)) {
+        return res.status(400).json({ error: `Allowed number batch for "${resolvedRangeName}": ${effAllowed.join(' or ')} numbers (max ${CLIENT_RANGE_DAILY_NUMBERS_MAX}/day).` });
       }
       stampedClientRatePkr = getAgentRangeClientPkrRate(acr, reqPtMeta.key);
+    } else if (isAgent) {
+      const existingAgentPending = requests.find(r =>
+        r &&
+        String(r.requester_role || '').toLowerCase() === 'agent' &&
+        Number(r.agent_id || r.requester_id) === Number(sessionUser.id) &&
+        String(r.status || '').toLowerCase() === 'pending' &&
+        matchesRangeRef(r, resolvedRangeId, resolvedRangeName)
+      );
+      if (existingAgentPending) {
+        return res.status(409).json({
+          error: `You already have a pending request for "${resolvedRangeName}". Please wait for Owner approval before requesting this range again.`
+        });
+      }
     }
 
     const now = new Date().toISOString();
     const cleanApp = (app_name || service_name || 'General Application').trim();
     const cleanDisplayActor = isClient ? sessionUser.username : String(effectiveAgentUsername || sessionUser.username || 'User').trim();
     const entry = {
-      id: nextId(requests),
+      id: nextId(requests, 'number_requests'),
       requester_role: requesterRole,
       requester_id: sessionUser.id,
       requester_username: sessionUser.username,
@@ -12685,7 +14030,20 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
       }
     }
 
-    const targetPayterm = isWnReq ? 'Monthly' : normalizePaytermKey(reqItem.payterm || payload.payterm || 'Weekly');
+    const fulfillPtInfo = rng ? resolveRangeActivePayterms(rng, isWnReq) : { active_payterms: [isWnReq ? 'Monthly' : 'Weekly'], primary_payterm: isWnReq ? 'Monthly' : 'Weekly' };
+    const requestedFulfillPt = normalizePaytermKey(payload.payterm || reqItem.payterm || fulfillPtInfo.primary_payterm);
+    if (rng && !fulfillPtInfo.active_payterms.includes(requestedFulfillPt)) {
+      return res.status(400).json({ error: `Payterm "${requestedFulfillPt}" is not active on range "${rangeLabel}". Allowed: ${fulfillPtInfo.active_payterms.join(', ')}.` });
+    }
+    const targetPayterm = isWnReq ? 'Monthly' : (fulfillPtInfo.active_payterms.includes(requestedFulfillPt) ? requestedFulfillPt : fulfillPtInfo.primary_payterm);
+    if (isClientReq && reqItem.client_id) {
+      const curHeld = numbers.filter(n => n && Number(n.client_id) === Number(reqItem.client_id) && matchesRangeRef(n, rangeId, rangeLabel)).length;
+      if (curHeld + allocCount > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+        return res.status(400).json({
+          error: `Client "${reqItem.client_username || reqItem.client_id}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${rangeLabel}" (currently ${curHeld} held, trying to fulfill ${allocCount}).`
+        });
+      }
+    }
     const targetRecipientName = isClientReq ? reqItem.client_username : reqItem.agent_username;
     const fixedRngAgRate = getRangeAgentRate(rng, targetPayterm);
 
@@ -12906,6 +14264,7 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
       batch_filename: filename,
       timestamp: new Date().toISOString(),
       status: 'completed',
+      request_id: reqItem.id,
       notes: `Request #${reqItem.id} fulfilled`
     });
     writeDb('allocation_history', history);
@@ -13221,11 +14580,54 @@ app.patch('/api/cr-api-connections/:id', (req, res) => {
   res.json(data[idx]);
 });
 
+function verifyOwnerConnectionDeleteAuth(req, res) {
+  const sessionUser = req.sessionUser;
+  const users = readDb('users') || [];
+  const ownerRec = users.find(u =>
+    u && (
+      (sessionUser && Number(u.id) === Number(sessionUser.id)) ||
+      (sessionUser && String(u.username || '').toLowerCase() === String(sessionUser.username || '').toLowerCase()) ||
+      String(u.role || '').toLowerCase() === 'owner'
+    )
+  );
+  if (!ownerRec) {
+    res.status(403).json({ error: 'Owner account verification failed.' });
+    return false;
+  }
+  const password = String(req.body?.password || req.headers['x-confirm-password'] || '').trim();
+  if (!password) {
+    res.status(403).json({ error: 'Owner password is required to permanently delete this connection.' });
+    return false;
+  }
+  if (!verifyPassword(password, ownerRec.password || '')) {
+    res.status(403).json({ error: 'Incorrect Owner password. Deletion was cancelled.' });
+    return false;
+  }
+  if (ownerRec.two_fa && ownerRec.two_fa_secret) {
+    const code = String(req.body?.two_fa_code || req.body?.code || req.headers['x-confirm-2fa'] || '').trim();
+    if (!code) {
+      res.status(403).json({ error: 'Please enter your 6-digit 2FA verification code to permanently delete this connection.' });
+      return false;
+    }
+    if (!verifyTotp(code, ownerRec.two_fa_secret)) {
+      res.status(403).json({ error: 'Invalid 2FA verification code. Deletion was cancelled.' });
+      return false;
+    }
+  }
+  return true;
+}
+
 app.delete('/api/cr-api-connections/:id', (req, res) => {
   const data = readDb('cr_api_connections') || [];
   const id = Number(req.params.id);
-  writeDb('cr_api_connections', data.filter(x => x.id !== id));
-  logAudit('Admin', 'Delete CR API Connection', `Deleted connection #${id}`, 'CR API');
+  const existing = data.find(x => Number(x.id) === id);
+  if (!existing) return res.status(404).json({ error: 'API connection not found.' });
+  if (existing.active !== false) {
+    return res.status(400).json({ error: 'This API connection is currently active. Please stop or pause it before deleting.' });
+  }
+  if (!verifyOwnerConnectionDeleteAuth(req, res)) return;
+  writeDb('cr_api_connections', data.filter(x => Number(x.id) !== id));
+  logAudit(req.sessionUser?.username || 'Owner', 'Delete CR API Connection', `Deleted stopped connection #${id} (${existing.name || existing.provider || ''})`, 'CR API');
   res.json({ success: true });
 });
 
@@ -13458,8 +14860,14 @@ app.patch('/api/whitenoise-connections/:id', (req, res) => {
 app.delete('/api/whitenoise-connections/:id', (req, res) => {
   const data = readDb('whitenoise_connections') || [];
   const id = Number(req.params.id);
+  const existing = data.find(x => Number(x.id) === id);
+  if (!existing) return res.status(404).json({ error: 'Whitenoise connection not found.' });
+  if (existing.active !== false) {
+    return res.status(400).json({ error: 'This Whitenoise connection is currently active. Please stop or pause it before deleting.' });
+  }
+  if (!verifyOwnerConnectionDeleteAuth(req, res)) return;
   writeDb('whitenoise_connections', data.filter(x => Number(x.id) !== id));
-  logAudit(req.sessionUser?.username || 'Owner', 'Delete Whitenoise Connection', `Deleted Whitenoise connection #${id}`, 'Whitenoise');
+  logAudit(req.sessionUser?.username || 'Owner', 'Delete Whitenoise Connection', `Deleted stopped Whitenoise connection #${id} (${existing.name || ''})`, 'Whitenoise');
   res.json({ success: true });
 });
 
@@ -13703,9 +15111,15 @@ app.patch('/api/login-panels/:id', (req, res) => {
 app.delete('/api/login-panels/:id', (req, res) => {
   const panels = readDb('login_panels') || [];
   const id = Number(req.params.id);
+  const existing = panels.find(p => Number(p.id) === id);
+  if (!existing) return res.status(404).json({ error: 'Login panel not found.' });
+  if (String(existing.status || '').toLowerCase() === 'running') {
+    return res.status(400).json({ error: 'This login panel is currently running. Please stop it before deleting.' });
+  }
+  if (!verifyOwnerConnectionDeleteAuth(req, res)) return;
   loginPanelCookieCache.delete(id);
-  writeDb('login_panels', panels.filter(p => p.id !== id));
-  logAudit('Admin', 'Delete Login Panel', `Deleted panel #${id}`, 'Login Panel');
+  writeDb('login_panels', panels.filter(p => Number(p.id) !== id));
+  logAudit(req.sessionUser?.username || 'Owner', 'Delete Login Panel', `Deleted stopped panel #${id} (${existing.name || ''})`, 'Login Panel');
   res.json({ success: true });
 });
 
@@ -14974,6 +16388,12 @@ app.post('/api/whitenoise-excel/preview', requireAuth, upload.single('file'), (r
       col_map: evalRes.parsed.col_map,
       date_min: evalRes.date_min,
       date_max: evalRes.date_max,
+      distinct_dates: evalRes.distinct_dates || [],
+      date_range_collapsed_warning: Boolean(evalRes.parsed.date_range_collapsed_warning),
+      per_date_summary: evalRes.per_date_summary || [],
+      missing_days_filled: evalRes.missing_days_filled || [],
+      missing_dates_remaining: evalRes.missing_dates_remaining || [],
+      half_month_coverage: evalRes.half_month_coverage || null,
       warnings: evalRes.parsed.warnings,
       summary: evalRes.summary,
       total_preview_rows: evalRes.evaluated_rows.length,
@@ -14984,6 +16404,30 @@ app.post('/api/whitenoise-excel/preview', requireAuth, upload.single('file'), (r
     console.error('POST /api/whitenoise-excel/preview error:', err);
     res.status(400).json({ error: err.message || 'Failed to parse Excel workbook.' });
   }
+});
+
+app.get('/api/whitenoise-excel/coverage', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const stats = readDb('whitenoise_daily_stats') || [];
+  let monthYm = String(req.query.month || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(monthYm)) {
+    const dates = stats.map(s => s && s.date_ymd).filter(Boolean).sort();
+    monthYm = (dates[dates.length - 1] || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  }
+  const monthsAvailable = Array.from(new Set(
+    stats.map(s => s && s.date_ymd ? String(s.date_ymd).slice(0, 7) : '').filter(Boolean)
+  )).sort().reverse();
+  if (!monthsAvailable.includes(monthYm)) monthsAvailable.unshift(monthYm);
+
+  const coverage = buildWhitenoiseMonthCoverage(monthYm, stats);
+  res.json({
+    success: true,
+    month: monthYm,
+    months_available: monthsAvailable,
+    coverage
+  });
 });
 
 app.post('/api/whitenoise-excel/commit', requireAuth, upload.single('file'), (req, res) => {
@@ -15025,7 +16469,10 @@ app.post('/api/whitenoise-excel/commit', requireAuth, upload.single('file'), (re
     res.json({
       success: true,
       batch,
-      summary: evalRes.summary
+      summary: evalRes.summary,
+      per_date_summary: evalRes.per_date_summary || [],
+      missing_days_filled: evalRes.missing_days_filled || [],
+      half_month_coverage: evalRes.half_month_coverage || null
     });
   } catch (err) {
     console.error('POST /api/whitenoise-excel/commit error:', err);
@@ -15590,8 +17037,12 @@ app.post('/api/payterms', requireAuth, (req, res) => {
   if (!Array.isArray(rawList) || rawList.length === 0) {
     return res.status(400).json({ error: 'payterms must be a non-empty array of strings' });
   }
-  const cleaned = Array.from(new Set(rawList.map(s => normalizePaytermKey(String(s).trim())).filter(Boolean)));
-  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty' });
+  const cleaned = Array.from(new Set(
+    rawList
+      .map(s => normalizePaytermKey(String(s).trim()))
+      .filter(s => s && !s.toLowerCase().includes('biweek') && s !== '15/3')
+  ));
+  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty (Biweekly is disabled)' });
 
   const settings = readDb('settings') || {};
   settings.payterms = cleaned;
@@ -15609,8 +17060,12 @@ app.put('/api/payterms', requireAuth, (req, res) => {
   if (!Array.isArray(rawList) || rawList.length === 0) {
     return res.status(400).json({ error: 'payterms must be a non-empty array of strings' });
   }
-  const cleaned = Array.from(new Set(rawList.map(s => normalizePaytermKey(String(s).trim())).filter(Boolean)));
-  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty' });
+  const cleaned = Array.from(new Set(
+    rawList
+      .map(s => normalizePaytermKey(String(s).trim()))
+      .filter(s => s && !s.toLowerCase().includes('biweek') && s !== '15/3')
+  ));
+  if (!cleaned.length) return res.status(400).json({ error: 'payterms cannot be empty (Biweekly is disabled)' });
 
   const settings = readDb('settings') || {};
   settings.payterms = cleaned;
@@ -16025,7 +17480,7 @@ app.get('/api/search', requireAuth, (req, res) => {
 
   const isOwnerSearch = !isAgent && !isClient;
   const numbers = allNumbers.filter(n => (n.number || '').toLowerCase().includes(q)).slice(0, 10);
-  const clients = allClients.filter(c => (c.username || '').toLowerCase().includes(q)).slice(0, 10).map(isOwnerSearch ? safeClientForOwner : safeUser);
+  const clients = isOwnerSearch ? [] : allClients.filter(c => (c.username || '').toLowerCase().includes(q)).slice(0, 10).map(safeUser);
   const agents = allAgents.filter(a => (a.username || '').toLowerCase().includes(q)).slice(0, 10).map(safeUser);
 
   res.json({ numbers, clients, agents });

@@ -15,7 +15,7 @@ const dir = makeFixture({
       cost: 0.02,
       payout: 0.015,
       weekly_rate: 0.015,
-      payterms: { Weekly: 0.015, Biweekly: 0.018 },
+      payterms: { Weekly: 0.015 },
       currency: 'USD'
     }
   ],
@@ -26,7 +26,7 @@ const dir = makeFixture({
       range_id: 1,
       range_name: 'Ghana Orange NS2',
       client_rate_pkr: 3.75,
-      allowed_quantities: [25, 50],
+      allowed_quantities: [10, 25],
       payterm: 'Weekly'
     }
   ],
@@ -155,7 +155,7 @@ try {
   // 4. Agent submits second Number Request and Owner rejects -> BOTH Agent and Owner receive live rejection notification
   const agReq2 = await srv.api('POST', '/api/agent-requests', {
     cookie: ag.cookie,
-    body: { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 5, payterm: 'Biweekly' }
+    body: { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 5, payterm: 'Weekly' }
   });
   const agReq2Id = agReq2.data?.request?.id || agReq2.data?.id;
   const rejRes = await srv.api('POST', `/api/agent-requests/${agReq2Id}/reject`, {
@@ -194,7 +194,7 @@ try {
   // 6. Client submits Number Request & PKR Payment Request -> Agent receives live WS notifications
   const clReqRes = await srv.api('POST', '/api/client-requests', {
     cookie: cl.cookie,
-    body: { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 25, payterm: 'Weekly' }
+    body: { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 10, payterm: 'Weekly' }
   });
   check('Client submits Number Request via /api/client-requests (200)', clReqRes.status === 200);
   const agClReqNotif = await waitForEvent(agWs.events, n => n.type === 'request' && n.recipient_role === 'agent' && String(n.message || '').includes('client_one'));

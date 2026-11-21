@@ -24,11 +24,11 @@ export async function stageC() {
       company_cost: 0.02,
       cost: 0.02,
       payout: 0.012,
-      payterms: { 'Weekly': 0.012, 'Biweekly': 0.012, 'Monthly': 0.012 }
+      payterms: { 'Weekly': 0.012 }
     });
     check('C1 Owner creates range with company cost and payterms', createRangeRes.status === 200 && Number(createRangeRes.data.company_cost) === 0.02);
 
-    await ow('PATCH', '/api/numbers/sms-ranges/1', { company_cost: 0.02, cost: 0.02, payout: 0.012, payterms: { 'Weekly': 0.012, 'Biweekly': 0.012, 'Monthly': 0.012 } });
+    await ow('PATCH', '/api/numbers/sms-ranges/1', { company_cost: 0.02, cost: 0.02, payout: 0.012, payterms: { 'Weekly': 0.012 } });
 
     const clRanges = await cl('GET', '/api/numbers/sms-ranges');
     const clRangeItem = (clRanges.data || []).find(r => r.id === createRangeRes.data.id);

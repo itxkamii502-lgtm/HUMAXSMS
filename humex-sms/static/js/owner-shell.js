@@ -41,7 +41,7 @@ const ZY_ADMIN_MENU = [
       ['Credit Notes', 'credit-notes', 'fa-receipt'],
   ] },
   { t: "ACCOUNTS & SECURITY", i: 'fa-shield-halved', c: '#1d4ed8', items: [
-      ['Accounts & Hierarchy', 'agents', 'fa-user-secret'],
+      ['Agents & Accounts', 'agents', 'fa-user-secret'],
       ['Security & Firewall', 'firewall-dashboard', 'fa-shield-halved'],
       ['Audit Logs', 'audit-logs', 'fa-clipboard-list'],
   ] },
@@ -241,8 +241,7 @@ const ZY_ADMIN_LABELS = {
   'eur-statements': 'EUR Statements',
   'gbp-statements': 'GBP Statements',
   'credit-notes': 'Credit Notes',
-  'clients': 'Clients',
-  'hierarchy': 'Hierarchy Tree',
+  'agents': 'Agents',
   'users': 'All Accounts',
   'login-activity': 'Login Activity',
   'firewall-dashboard': 'Security & Firewall',
@@ -889,7 +888,6 @@ async function renderOwnerCdr2() {
     { id: 'month', label: 'Month', val: 'month' },
     { id: 'range', label: 'Range', val: 'range' },
     { id: 'agent', label: 'Agent', val: 'agent' },
-    { id: 'client', label: 'Client', val: 'client' },
     { id: 'number', label: 'Number', val: 'number' },
     { id: 'cli', label: 'Service / CLI', val: 'cli' }
   ];
@@ -902,14 +900,14 @@ async function renderOwnerCdr2() {
   `).join('');
 
   c.innerHTML = `
-    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
       <div>
         <div class="page-title" style="display:flex;align-items:center;gap:8px;">
           <i class="fas fa-file-excel" style="color:#2563eb;"></i>
           <span>CDR 2 — Whitenoise Daily Stats</span>
         </div>
-        <div class="page-subtitle" style="margin-top:4px;">
-          Excel-Only Daily Stats · Monthly (30/5) {W} · 5-day hold · Date-locked historical ownership
+        <div class="page-subtitle" style="margin-top:3px;">
+          Excel-Only Daily Stats · Monthly (30/5) {W} · 5-day hold · Cumulative 1–15 &amp; 16–End reconciliation
         </div>
       </div>
       <div class="page-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -922,29 +920,31 @@ async function renderOwnerCdr2() {
       </div>
     </div>
 
-    <div style="display:flex;gap:0;border-bottom:1px solid var(--border,#e2e8f0);margin-bottom:14px;">
+    <div style="display:flex;gap:0;border-bottom:1px solid var(--border,#e2e8f0);margin-bottom:10px;">
       <button type="button" id="cdr2-tab-stats" onclick="zyOwnerCdr2SwitchTab('stats')"
-        style="padding:9px 16px;font-size:13px;font-weight:600;border:none;background:transparent;cursor:pointer;border-bottom:2px solid #2563eb;color:#2563eb;">
+        style="padding:7px 14px;font-size:12.5px;font-weight:600;border:none;background:transparent;cursor:pointer;border-bottom:2px solid #2563eb;color:#2563eb;">
         Daily Stats Ledger
       </button>
       <button type="button" id="cdr2-tab-history" onclick="zyOwnerCdr2SwitchTab('history')"
-        style="padding:9px 16px;font-size:13px;font-weight:600;border:none;background:transparent;cursor:pointer;border-bottom:2px solid transparent;color:#64748b;">
+        style="padding:7px 14px;font-size:12.5px;font-weight:600;border:none;background:transparent;cursor:pointer;border-bottom:2px solid transparent;color:#64748b;">
         Upload History &amp; Rollback
       </button>
     </div>
 
     <div id="cdr2-panel-stats">
-      <div class="zy-filter-grid" data-apx="filter-bar" data-cdr-compact="1" style="margin-bottom:14px;">
+      <div id="cdr2-coverage-strip" class="zy-wn-cov-strip" style="margin-bottom:10px;"></div>
+
+      <div class="zy-filter-grid zy-owner-cdr2-compact" data-apx="filter-bar" data-cdr-compact="1" style="margin-bottom:12px;">
         <div class="zy-cdr-head-row">
-          <div style="display:flex;align-items:center;gap:7px;">
+          <div style="display:flex;align-items:center;gap:6px;">
             <i class="fas fa-sliders" style="color:#2563eb;"></i>
             <span>Whitenoise Excel Stats Filters</span>
           </div>
-          <div id="cdr2-sync-status" style="font-size:12px;color:#64748b;font-variant-numeric:tabular-nums;">
-            Background polling disabled · Powered by daily Excel reports
+          <div id="cdr2-sync-status" style="font-size:11px;color:#64748b;font-variant-numeric:tabular-nums;">
+            Daily Excel Reconciliation · 0 Duplicates
           </div>
         </div>
-        <div class="zy-filter-grid-fields">
+        <div class="zy-filter-grid-fields zy-cdr2-fields-compact">
           <div class="zy-filter-field">
             <label class="zy-filter-label" for="cdr2-from">From</label>
             <input type="text" id="cdr2-from" class="zy-filter-input" value="${defaultFrom}" placeholder="YYYY-MM-DD HH:mm:ss" onclick="if(window.zyOpenDatePicker)window.zyOpenDatePicker(this)">
@@ -967,9 +967,9 @@ async function renderOwnerCdr2() {
           </div>
         </div>
 
-        <div class="zy-groupby-card">
+        <div class="zy-groupby-card zy-cdr2-groupby-compact">
           <div class="zy-groupby-title">
-            <i class="fas fa-layer-group" style="font-size:11px;color:var(--sp-text-muted,#64748b);"></i>
+            <i class="fas fa-layer-group" style="font-size:10px;color:var(--sp-text-muted,#64748b);"></i>
             Group By :
           </div>
           <div class="zy-groupby-chips">
@@ -977,7 +977,7 @@ async function renderOwnerCdr2() {
           </div>
           <div class="zy-groupby-search-wrap">
             <input type="text" id="cdr2-search" class="zy-groupby-search-input"
-              placeholder="Search Date, Range, Number, Service, Agent, Client..."
+              placeholder="Search Date, Range, Number, Service, Agent..."
               autocomplete="off"
               oninput="zyHandleCdrSearchInput(this, 'cdr2-search-clear', () => renderOwnerCdr2Load(1))"
               onkeydown="if(event.key==='Enter'){event.preventDefault();if(window._zyCdrSearchTimer){clearTimeout(window._zyCdrSearchTimer);}renderOwnerCdr2Load(1);}">
@@ -988,7 +988,7 @@ async function renderOwnerCdr2() {
         </div>
 
         <div class="zy-table-toolbar zy-cdr-control-bar">
-          <div class="zy-cdr-actions-left" style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div class="zy-cdr-actions-left" style="display:flex;gap:6px;flex-wrap:wrap;">
             <button type="button" class="zy-btn-blue-solid" id="btn-show-cdr2" onclick="renderOwnerCdr2Load(1)">
               <i class="fas fa-chart-column"></i> Show Report
             </button>
@@ -999,7 +999,7 @@ async function renderOwnerCdr2() {
           <div class="zy-toolbar-right">
             <button type="button" class="zy-btn-pill zy-cols-btn" onclick="zyToggleColumnsModal('dt-cdr2', this)"><i class="fas fa-columns"></i> Columns</button>
             <div class="zy-toolbar-select-wrap">
-              <label class="zy-toolbar-label" for="cdr2-limit">Show Records</label>
+              <label class="zy-toolbar-label" for="cdr2-limit">Show</label>
               <select id="cdr2-limit" class="zy-toolbar-select" onchange="renderOwnerCdr2Load(1)">
                 <option value="10">10</option>
                 <option value="25" selected>25</option>
@@ -1014,8 +1014,8 @@ async function renderOwnerCdr2() {
           </div>
         </div>
 
-        <div class="zy-panel-body" id="cdr2-body" style="padding:0;margin-top:12px;">
-          <div class="zy-loading" style="padding:40px;text-align:center;color:var(--sp-text-muted,#64748b);">Loading CDR 2 daily stats…</div>
+        <div class="zy-panel-body" id="cdr2-body" style="padding:0;margin-top:10px;">
+          <div class="zy-loading" style="padding:32px;text-align:center;color:var(--sp-text-muted,#64748b);">Loading CDR 2 daily stats…</div>
         </div>
       </div>
     </div>
@@ -1064,9 +1064,77 @@ async function renderOwnerCdr2() {
     console.warn('Error populating CDR 2 filters:', err);
   }
 
+  zyLoadWhitenoiseCoverageStrip(today.slice(0, 7));
   renderOwnerCdr2Load(1);
 }
 window.renderOwnerCdr2 = renderOwnerCdr2;
+
+window.zyLoadWhitenoiseCoverageStrip = async function (monthYm) {
+  const host = document.getElementById('cdr2-coverage-strip');
+  if (!host) return;
+  const ym = (monthYm && /^\d{4}-\d{2}$/.test(monthYm))
+    ? monthYm
+    : (new Date().toISOString().slice(0, 7));
+  try {
+    const cov = await apiFetch(`/api/whitenoise-excel/coverage?month=${encodeURIComponent(ym)}`, { silent: true });
+    if (!cov || !cov.success) return;
+    const p1 = cov.period_1_15 || { label: '1–15', covered_days: 0, total_days: 15, missing_dates: [], sms_total: 0, day_list: [] };
+    const p2 = cov.period_16_end || { label: '16–End', covered_days: 0, total_days: 15, missing_dates: [], sms_total: 0, day_list: [] };
+
+    const renderHalfCard = (title, p) => {
+      const days = p.day_list || [];
+      const pills = days.map(d => {
+        const cls = d.uploaded ? 'is-ok' : 'is-miss';
+        const tip = `${d.date}: ${d.uploaded ? (Number(d.sms_total || 0).toLocaleString() + ' SMS') : 'Missing — upload cumulative sheet to fill'}`;
+        return `<button type="button" class="zy-wn-day-pill ${cls}" title="${zyEsc(tip)}" onclick="zyFilterCdr2ByDate('${zyEsc(d.date)}')">${d.day}</button>`;
+      }).join('');
+      const missCount = (p.missing_dates || []).length;
+      return `
+        <div class="zy-wn-half-card">
+          <div class="zy-wn-half-head">
+            <span class="zy-wn-half-title"><i class="fas fa-calendar-days"></i> ${zyEsc(title)}</span>
+            <span class="zy-wn-half-meta">
+              <b>${p.covered_days}/${p.total_days}d</b> ·
+              <span class="monospace">${Number(p.sms_total || 0).toLocaleString()} SMS</span>
+              ${missCount > 0 ? `<span class="zy-wn-miss-badge">${missCount} missing</span>` : `<span class="zy-wn-ok-badge">Complete</span>`}
+            </span>
+          </div>
+          <div class="zy-wn-day-grid">${pills}</div>
+        </div>
+      `;
+    };
+
+    host.innerHTML = `
+      <div class="zy-wn-cov-bar">
+        <div class="zy-wn-cov-top">
+          <div class="zy-wn-cov-heading">
+            <i class="fas fa-calendar-check" style="color:#4f46e5;"></i>
+            <span>Monthly Reconciliation Coverage</span>
+            <span class="zy-wn-cov-sub">Click any day to filter · Upload 1–15 or 16–End sheet to auto-fill missing dates without duplicates</span>
+          </div>
+          <div class="zy-wn-cov-controls">
+            <input type="month" id="cdr2-cov-month" class="zy-wn-month-input" value="${zyEsc(cov.month || ym)}" onchange="zyLoadWhitenoiseCoverageStrip(this.value)">
+          </div>
+        </div>
+        <div class="zy-wn-half-wrap">
+          ${renderHalfCard('Cycle 1–15', p1)}
+          ${renderHalfCard(`Cycle ${p2.label || '16–End'}`, p2)}
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    host.innerHTML = '';
+  }
+};
+
+window.zyFilterCdr2ByDate = function (ymd) {
+  if (!ymd) return;
+  const f = document.getElementById('cdr2-from');
+  const t = document.getElementById('cdr2-to');
+  if (f) f.value = `${ymd} 00:00:00`;
+  if (t) t.value = `${ymd} 23:59:59`;
+  renderOwnerCdr2Load(1);
+};
 
 window.zyOwnerCdr2SwitchTab = function (tab) {
   window._wnCdr2Tab = tab === 'history' ? 'history' : 'stats';
@@ -1232,7 +1300,7 @@ async function renderOwnerCdr2Load(targetPage = 1) {
       });
       zy2Render('dt-cdr2');
     } else {
-      const cols = ['Date', 'Range', 'Number', 'Service / CLI', 'Agent', 'Client', 'SMS Count', 'Unit Rate', 'Owner Rev', 'Agent Pay', 'Owner Profit', 'Cycle'];
+      const cols = ['Date', 'Range', 'Number', 'Service / CLI', 'Agent', 'SMS Count', 'Unit Rate', 'Owner Rev', 'Agent Pay', 'Owner Profit', 'Cycle'];
       const rows = data.map(s => {
         const dStr = s.date_ymd || String(s.date || s.timestamp || '').replace('T', ' ').slice(0, 10);
         const smsCnt = Number(s.sms_count) > 0 ? Math.round(Number(s.sms_count)) : 1;
@@ -1243,7 +1311,6 @@ async function renderOwnerCdr2Load(targetPage = 1) {
         const numStr = String(s.number || '').trim();
         const cliStr = String(s.cli || s.service || s.app || 'General').trim();
         const agentVal = String(s.agent || s.agent_username || s.agent_name || '').trim();
-        const clientVal = String(s.client || s.client_username || s.client_name || '').trim();
         const clearLabel = s.clears_at ? `Clears ${String(s.clears_at).slice(0, 10)}` : 'Monthly (30/5) {W}';
 
         return [
@@ -1252,7 +1319,6 @@ async function renderOwnerCdr2Load(targetPage = 1) {
           { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
           { v: cliStr, h: `<span class="monospace">${zyEsc(cliStr)}</span>` },
           agentVal ? zyEsc(agentVal) : '<span style="color:#94a3b8;">Unassigned</span>',
-          clientVal ? zyEsc(clientVal) : '<span style="color:#94a3b8;">Pool</span>',
           { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },
           { v: unitRate, h: `<span class="monospace" style="color:#64748b;">$${zyFmtMoney(unitRate, 4)}</span>` },
           { v: myPayoutVal, h: `<span class="monospace">$${zyFmtMoney(myPayoutVal, 4)}</span>` },
@@ -1269,7 +1335,7 @@ async function renderOwnerCdr2Load(targetPage = 1) {
       const usdPr = sum.profit != null ? sum.profit : Math.max(0, usdIn - usdOut);
 
       const footRow = `<td><b>Rows: ${Number(logs.total || data.length).toLocaleString()}</b></td>` +
-        '<td></td>'.repeat(5) +
+        '<td></td>'.repeat(4) +
         `<td class="monospace"><b>${totalSms.toLocaleString()}</b></td>` +
         '<td></td>' +
         `<td class="monospace"><b>$${zyFmtMoney(usdIn, 4)}</b></td>` +
@@ -1426,10 +1492,65 @@ function zyRenderWhitenoisePreview() {
     return '<span style="color:#94a3b8;font-weight:600;">SAME</span>';
   };
   const ownerCell = (r) => {
-    if (r.client_name) return `<span style="font-weight:600;color:#0f172a;">${zyEsc(r.client_name)}</span> <span style="color:#64748b;font-size:11px;">(${zyEsc(r.agent_name || 'Agent')})</span>`;
-    if (r.agent_name) return `<span style="color:#2563eb;font-weight:600;">${zyEsc(r.agent_name)}</span> <span style="color:#64748b;font-size:11px;">(Pool)</span>`;
+    if (r.agent_name) {
+      const sub = r.client_name ? 'Allocated' : 'Agent Pool';
+      return `<span style="color:#2563eb;font-weight:600;">${zyEsc(r.agent_name)}</span> <span style="color:#64748b;font-size:11px;">(${sub})</span>`;
+    }
     return `<span style="color:#dc2626;font-weight:600;">${r.match_status === 'unknown_number' ? 'Unknown #' : 'Unassigned'}</span>`;
   };
+
+  const distinctDates = Array.isArray(st.distinct_dates) ? st.distinct_dates : [];
+  const perDate = Array.isArray(st.per_date_summary) ? st.per_date_summary : [];
+  const missingFilled = Array.isArray(st.missing_days_filled) ? st.missing_days_filled : [];
+  const missingRemaining = Array.isArray(st.missing_dates_remaining) ? st.missing_dates_remaining : [];
+
+  const gapBannerHtml = (missingFilled.length || missingRemaining.length || st.date_range_collapsed_warning)
+    ? `<div class="zy-wn-gap-banner">
+        ${st.date_range_collapsed_warning ? `<div class="zy-wn-gap-warn"><i class="fas fa-triangle-exclamation"></i> ${zyEsc(st.date_range_collapsed_warning)}</div>` : ''}
+        ${missingFilled.length ? `<div class="zy-wn-gap-filled"><i class="fas fa-circle-check"></i> <b>Missing Day(s) Auto-Filled (${missingFilled.length}):</b> <span class="monospace">${zyEsc(missingFilled.join(', '))}</span> — only missing/changed days are credited (0 duplicates on already-uploaded dates).</div>` : ''}
+        ${missingRemaining.length ? `<div class="zy-wn-gap-miss"><i class="fas fa-calendar-xmark"></i> <b>Still Missing in Span (${missingRemaining.length}):</b> <span class="monospace">${zyEsc(missingRemaining.slice(0, 12).join(', '))}${missingRemaining.length > 12 ? '…' : ''}</span></div>` : ''}
+      </div>`
+    : '';
+
+  const perDateMatrixHtml = perDate.length
+    ? `<div class="zy-wn-day-matrix-wrap">
+        <div class="zy-wn-day-matrix-head">
+          <span><i class="fas fa-table"></i> Day-by-Day Verification Matrix (${perDate.length} day${perDate.length === 1 ? '' : 's'} detected)</span>
+          <span style="font-size:11px;color:#64748b;">Cumulative reconciliation across 1–15 &amp; 16–End cycles</span>
+        </div>
+        <div style="max-height:155px;overflow:auto;">
+          <table class="zy-wn-day-matrix-tbl">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Cycle</th>
+                <th style="text-align:right;">DB SMS</th>
+                <th style="text-align:right;">Sheet SMS</th>
+                <th style="text-align:right;">Delta</th>
+                <th>Reconciliation Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${perDate.map(d => {
+                let stBadge = '<span class="zy-wn-st-match">Verified Match</span>';
+                if (d.status === 'missing_day_filled') stBadge = '<span class="zy-wn-st-filled">Missing Day Filled</span>';
+                else if (d.status === 'new_day') stBadge = '<span class="zy-wn-st-new">New Day</span>';
+                else if (d.status === 'updated') stBadge = '<span class="zy-wn-st-upd">Updated Delta</span>';
+                const deltaStr = `${d.delta_sms >= 0 ? '+' : ''}${Number(d.delta_sms || 0).toLocaleString()}`;
+                return `<tr>
+                  <td class="monospace" style="font-weight:700;">${zyEsc(d.date_ymd)}</td>
+                  <td><span class="zy-wn-cycle-tag">${zyEsc(d.half_period || '—')}</span></td>
+                  <td class="monospace" style="text-align:right;">${Number(d.existing_sms || 0).toLocaleString()}</td>
+                  <td class="monospace" style="text-align:right;font-weight:700;">${Number(d.file_sms || 0).toLocaleString()}</td>
+                  <td class="monospace" style="text-align:right;font-weight:700;color:${d.delta_sms > 0 ? '#059669' : (d.delta_sms < 0 ? '#dc2626' : '#64748b')};">${deltaStr}</td>
+                  <td>${stBadge}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`
+    : '';
 
   const warningsHtml = (st.warnings || []).length
     ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid #fde68a;background:#fffbeb;border-radius:6px;font-size:12px;color:#92400e;">
@@ -1438,16 +1559,21 @@ function zyRenderWhitenoisePreview() {
     : '';
 
   const canCommit = Number(s.new_rows || 0) + Number(s.updated_rows || 0) > 0;
+  const layoutLabel = st.layout === 'date_pivot' ? 'Date Matrix' : (st.layout === 'multi_sheet_dates' ? 'Multi-Sheet Daily' : 'Tabular');
 
   cont.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;font-size:12.5px;color:#334155;">
       <div>
-        <b>${zyEsc(st.filename)}</b> · Dates: <span class="monospace">${zyEsc(st.date_min || '—')} → ${zyEsc(st.date_max || '—')}</span> · Layout: <b>${st.layout === 'date_pivot' ? 'Date Matrix' : 'Tabular'}</b>
+        <b>${zyEsc(st.filename)}</b> · Dates: <span class="monospace">${zyEsc(st.date_min || '—')} → ${zyEsc(st.date_max || '—')}</span>
+        <span class="zy-wn-cycle-tag" style="margin-left:4px;">${distinctDates.length || perDate.length} day(s)</span>
+        · Layout: <b>${layoutLabel}</b>
       </div>
       <div style="color:#64748b;">Parsed ${Number(s.total_rows || 0).toLocaleString()} row(s) · ${Number(s.total_sms_in_file || 0).toLocaleString()} total SMS</div>
     </div>
 
+    ${gapBannerHtml}
     ${warningsHtml}
+    ${perDateMatrixHtml}
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin:10px 0;padding:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
       <div>
@@ -1490,7 +1616,7 @@ function zyRenderWhitenoisePreview() {
         <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#0f172a;">${(s.net_sms_delta || 0) >= 0 ? '+' : ''}${Number(s.net_sms_delta || 0).toLocaleString()}</div>
       </div>
       <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Matched Client / Pool</div>
+        <div style="font-size:11px;color:#64748b;">Allocated / Pool</div>
         <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;">${s.matched_client || 0} / ${s.agent_pool || 0}</div>
       </div>
       <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
@@ -1502,8 +1628,8 @@ function zyRenderWhitenoisePreview() {
         <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#059669;">$${zyFmtMoney(Number(s.net_owner_profit_delta_usd || 0), 4)}</div>
       </div>
       <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Client PKR Delta</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#2563eb;">Rs. ${zyFmtMoney(Number(s.net_client_payout_delta_pkr || 0), 2)}</div>
+        <div style="font-size:11px;color:#64748b;">Agent Payout Delta</div>
+        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#2563eb;">$${zyFmtMoney(Number(s.net_agent_payout_delta_usd || 0), 4)}</div>
       </div>
     </div>
 
@@ -1521,7 +1647,7 @@ function zyRenderWhitenoisePreview() {
       `).join('')}
     </div>
 
-    <div style="max-height:260px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;">
+    <div style="max-height:240px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;">
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;text-align:left;">
@@ -1529,10 +1655,10 @@ function zyRenderWhitenoisePreview() {
             <th style="padding:6px 8px;">Date</th>
             <th style="padding:6px 8px;">Number</th>
             <th style="padding:6px 8px;">Service</th>
-            <th style="padding:6px 8px;">Date-Locked Owner</th>
+            <th style="padding:6px 8px;">Date-Locked Agent</th>
             <th style="padding:6px 8px;text-align:right;">SMS</th>
             <th style="padding:6px 8px;text-align:right;">Owner Rev</th>
-            <th style="padding:6px 8px;text-align:right;">Client PKR</th>
+            <th style="padding:6px 8px;text-align:right;">Agent Pay</th>
           </tr>
         </thead>
         <tbody>
@@ -1547,7 +1673,7 @@ function zyRenderWhitenoisePreview() {
                 ${r.action === 'updated' ? `<span style="color:#94a3b8;text-decoration:line-through;margin-right:4px;">${r.prev_sms_count}</span>` : ''}${r.sms_count}
               </td>
               <td class="monospace" style="padding:5px 8px;text-align:right;">$${zyFmtMoney(Number(r.owner_revenue_usd || 0), 4)}</td>
-              <td class="monospace" style="padding:5px 8px;text-align:right;">Rs. ${zyFmtMoney(Number(r.client_payout_pkr || 0), 2)}</td>
+              <td class="monospace" style="padding:5px 8px;text-align:right;">$${zyFmtMoney(Number(r.agent_payout_usd || 0), 4)}</td>
             </tr>
           `).join('') : `<tr><td colspan="8" style="padding:18px;text-align:center;color:#94a3b8;">No rows in this filter tab.</td></tr>`}
         </tbody>
@@ -1590,6 +1716,10 @@ window.zyWnCommitExcelUpload = async function () {
     window._wnPreviewState = null;
     if (typeof closeModal === 'function') closeModal();
     if (document.getElementById('cdr2-body')) renderOwnerCdr2Load(1);
+    if (document.getElementById('cdr2-coverage-strip')) {
+      const m = document.getElementById('cdr2-cov-month')?.value || (b.date_max ? String(b.date_max).slice(0, 7) : undefined);
+      zyLoadWhitenoiseCoverageStrip(m);
+    }
     if (document.getElementById('cdr2-batches-body')) zyLoadWhitenoiseBatches('cdr2-batches-body');
     if (document.getElementById('wn-panel-batches-body')) zyLoadWhitenoiseBatches('wn-panel-batches-body');
   } catch (err) {
@@ -1667,6 +1797,10 @@ window.zyWnRollbackBatch = async function (id, batchCode, containerId) {
     }
     if (containerId) zyLoadWhitenoiseBatches(containerId);
     if (document.getElementById('cdr2-body')) renderOwnerCdr2Load(1);
+    if (document.getElementById('cdr2-coverage-strip')) {
+      const m = document.getElementById('cdr2-cov-month')?.value;
+      zyLoadWhitenoiseCoverageStrip(m);
+    }
   } catch (err) {
     if (typeof toast === 'function') toast(err.message || 'Rollback failed', 'error');
   }

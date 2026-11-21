@@ -225,6 +225,20 @@
     return kebab || null;
   }
 
+  function syncBodyPageClass(page) {
+    try {
+      const p = String(page || 'dashboard').toLowerCase().trim();
+      const isDash = (!p || p === 'dashboard' || p === 'overview');
+      if (document.body) {
+        document.body.classList.toggle('zy-is-dashboard', isDash);
+        document.body.classList.toggle('zy-is-subpage', !isDash);
+        document.body.dataset.zyPage = p || 'dashboard';
+      }
+    } catch (e) {}
+  }
+  window.zySyncBodyPageClass = syncBodyPageClass;
+  syncBodyPageClass(pageFromUrl() || 'dashboard');
+
   let isNavigatingHistory = false;
   let first = true;
   const prev = window.loadPage;
@@ -236,6 +250,8 @@
         const want = pageFromUrl();
         if (want && want !== page) page = want;
       }
+
+      syncBodyPageClass(page);
 
       // 1. Show smooth skeleton state before async fetch starts
       if (typeof window.zyShowSkeleton === 'function') {
@@ -273,6 +289,7 @@
     if (page && typeof prev === 'function') {
       isNavigatingHistory = true;
       try {
+        syncBodyPageClass(page);
         if (typeof window.zyShowSkeleton === 'function') {
           window.zyShowSkeleton(page);
         }
@@ -302,10 +319,12 @@
           const curPage = sessionStorage.getItem(
             role === 'owner' ? 'admin_current_page' : `${role}_current_page`
           ) || 'dashboard';
+          syncBodyPageClass(curPage);
           history.replaceState({ page: curPage, role }, '', urlFor(curPage));
           document.title = formatTitle(curPage);
         } catch (e) {}
       } else if (page) {
+        syncBodyPageClass(page);
         try { document.title = formatTitle(page); } catch (e) {}
       }
     }, 350);

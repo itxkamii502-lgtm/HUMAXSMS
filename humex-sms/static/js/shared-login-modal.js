@@ -89,9 +89,9 @@ async function renderLoginPanels() {
            <button class="btn btn-outline btn-sm" onclick="openEditLoginPanelModal(${p.id})" title="Edit">
              <i class="fas fa-pen"></i>
            </button>
-           <button class="btn btn-danger btn-sm" onclick="deleteLoginPanel(${p.id})" title="Delete">
-             <i class="fas fa-trash"></i>
-           </button>`
+           ${p.status === 'running' ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteLoginPanel(${p.id}, '${lpEsc(p.name || 'Login Panel')}')" title="Protected Remove (Owner Password Required)">
+             <i class="fas fa-shield-halved"></i>
+           </button>`}`
         ]) : []
       )}
       ${panelsList.length ? '' : `<div class="empty-state">
@@ -148,9 +148,9 @@ async function renderLoginPanels() {
              <button class="btn btn-outline btn-sm" onclick="openEditLoginPanelModal(${p.id})" title="Edit">
                <i class="fas fa-pen"></i>
              </button>
-             <button class="btn btn-danger btn-sm" onclick="deleteLoginPanel(${p.id})" title="Delete">
-               <i class="fas fa-trash"></i>
-             </button>`
+             ${p.status === 'running' ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteLoginPanel(${p.id}, '${lpEsc(p.name || 'Login Panel')}')" title="Protected Remove (Owner Password Required)">
+               <i class="fas fa-shield-halved"></i>
+             </button>`}`
           ]) : []
         ) + (liveData.length ? '' : `<div class="empty-state">
           <i class="fas fa-right-to-bracket" style="font-size:34px;color:var(--text-muted);"></i>
@@ -308,18 +308,55 @@ async function testLoginPanel(id) {
     <div class="form-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`);
 }
 
-async function deleteLoginPanel(id) {
-  openModal('Delete Login Panel', `
-    <p>Delete this login panel? The SMS already pulled from it stay in your logs.</p>
+async function deleteLoginPanel(id, name) {
+  if (typeof window.openProtectedConnDeleteModal === 'function') {
+    return window.openProtectedConnDeleteModal({
+      title: 'Protected Remove: Login Panel',
+      label: name || `Login Panel #${id}`,
+      endpoint: `/api/login-panels/${id}`,
+      onDone: async () => {
+        zyFlash('Login Panel Deleted.');
+        await renderLoginPanels();
+        zyShowFlash();
+      }
+    });
+  }
+  openModal('Protected Remove: Login Panel', `
+    <div id="lp-del-err" class="zy-modal-alert is-error" style="display:none;"></div>
+    <p style="font-size:13px;margin-bottom:12px;">Enter your Owner password to permanently remove <strong>${lpEsc(name || 'this login panel')}</strong>. Existing SMS logs will stay safe.</p>
+    <div class="form-group">
+      <label class="form-label">Owner Password *</label>
+      <input type="password" id="lp-del-pwd" placeholder="Enter Owner password" autocomplete="current-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">2FA Code (if 2FA is enabled)</label>
+      <input type="text" id="lp-del-2fa" placeholder="6-digit authenticator code" maxlength="8">
+    </div>
     <div class="form-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-danger" onclick="doDeleteLoginPanel(${id})">Delete</button>
+      <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button type="button" class="btn btn-danger" onclick="doDeleteLoginPanel(${id})">Confirm Delete</button>
     </div>`);
 }
 
 async function doDeleteLoginPanel(id) {
-  const res = await apiFetch(`/api/login-panels/${id}`, { method: 'DELETE' });
-  if (!res) return;
+  const password = (document.getElementById('lp-del-pwd')?.value || '').trim();
+  const two_fa_code = (document.getElementById('lp-del-2fa')?.value || '').trim();
+  if (!password) {
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('lp-del-err', 'Owner password is required.');
+    else toast('Owner password is required.', 'error');
+    return;
+  }
+  const res = await apiFetch(`/api/login-panels/${id}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ password, two_fa_code }),
+    silent: true
+  });
+  if (!res || !res.success) {
+    const msg = (res && res.error) || 'Could not delete login panel. Please verify your password and ensure the panel is stopped.';
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('lp-del-err', msg);
+    else toast(msg, 'error');
+    return;
+  }
   closeModal();
   zyFlash('Login Panel Deleted.');
   await renderLoginPanels();

@@ -64,7 +64,6 @@ for (const s of requiredStrings) {
 const appJs = fs.readFileSync(path.resolve('humex-sms/static/js/owner-engine.js'), 'utf8');
 const r2AppStrings = [
   'pt-weekly',
-  'pt-biweekly',
   'pt-monthly',
   's-payterms',
   'Master Payterm List'
@@ -72,17 +71,17 @@ const r2AppStrings = [
 for (const s of r2AppStrings) {
   assertCheck(`owner-engine.js contains '${s}' for master payterms`, appJs.includes(s));
 }
+assertCheck("owner-engine.js removed 'pt-biweekly'", !appJs.includes('pt-biweekly'));
 
 const r2AgentStrings = [
   'alloc-client-payterm',
   'Weekly (7/3)',
-  'Biweekly (15/3)',
   'Monthly (30/5) {W}'
 ];
 for (const s of r2AgentStrings) {
   assertCheck(`agent-pages.js contains '${s}' in Agent Allocate dropdown`, speedAgentPages.includes(s));
 }
-for (const deadPt of ['15/15', '15/30', 'Monthly60', '7/7', '7/1', '1/1', 'Monthly10']) {
+for (const deadPt of ['15/15', '15/30', 'Biweekly (15/3)', 'Monthly60', '7/7', '7/1', '1/1', 'Monthly10']) {
   assertCheck(`agent-pages.js removed legacy payterm '${deadPt}'`, !speedAgentPages.includes(deadPt));
 }
 
@@ -993,10 +992,10 @@ assertCheck('agent-pages.js defines pgBulkAdd with queue management',
 assertCheck('agent-pages.js integrates pool availability check',
   speedAgentPagesV6.includes('zyUpdateBulkPoolStat') && speedAgentPagesV6.includes('ba-pool-stat-wrap')
 );
-assertCheck('agent-pages.js bulk-add includes the 3 active payterms',
+assertCheck('agent-pages.js bulk-add includes the 2 active payterms (Weekly & Monthly {W}, no Biweekly)',
   speedAgentPagesV6.includes('ba-payterm') &&
   speedAgentPagesV6.includes('Weekly (7/3)') &&
-  speedAgentPagesV6.includes('Biweekly (15/3)') &&
+  !speedAgentPagesV6.includes('Biweekly (15/3)') &&
   speedAgentPagesV6.includes('Monthly (30/5) {W}')
 );
 
@@ -1056,9 +1055,9 @@ assertCheck('humex-panel.css defines .zy-loading-overlay',
 assertCheck('humex-panel.css defines .zy-payterm-badge',
   speedPanelCssV7.includes('.zy-payterm-badge')
 );
-assertCheck('humex-panel.css defines .zy-pt-weekly, .zy-pt-biweekly and .zy-pt-monthly',
+assertCheck('humex-panel.css defines .zy-pt-weekly and .zy-pt-monthly (no .zy-pt-biweekly)',
   speedPanelCssV7.includes('.zy-pt-weekly') &&
-  speedPanelCssV7.includes('.zy-pt-biweekly') &&
+  !speedPanelCssV7.includes('.zy-pt-biweekly') &&
   speedPanelCssV7.includes('.zy-pt-monthly')
 );
 
@@ -1095,18 +1094,14 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   speedKitJsV7.includes('zyEmptyState({ icon: \'fa-magnifying-glass\'') && speedKitJsV7.includes('zyEmptyState({ icon: \'fa-inbox\'')
 );
 
-// (c) Runtime simulation of V7 Payterms & Polish helpers (3 active schedules)
+// (c) Runtime simulation of V7 Payterms & Polish helpers (2 active schedules: Weekly & Monthly)
 (function testV7Runtime() {
-  const masterDefaults = ['Weekly', 'Biweekly', 'Monthly'];
+  const masterDefaults = ['Weekly', 'Monthly'];
   const aliasMap = {
     'weekly': 'Weekly',
     '7/3': 'Weekly',
     'weekly 7/3': 'Weekly',
     'weekly (7/3)': 'Weekly',
-    'biweekly': 'Biweekly',
-    'bi-weekly': 'Biweekly',
-    '15/3': 'Biweekly',
-    'biweekly (15/3)': 'Biweekly',
     'monthly': 'Monthly',
     '30/5': 'Monthly',
     '30/5 {w}': 'Monthly',
@@ -1124,7 +1119,6 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
 
   // 1. Alias mapping
   assertCheck('Runtime payterm alias: 7/3 maps to Weekly', normalizePt('7/3') === 'Weekly');
-  assertCheck('Runtime payterm alias: 15/3 maps to Biweekly', normalizePt('15/3') === 'Biweekly');
   assertCheck('Runtime payterm alias: 30/5 maps to Monthly', normalizePt('30/5') === 'Monthly');
   assertCheck('Runtime payterm alias: Monthly (30/5) {W} maps to Monthly', normalizePt('Monthly (30/5) {W}') === 'Monthly');
   assertCheck('Runtime payterm alias: weekly maps to Weekly', normalizePt('weekly') === 'Weekly');
@@ -1134,9 +1128,9 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     const norm = normalizePt(selected);
     return masterDefaults.map(t => `<option value="${t}" ${t === norm ? 'selected' : ''}>${t}</option>`).join('');
   }
-  const opts = renderOptions('15/3');
-  assertCheck('Runtime payterm options: 15/3 selects Biweekly option', opts.includes('<option value="Biweekly" selected>Biweekly</option>'));
-  assertCheck('Runtime payterm options: includes all 3 active master terms',
+  const opts = renderOptions('30/5');
+  assertCheck('Runtime payterm options: 30/5 selects Monthly option', opts.includes('<option value="Monthly" selected>Monthly</option>'));
+  assertCheck('Runtime payterm options: includes both active master terms (Weekly & Monthly)',
     masterDefaults.every(t => opts.includes(`value="${t}"`))
   );
 
@@ -1148,9 +1142,6 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   }
   assertCheck('Runtime payterm badge: generates .zy-payterm-badge and .zy-pt-weekly for 7/3',
     makeBadge('7/3').includes('zy-payterm-badge') && makeBadge('7/3').includes('zy-pt-weekly')
-  );
-  assertCheck('Runtime payterm badge: generates .zy-pt-biweekly for 15/3',
-    makeBadge('15/3').includes('zy-pt-biweekly')
   );
   assertCheck('Runtime payterm badge: generates .zy-pt-monthly for 30/5',
     makeBadge('30/5').includes('zy-pt-monthly')
@@ -1652,10 +1643,12 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     speedAgentPagesJs.includes("'client-payment-requests': () => pgClientPaymentRequests('all')")
   );
 
-  assertCheck('Refinement 13c: Client Ranges Rate Card matches Agent Ranges layout (Weekly 7/3, Biweekly 15/3, Monthly 30/5 {W}, Held/Pool, payterms_pkr modal)',
+  assertCheck('Refinement 13c: Client Ranges Rate Card matches Agent Ranges layout (Weekly 7/3, Monthly 30/5 {W}, {W} Monthly Route tags, Held/Pool, payterms_pkr modal, no Biweekly)',
     speedClientPagesJs.includes('Weekly (7/3)') &&
-    speedClientPagesJs.includes('Biweekly (15/3)') &&
+    !speedClientPagesJs.includes('Biweekly (15/3)') &&
     speedClientPagesJs.includes('Monthly (30/5) {W}') &&
+    speedClientPagesJs.includes('zy-wn-route-tag') &&
+    speedClientPagesJs.includes('num-route-type') &&
     speedClientPagesJs.includes('Held / Pool') &&
     speedClientPagesJs.includes('Allowed Batch') &&
     speedClientPagesJs.includes('Today Quota') &&
@@ -1678,22 +1671,26 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     serverJsSrc.includes('/sms/register-sms-conversion')
   );
 
-  assertCheck('Whitenoise 14b: shared-ui-kit.js & shared-url-router.js support Monthly (30/5) {W} & cdr2/whitenoise-panels routes',
+  assertCheck('Whitenoise 14b: shared-ui-kit.js & shared-url-router.js support Monthly (30/5) {W}, no Biweekly, cdr2 routes & mobile dashboard/subpage classes',
     sharedKitJs.includes('Monthly (30/5) {W}') &&
-    sharedKitJs.includes('Biweekly (15/3)') &&
+    !sharedKitJs.includes('Biweekly (15/3)') &&
     sharedKitJs.includes('Weekly (7/3)') &&
     sharedRouterJs.includes("'cdr2': 'CDR2'") &&
-    sharedRouterJs.includes("'whitenoise-panels': 'WhitenoiseReports'")
+    sharedRouterJs.includes("'whitenoise-panels': 'WhitenoiseReports'") &&
+    sharedRouterJs.includes('zy-is-subpage') &&
+    sharedRouterJs.includes('zy-is-dashboard')
   );
 
-  assertCheck('Whitenoise 14c: Owner UI wires CDR 2, Whitenoise API, Monthly (30/5) {W} Range rows & whitenoise_access toggles',
+  assertCheck('Whitenoise 14c: Owner UI wires compact CDR 2, 1-15/16-End Coverage Strip, Whitenoise API, Monthly (30/5) {W} Range rows & Agent whitenoise_access (no Owner client management)',
     speedAdminJs.includes("'cdr2'") &&
     speedAdminJs.includes('renderOwnerCdr2') &&
+    speedAdminJs.includes('zy-owner-cdr2-compact') &&
+    speedAdminJs.includes('zyLoadWhitenoiseCoverageStrip') &&
     ownerEngineJs.includes('renderWhitenoisePanels') &&
     ownerEngineJs.includes('/api/whitenoise-connections') &&
     ownerEngineJs.includes('Monthly (30/5) {W}') &&
     ownerEngineJs.includes('edit-ag-wn-access') &&
-    ownerEngineJs.includes('edit-cl-wn-access')
+    speedPanelCssV7.includes('body.zy-is-subpage #page-content')
   );
 
   assertCheck('Whitenoise 14d: Agent UI wires permission-gated Excel CDR 2, Client whitenoise_access toggle & Monthly Cycle Settlement Box',

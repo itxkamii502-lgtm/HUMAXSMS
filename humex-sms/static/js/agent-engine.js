@@ -97,12 +97,18 @@ async function apiFetch(path, opts = {}, retries = 2) {
         const parsed = JSON.parse(errorText);
         detail = parsed.error || parsed.detail || parsed.message || errorText;
       } catch (e) {}
-      throw new Error(detail);
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(detail, response.status)
+        : detail;
+      throw new Error(cleanMsg);
     }
     
     const data = await response.json();
     if (data && data.error && !('success' in data)) {
-      throw new Error(data.error);
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(data.error)
+        : data.error;
+      throw new Error(cleanMsg);
     }
     return data;
   } catch (err) {
@@ -111,8 +117,11 @@ async function apiFetch(path, opts = {}, retries = 2) {
       return apiFetch(path, opts, retries - 1);
     }
     if (!opts.silent) {
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(err.message || err)
+        : (err.message || 'Connection error. Please try again.');
       console.warn(`apiFetch [${path}]:`, err.message || err);
-      toast(err.message || 'Network error', 'error');
+      toast(cleanMsg, 'error');
     }
     return null;
   }
@@ -139,29 +148,42 @@ function toast(msg, type = 'info') {
   }, 4000);
 }
 
-// ── Modal System ──────────────────────────────────────────────────
+// ── Modal System (Explicit Close Only — Never Dismisses on Outside Click) ──
 function openModal(title, html) {
   const overlay = document.getElementById('modal-overlay');
   const titleEl = document.getElementById('modal-title');
   const bodyEl = document.getElementById('modal-body');
   if (!overlay || !titleEl || !bodyEl) return;
   
-  titleEl.textContent = title;
+  if (typeof title === 'string' && title.includes('<')) {
+    titleEl.innerHTML = title;
+  } else {
+    titleEl.textContent = title;
+  }
   bodyEl.innerHTML = html;
   overlay.classList.add('show');
+  document.body.classList.add('zy-modal-open');
 }
 
 function closeModal() {
   const overlay = document.getElementById('modal-overlay');
-  if (overlay) overlay.classList.remove('show');
+  const modalEl = document.getElementById('modal');
+  if (modalEl) modalEl.classList.remove('modal-lg');
+  if (overlay) {
+    overlay.classList.remove('show', 'active');
+    overlay.style.display = '';
+  }
+  document.body.classList.remove('zy-modal-open');
 }
 
-// Close modal on backdrop click
+// Keep modal open on backdrop click — show subtle focus nudge instead
 document.addEventListener('DOMContentLoaded', () => {
   const overlay = document.getElementById('modal-overlay');
   if (overlay) {
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeModal();
+      if (e.target === overlay && typeof window.zyNudgeModal === 'function') {
+        window.zyNudgeModal(document.getElementById('modal'));
+      }
     });
   }
 });

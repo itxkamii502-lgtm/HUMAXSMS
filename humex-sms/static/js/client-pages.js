@@ -17,7 +17,7 @@ async function pgSmsRanges() {
           <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges &amp; Rate Card (PKR)
         </div>
         <div class="page-subtitle" style="font-size:12.5px;color:#64748b;">
-          Agent-approved termination ranges priced in PKR. Request 25 or 50 numbers directly (1 request per range per UTC day).
+          Agent-approved termination ranges priced in PKR. Unlimited ranges — per range limit: <b>25/day</b>, <b>50 max held</b>, <b>3x/week</b>.
         </div>
       </div>
     </div>
@@ -49,55 +49,105 @@ async function pgSmsRanges() {
       return;
     }
 
+    const naHtml = `<span class="zy-na">N/A</span>`;
+
     const rows = list.map((r, i) => {
       const rName = r.range_name || r.name || r.country || '—';
+      const rId = r.range_id || r.id || null;
       const countryPrefix = [r.country || '', r.prefix ? `+${String(r.prefix).replace(/^\+/, '')}` : ''].filter(Boolean).join(' · ') || '—';
       const ptsPkr = r.payterms_pkr || {};
+      const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
+        ? zyResolveRangeActivePayterms(r)
+        : { active: [r.payterm || 'Weekly'], primary: r.payterm || 'Weekly', isWn: Boolean(r.is_whitenoise) };
       const clientRatePkr = Number(r.client_rate_pkr ?? r.rate ?? r.payout ?? 0);
-      const weeklyRatePkr = Number(ptsPkr['Weekly'] ?? ptsPkr['7/3'] ?? clientRatePkr);
-      const biweeklyRatePkr = Number(ptsPkr['Biweekly'] ?? ptsPkr['15/3'] ?? weeklyRatePkr);
-      const monthlyRatePkr = Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? biweeklyRatePkr);
+      const hasWeekly = ptInfo.active.includes('Weekly') && (ptsPkr['Weekly'] != null || ptsPkr['7/3'] != null || clientRatePkr > 0);
+      const hasMonthly = ptInfo.active.includes('Monthly') && (ptsPkr['Monthly'] != null || ptsPkr['30/5'] != null || clientRatePkr > 0);
+      const weeklyRatePkr = hasWeekly ? Number(ptsPkr['Weekly'] ?? ptsPkr['7/3'] ?? clientRatePkr) : null;
+      const monthlyRatePkr = hasMonthly ? Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? clientRatePkr) : null;
+
       const heldCount = Number(r.held_count || 0);
       const roomCount = Math.max(0, Number(r.available || 0));
-      const allowedQty = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25, 50];
-      const reqToday = r.requested_today === true || r.can_request_today === false;
-      const quotaHtml = reqToday
-        ? `<span class="zy-cl-rc-lock"><i class="fas fa-lock"></i> Requested Today</span>`
-        : `<span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (1/day)</span>`;
+      const dailyLimitNums = Number(r.daily_numbers_limit || 25);
+      const maxHoldNums = Number(r.max_hold_limit || 50);
+      const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+      const todayNums = Number(r.today_numbers || 0);
+      const weeklyUsed = Number(r.weekly_adds_used || 0);
+      const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(dailyLimitNums - todayNums, maxHoldNums - heldCount));
+      const rawAllowed = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25];
+      const allowedQty = rawAllowed.filter(q => Number(q) > 0 && Number(q) <= dailyLimitNums);
+      const displayBatch = allowedQty.length ? allowedQty : [dailyLimitNums];
+      const hasPendingReq = Boolean(r.has_pending_request || Number(r.pending_request_count || 0) > 0 || r.block_reason === 'pending_request');
+      const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false || maxReqNow <= 0 || hasPendingReq;
+      const blockReason = r.block_reason || (hasPendingReq ? 'pending_request' : (r.requested_today ? 'daily_limit' : ''));
+
+      let lockLabel = 'Requested Today';
+      let lockTip = 'Daily limit reached: 25 numbers per range per UTC day (resets 05:00 AM PKT).';
+      if (blockReason === 'hold_limit') {
+        lockLabel = `Hold Full (${heldCount}/${maxHoldNums})`;
+        lockTip = `Maximum ${maxHoldNums} active numbers held in this range. Return numbers to add more.`;
+      } else if (blockReason === 'weekly_limit') {
+        lockLabel = `Weekly (${weeklyUsed}/${weeklyLimitAdds})`;
+        lockTip = `Maximum ${weeklyLimitAdds} additions per week reached for this range.`;
+      } else if (blockReason === 'daily_limit') {
+        lockLabel = `Daily (${todayNums}/${dailyLimitNums})`;
+        lockTip = `Daily limit of ${dailyLimitNums} numbers per range reached today. Resets at 00:00 UTC (05:00 AM PKT).`;
+      } else if (blockReason === 'pending_request') {
+        lockLabel = 'Pending Approval';
+        lockTip = 'You already have a pending request on this range. Please wait for your Agent to review it.';
+      }
+
+      const quotaHtml = reqBlocked
+        ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`
+        : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} left)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`;
 
       let actionBtnHtml = '';
       if (isSelfAlloc) {
-        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#059669;border-color:#a7f3d0;background:#ecfdf5;" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${r.range_id || r.id || 'null'}, window._zyClPolicy, pgSmsRanges)" title="Self-Allocate Numbers"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
-      } else if (reqToday) {
-        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="Daily limit reached: 1 request per range per UTC day"><i class="fas fa-clock"></i> Requested</button>`;
+        if (reqBlocked) {
+          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas fa-lock"></i> ${zyEsc(lockLabel)}</button>`;
+        } else if (roomCount <= 0) {
+          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available from your Agent in this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
+        } else {
+          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#059669;border-color:#a7f3d0;background:#ecfdf5;" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])" title="Self-Allocate Numbers (${roomCount.toLocaleString()} free)"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
+        }
+      } else if (reqBlocked) {
+        const isPend = blockReason === 'pending_request';
+        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="${isPend ? 'color:#b45309;border-color:#fde68a;background:#fffbeb;' : 'color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;'}cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas ${isPend ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</button>`;
       } else {
-        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#2563eb;border-color:#bfdbfe;background:#eff6ff;font-weight:700;" onclick="zyOpenClientRateCardRequestModal(${i})" title="Request Numbers (${allowedQty.join(' / ')})"><i class="fas fa-phone-volume"></i> Request (${allowedQty.join('/')})</button>`;
+        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#2563eb;border-color:#bfdbfe;background:#eff6ff;font-weight:700;" onclick="zyOpenClientRateCardRequestModal(${i})" title="Request Numbers (up to ${maxReqNow} now)"><i class="fas fa-phone-volume"></i> Request</button>`;
       }
 
-      const isWn = Boolean(r.is_whitenoise || String(r.provider || '').toLowerCase().includes('whitenoise') || String(r.payout_schedule || '').toLowerCase() === 'monthly30_5');
+      const returnBtnHtml = heldCount > 0
+        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+        : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
+
+      const isWn = ptInfo.isWn;
       const paytermHtml = isWn
         ? `<span class="zy-payterm-badge zy-pt-monthly"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>`
         : (typeof zyPaytermBadge === 'function'
-          ? zyPaytermBadge(r.payterm || 'Weekly')
-          : `<span class="badge badge-purple" style="font-size:10.5px;">${zyEsc(r.payterm || 'Weekly')}</span>`);
+            ? zyPaytermBadge('Weekly')
+            : `<span class="badge badge-purple" style="font-size:10.5px;">Weekly (7/3)</span>`);
+      const routeHighlightTag = isWn
+        ? ` <span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly Route</span>`
+        : '';
+
       return [
-        { v: rName, h: `<div style="min-width:140px;"><strong style="color:#0f172a;">${i + 1}. ${zyEsc(rName)}</strong><div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:2px;font-size:11px;"><span class="monospace" style="font-weight:600;color:#2563eb;">${zyEsc(countryPrefix)}</span><span style="color:#94a3b8;">·</span><span style="font-weight:700;color:#059669;">PKR</span><span style="color:#94a3b8;">·</span>${r.active !== false ? '<span style="color:#10b981;font-weight:700;">Active</span>' : '<span style="color:#ef4444;font-weight:700;">Inactive</span>'}</div></div>` },
+        { v: rName, h: `<div class="${isWn ? 'zy-wn-cell-accent' : ''}" style="min-width:140px;"><strong style="color:#0f172a;">${i + 1}. ${zyEsc(rName)}</strong>${routeHighlightTag}<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:2px;font-size:11px;"><span class="monospace" style="font-weight:600;color:#2563eb;">${zyEsc(countryPrefix)}</span><span style="color:#94a3b8;">·</span><span style="font-weight:700;color:#059669;">PKR</span><span style="color:#94a3b8;">·</span>${r.active !== false ? '<span style="color:#10b981;font-weight:700;">Active</span>' : '<span style="color:#ef4444;font-weight:700;">Inactive</span>'}</div></div>` },
         paytermHtml,
-        `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>`,
-        `<span class="monospace" style="font-weight:700;color:#d97706;">Rs. ${zyFmtMoney(biweeklyRatePkr, 4)}</span>`,
-        `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>`,
-        `<span class="monospace" style="font-size:11.5px;"><b>${heldCount}</b> / <span style="color:#10b981;font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
-        `<span class="monospace" style="font-weight:700;color:#334155;">${zyEsc(allowedQty.join(' / '))}</span>`,
-        { v: reqToday ? 'locked' : 'ready', h: quotaHtml },
-        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:4px;">
+        weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
+        monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
+        `<span class="monospace" style="font-size:11.5px;" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> · <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
+        `<span class="monospace" style="font-weight:700;color:#334155;">${zyEsc(displayBatch.join(' / '))} / day</span>`,
+        { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
+        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
           ${actionBtnHtml}
+          ${returnBtnHtml}
         </div>` }
       ];
     });
 
     host.innerHTML = zyDT2('dt-cl-ranges', {
-      cols: ['Range & Country', 'Payterm', 'Weekly (7/3)', 'Biweekly (15/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
+      cols: ['Range & Country', 'Payterm', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
       rows
     });
     zy2Render('dt-cl-ranges');
@@ -114,23 +164,51 @@ window.zyOpenClientRateCardRequestModal = function(i) {
   const rName = r.range_name || r.name || r.country || 'Range';
   const rId = r.range_id || r.id;
   const clientRatePkr = Number(r.client_rate_pkr ?? r.rate ?? r.payout ?? 0);
-  const allowedQty = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25, 50];
-  const dailyLimit = Math.max(1, parseInt(r.daily_request_limit, 10) || 1);
-  const defaultQty = allowedQty[0];
+  const dailyLimitNums = Number(r.daily_numbers_limit || 25);
+  const maxHoldNums = Number(r.max_hold_limit || 50);
+  const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+  const heldCount = Number(r.held_count || 0);
+  const todayNums = Number(r.today_numbers || 0);
+  const weeklyUsed = Number(r.weekly_adds_used || 0);
+  const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(dailyLimitNums - todayNums, maxHoldNums - heldCount));
 
-  if (r.requested_today || r.can_request_today === false) {
-    toast(`Daily limit reached for "${rName}". You can request ${dailyLimit} batch per day (resets tomorrow UTC).`, 'error');
+  if (r.has_pending_request || r.block_reason === 'pending_request') {
+    toast(`You already have a pending request for "${rName}". Please wait for your Agent to review it first.`, 'warning');
+    return;
+  }
+  if (r.can_request_now === false || maxReqNow <= 0) {
+    if (r.block_reason === 'hold_limit') {
+      toast(`Holding limit reached for "${rName}" (${heldCount}/${maxHoldNums}). Return numbers first to request more.`, 'error');
+    } else if (r.block_reason === 'weekly_limit') {
+      toast(`Weekly limit reached for "${rName}" (${weeklyUsed}/${weeklyLimitAdds} additions in 7 days).`, 'error');
+    } else {
+      toast(`Daily limit reached for "${rName}" (${todayNums}/${dailyLimitNums} numbers today). Resets at 00:00 UTC (05:00 AM PKT).`, 'error');
+    }
     return;
   }
 
-  const qtyButtonsHtml = allowedQty.map((q, idx) => `
+  const rawAllowed = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25];
+  let selectableQtys = rawAllowed.map(Number).filter(q => q > 0 && q <= maxReqNow);
+  if (!selectableQtys.length) selectableQtys = [maxReqNow];
+  const defaultQty = selectableQtys[0];
+
+  const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
+    ? zyResolveRangeActivePayterms(r)
+    : { active: [r.is_whitenoise ? 'Monthly' : 'Weekly'], primary: r.is_whitenoise ? 'Monthly' : 'Weekly', isWn: Boolean(r.is_whitenoise), labels: { Weekly: 'Weekly (7/3) — 3 Day Hold', Monthly: 'Monthly (30/5) {W} — 5 Day Hold' } };
+  const isLockedPt = ptInfo.active.length === 1;
+  const ptOptionsHtml = ptInfo.active.map(pt =>
+    `<option value="${zyEsc(pt)}" ${pt === ptInfo.primary ? 'selected' : ''}>${zyEsc((ptInfo.labels && ptInfo.labels[pt]) || pt)}${isLockedPt ? ' (Locked)' : ''}</option>`
+  ).join('');
+
+  const qtyButtonsHtml = selectableQtys.map((q, idx) => `
     <button type="button" class="zy-qty-card ${idx === 0 ? 'active' : ''}" data-qty="${Number(q)}" onclick="zySelectReqQty(this, ${Number(q)})">
       <span class="zy-qty-num">${Number(q)}</span>
       <span class="zy-qty-lbl">Numbers Batch</span>
     </button>`).join('');
 
   zyModal(`Request Numbers: ${zyEsc(rName)}`, `
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+    <div id="cl-rc-err" class="zy-modal-alert is-error" style="display:none;"></div>
+    <div class="zy-modal-summary-card" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <div>
           <div style="font-weight:800;color:#0f172a;font-size:14.5px;">${zyEsc(rName)}</div>
@@ -142,27 +220,23 @@ window.zyOpenClientRateCardRequestModal = function(i) {
         </div>
       </div>
       <div style="margin-top:8px;padding-top:8px;border-top:1px dashed #cbd5e1;font-size:11.5px;color:#475569;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
-        <span>Pool Ready: <b>${Number(r.available || 0).toLocaleString()} numbers</b></span>
-        <span>Daily Limit: <b>${dailyLimit} request / UTC day</b></span>
+        <span>Agent Free Pool: <b style="color:${Number(r.available || 0) > 0 ? '#059669' : '#dc2626'};">${Number(r.available || 0).toLocaleString()}</b></span>
+        <span>Held: <b>${heldCount}/${maxHoldNums}</b></span>
+        <span>Today: <b>${todayNums}/${dailyLimitNums}</b></span>
+        <span>Week: <b>${weeklyUsed}/${weeklyLimitAdds}</b></span>
       </div>
     </div>
 
     <div style="margin-bottom:14px;">
-      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Select Allowed Number Batch *</label>
+      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Select Allowed Number Batch (Max ${maxReqNow} now) *</label>
       <input type="hidden" id="cl-rc-qty" value="${Number(defaultQty)}">
       <div class="zy-qty-grid">${qtyButtonsHtml}</div>
     </div>
 
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Payment Term</label>
-      ${(r.is_whitenoise || String(r.provider || '').toLowerCase().includes('whitenoise') || String(r.payout_schedule || '').toLowerCase() === 'monthly30_5')
-        ? `<select id="cl-rc-payterm" class="zy-select-pill" disabled><option value="Monthly" selected>Monthly (30/5) {W} — 5d Hold (Locked)</option></select>
-           <div style="font-size:11px;color:#4338ca;font-weight:600;margin-top:4px;">These ranges use Monthly (30/5) {W} settlement (30-day cycle · 5-day hold).</div>`
-        : `<select id="cl-rc-payterm" class="zy-select-pill">
-            <option value="Weekly" selected>Weekly (7/3) — 3 Day Hold</option>
-            <option value="Biweekly">Biweekly (15/3) — 3 Day Hold</option>
-            <option value="Monthly">Monthly (30/5) {W} — 5 Day Hold</option>
-          </select>`}
+      <select id="cl-rc-payterm" class="zy-select-pill" ${isLockedPt ? 'disabled' : ''}>${ptOptionsHtml}</select>
+      ${isLockedPt ? `<div style="font-size:11px;color:#4338ca;font-weight:600;margin-top:4px;">Only <b>${zyEsc(ptInfo.primary)}</b> is active on this range.</div>` : ''}
     </div>
 
     <div style="margin-bottom:6px;">
@@ -191,14 +265,22 @@ window.zySubmitClientRateCardRequest = async function(rangeId, rangeName) {
   const payterm = document.getElementById('cl-rc-payterm')?.value || 'Weekly';
   const notes = (document.getElementById('cl-rc-notes')?.value || '').trim();
   const btn = document.getElementById('zy-cl-rc-submit');
+  if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('cl-rc-err', '');
   if (!qty || qty <= 0) {
-    toast('Please select an allowed number quantity (25 or 50)', 'error');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('cl-rc-err', 'Please select an allowed number batch before submitting.');
+    else toast('Please select an allowed number quantity (up to 25/day)', 'error');
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
   try {
-    const res = await apiFetch('/api/numbers/request', {
+    const token = typeof getAuthToken === 'function' ? getAuthToken() : '';
+    const response = await fetch('/api/numbers/request', {
       method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}`, 'X-Session-Token': token } : {})
+      },
       body: JSON.stringify({
         range_id: Number(rangeId) || rangeId,
         range_name: rangeName,
@@ -208,14 +290,24 @@ window.zySubmitClientRateCardRequest = async function(rangeId, rangeName) {
         urgency: 'normal'
       })
     });
-    if (!res || res.error) {
-      throw new Error((res && res.error) || 'Failed to submit number request');
+    const rawText = await response.text();
+    let res = null;
+    try { res = JSON.parse(rawText); } catch (_) {}
+    if (!response.ok || !res || res.error) {
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError((res && (res.error || res.message)) || rawText, response.status)
+        : ((res && res.error) || 'Unable to submit your request right now.');
+      throw new Error(cleanMsg);
     }
     closeModal();
-    toast(`Requested ${qty} numbers in "${rangeName}" at Rs. ${zyFmtMoney(Number(res.request?.client_rate_pkr || 0), 4)} PKR`, 'success');
+    toast(`Requested ${qty} numbers in "${rangeName}" (${payterm}) at Rs. ${zyFmtMoney(Number(res.request?.client_rate_pkr || 0), 4)} PKR`, 'success');
     pgSmsRanges();
   } catch (err) {
-    toast(err.message || 'Number request rejected', 'error');
+    const cleanMsg = typeof window.zyHumanizeError === 'function'
+      ? window.zyHumanizeError(err.message || err)
+      : (err.message || 'Unable to submit your request.');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('cl-rc-err', cleanMsg);
+    else toast(cleanMsg, 'error');
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Request'; }
   }
 };
@@ -224,17 +316,26 @@ window.zySubmitClientRateCardRequest = async function(rangeId, rangeName) {
 function zyViewClientRange(i) {
   const r = ZY_CLIENT_RANGE_LIST[i] || {};
   const rName = r.name || r.range_name || r.country || 'Details';
+  const rId = r.range_id || r.id || null;
   const clientRatePkr = Number(r.client_rate_pkr ?? r.rate ?? r.payout ?? 0);
   const ptsPkr = r.payterms_pkr || {};
-  const weeklyVal = Number(ptsPkr['Weekly'] ?? ptsPkr['7/3'] ?? clientRatePkr);
-  const biweeklyVal = Number(ptsPkr['Biweekly'] ?? ptsPkr['15/3'] ?? weeklyVal);
-  const monthlyVal = Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? biweeklyVal);
-  const allowedQty = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25, 50];
-  const dailyLimit = Math.max(1, parseInt(r.daily_request_limit, 10) || 1);
-  const reqToday = r.requested_today === true || r.can_request_today === false;
-  const roomCount = Math.max(0, Number(r.available || 0));
+  const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
+    ? zyResolveRangeActivePayterms(r)
+    : { active: [r.payterm || 'Weekly'], primary: r.payterm || 'Weekly', isWn: Boolean(r.is_whitenoise) };
+  const hasWeekly = ptInfo.active.includes('Weekly') && (ptsPkr['Weekly'] != null || ptsPkr['7/3'] != null || clientRatePkr > 0);
+  const hasMonthly = ptInfo.active.includes('Monthly') && (ptsPkr['Monthly'] != null || ptsPkr['30/5'] != null || clientRatePkr > 0);
+  const weeklyVal = hasWeekly ? Number(ptsPkr['Weekly'] ?? ptsPkr['7/3'] ?? clientRatePkr) : null;
+  const monthlyVal = hasMonthly ? Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? clientRatePkr) : null;
 
-  const isWnRange = Boolean(r.is_whitenoise || String(r.provider || '').toLowerCase().includes('whitenoise') || String(r.payout_schedule || '').toLowerCase() === 'monthly30_5');
+  const heldCount = Number(r.held_count || 0);
+  const dailyLimitNums = Number(r.daily_numbers_limit || 25);
+  const maxHoldNums = Number(r.max_hold_limit || 50);
+  const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+  const todayNums = Number(r.today_numbers || 0);
+  const weeklyUsed = Number(r.weekly_adds_used || 0);
+  const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false;
+  const roomCount = Math.max(0, Number(r.available || 0));
+  const naCell = `<span class="zy-na">N/A</span>`;
 
   zyModal(`Range Specification: ${zyEsc(rName)}`, `
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:12px;margin-bottom:12px;">
@@ -244,11 +345,11 @@ function zyViewClientRange(i) {
           <i class="fas fa-tower-broadcast" style="color:#0284c7;margin-right:4px;"></i> General Info
         </h5>
         <div style="font-size:12px;line-height:22px;">
-          <div><span style="color:#64748b;">Range Name:</span> <b>${zyEsc(rName)}</b></div>
+          <div><span style="color:#64748b;">Range Name:</span> <b>${zyEsc(rName)}</b> ${ptInfo.isWn ? '<span class="zy-wn-route-tag">{W} Monthly Route</span>' : ''}</div>
           <div><span style="color:#64748b;">Country:</span> <b>${zyEsc(r.country || '—')}</b></div>
           <div><span style="color:#64748b;">Prefix:</span> <b class="monospace" style="color:#2563eb;">${zyEsc(r.prefix || '—')}</b></div>
           <div><span style="color:#64748b;">Currency:</span> <b style="color:#059669;">PKR</b></div>
-          <div><span style="color:#64748b;">Default Payterm:</span> <b class="badge badge-purple" style="font-size:10.5px;">${isWnRange ? 'Monthly (30/5) {W}' : zyEsc(r.payterm || 'Weekly')}</b></div>
+          <div><span style="color:#64748b;">Active Payterm:</span> <b class="badge badge-purple" style="font-size:10.5px;">${ptInfo.isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)'}</b></div>
         </div>
       </div>
 
@@ -260,9 +361,9 @@ function zyViewClientRange(i) {
         <div style="font-size:12px;line-height:22px;">
           <div><span style="color:#64748b;">Status:</span> ${r.active !== false ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Inactive</span>'}</div>
           <div><span style="color:#64748b;">Max SMS / Day:</span> <b>${r.max_sms_day != null ? r.max_sms_day : 'Unlimited'}</b></div>
-          <div><span style="color:#64748b;">Allowed Batch:</span> <b>${zyEsc(allowedQty.join(' or '))} numbers</b></div>
-          <div><span style="color:#64748b;">Daily Limit:</span> <b>${dailyLimit} request / day</b></div>
-          <div><span style="color:#64748b;">Today Status:</span> <b>${reqToday ? 'Requested Today' : 'Ready'}</b></div>
+          <div><span style="color:#64748b;">Daily Limit (Range):</span> <b>${todayNums} / ${dailyLimitNums} numbers</b></div>
+          <div><span style="color:#64748b;">Holding Limit (Range):</span> <b>${heldCount} / ${maxHoldNums} active</b></div>
+          <div><span style="color:#64748b;">Weekly Limit (Range):</span> <b>${weeklyUsed} / ${weeklyLimitAdds} additions</b></div>
           <div><span style="color:#64748b;">Room in Agent Pool:</span> <b style="color:#10b981;">${roomCount.toLocaleString()} numbers</b></div>
           <div><span style="color:#64748b;">Allowed CLIs:</span> <small style="display:block;color:#64748b;line-height:1.3;margin-top:2px;">${zyEsc(r.cli_list || 'All CLIs')}</small></div>
         </div>
@@ -281,19 +382,21 @@ function zyViewClientRange(i) {
             </tr>
           </thead>
           <tbody>
-            <tr style="border-bottom:1px dashed #e2e8f0;"><td style="padding:6px 0;">Weekly (7/3) · 3d Hold</td><td style="text-align:right;font-weight:700;color:#059669;font-family:monospace;">Rs. ${zyFmtMoney(weeklyVal, 4)}</td></tr>
-            <tr style="border-bottom:1px dashed #e2e8f0;"><td style="padding:6px 0;">Biweekly (15/3) · 3d Hold</td><td style="text-align:right;font-weight:700;color:#d97706;font-family:monospace;">Rs. ${zyFmtMoney(biweeklyVal, 4)}</td></tr>
-            <tr style="background:#eef2ff;"><td style="padding:6px 4px;color:#4338ca;">Monthly (30/5) {W} · 5d Hold</td><td style="text-align:right;padding-right:4px;font-weight:700;color:#4338ca;font-family:monospace;">Rs. ${zyFmtMoney(monthlyVal, 4)}</td></tr>
+            <tr style="border-bottom:1px dashed #e2e8f0;"><td style="padding:6px 0;">Weekly (7/3) · 3d Hold</td><td style="text-align:right;font-weight:700;color:#059669;font-family:monospace;">${weeklyVal !== null ? 'Rs. ' + zyFmtMoney(weeklyVal, 4) : naCell}</td></tr>
+            <tr style="${monthlyVal !== null ? 'background:#eef2ff;' : ''}"><td style="padding:6px 4px;color:${monthlyVal !== null ? '#4338ca' : '#64748b'};">Monthly (30/5) {W} · 5d Hold</td><td style="text-align:right;padding-right:4px;font-weight:700;color:#4338ca;font-family:monospace;">${monthlyVal !== null ? 'Rs. ' + zyFmtMoney(monthlyVal, 4) : naCell}</td></tr>
           </tbody>
         </table>
       </div>
     </div>`,
     `<button class="zy-btn-grey" onclick="closeModal()">Close</button>
+     ${heldCount > 0 ? `<button class="zy-btn-grey" style="color:#dc2626;border-color:#fecaca;" onclick="closeModal();zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>` : ''}
      ${(window._zyClPolicy && window._zyClPolicy.mode === 'self_allocate')
-       ? `<button class="zy-btn-blue" onclick="closeModal();zyOpenSelfAllocateModal('${zyEsc(rName)}', ${r.range_id || r.id || 'null'}, window._zyClPolicy, pgSmsRanges)"><i class="fas fa-bolt"></i> Self-Allocate Numbers</button>`
-       : (reqToday
-         ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Requested Today</button>`
-         : `<button class="zy-btn-blue" onclick="closeModal();zyOpenClientRateCardRequestModal(${i})"><i class="fas fa-phone-volume"></i> Request (${allowedQty.join('/')})</button>`)}`);
+       ? (reqBlocked
+         ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
+         : `<button class="zy-btn-blue" onclick="closeModal();zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])"><i class="fas fa-bolt"></i> Self-Allocate Numbers</button>`)
+       : (reqBlocked
+         ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
+         : `<button class="zy-btn-blue" onclick="closeModal();zyOpenClientRateCardRequestModal(${i})"><i class="fas fa-phone-volume"></i> Request Numbers</button>`)}`);
 }
 
 /* ═══ MY SMS NUMBERS ════════════════════════════════════════ */
@@ -316,6 +419,13 @@ async function pgMyNumbers() {
           <div class="zy-cl-num-field zy-cl-num-range-field">
             <select id="num-range" class="zy-filter-input zy-cl-num-input" aria-label="Range" onchange="zyClientNumFilter()">
               <option value="">All Ranges</option>
+            </select>
+          </div>
+          <div class="zy-cl-num-field" style="min-width:140px;">
+            <select id="num-route-type" class="zy-filter-input zy-cl-num-input" aria-label="Route Type" onchange="zyClientNumFilter()">
+              <option value="">All Routes</option>
+              <option value="weekly">Weekly (7/3) Routes</option>
+              <option value="monthly">Monthly {W} (30/5) Routes</option>
             </select>
           </div>
           <button type="button" class="zy-btn-blue-solid zy-cl-num-filter-btn" onclick="zyClientNumFilter()">
@@ -429,12 +539,16 @@ function zyRenderClientNumbers(list) {
       ? `<button type="button" class="apx-btn apx-btn-small" style="color:#4338ca;border-color:#c7d2fe;background:#eef2ff;font-weight:700;" onclick="zyClientFetchWhitenoiseOtp(${Number(n.id)}, this)" title="Fetch Live OTP"><i class="fas fa-bolt"></i> Fetch OTP</button>`
       : `<span style="color:#94a3b8;font-size:11px;">—</span>`;
 
+    const rangeCellHtml = isWn
+      ? `<div class="zy-wn-cell-accent"><span style="font-weight:600;">${zyEsc(rangeName)}</span> <span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly</span></div>`
+      : `<span style="font-weight:600;">${zyEsc(rangeName)}</span>`;
+
     const r = [
       dateCell,
-      { v: rangeName, h: `<span style="font-weight:600;">${zyEsc(rangeName)}</span>` },
+      { v: rangeName, h: rangeCellHtml },
       { v: cleanPrefix, h: cleanPrefix || '—' },
       { v: cleanNumber, h: numHtml },
-      { v: isWn ? 'Monthly (30/5) {W}' : rawTerm, h: termBadge },
+      { v: isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)', h: termBadge },
       { v: ratePkr ?? '', h: ratePkr != null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(Number(ratePkr), 4)}</span>` : '—' },
       { v: (n.sms_daily || 0) + (n.sms_weekly || 0), h: `SD: <b>${n.sms_daily || 0}</b> | SW: <b>${n.sms_weekly || 0}</b>` },
       { v: isWn ? 'fetch' : '', h: actionHtml }
@@ -462,18 +576,23 @@ function zyRenderClientNumbers(list) {
 
 function zyClientNumFilter() {
   const rVal = (document.getElementById('num-range')?.value || '').toLowerCase();
+  const routeType = (document.getElementById('num-route-type')?.value || '').toLowerCase();
   const q = (document.getElementById('num-starts-with')?.value || '').trim().toLowerCase();
   const qDigits = q.replace(/[^\d]/g, '');
 
   const filtered = (window._zyClientRawNums || []).filter(n => {
     const r = (n.range_name || n.range || n.country || '').toLowerCase();
     if (rVal && !r.includes(rVal)) return false;
+    if (routeType) {
+      const isWn = zyClientIsWhitenoiseObj(n);
+      if (routeType === 'monthly' && !isWn) return false;
+      if (routeType === 'weekly' && isWn) return false;
+    }
     if (q) {
       const num = String(n.number || '').toLowerCase();
       const numDigits = num.replace(/[^\d]/g, '');
       const prefix = String(n.prefix || '').toLowerCase();
-      const provider = String(n.provider || '').toLowerCase();
-      const matchText = num.includes(q) || r.includes(q) || prefix.includes(q) || provider.includes(q);
+      const matchText = num.includes(q) || r.includes(q) || prefix.includes(q);
       const matchDigits = qDigits.length >= 2 && numDigits.includes(qDigits);
       if (!matchText && !matchDigits) return false;
     }
@@ -1222,7 +1341,7 @@ async function pgClientPaymentRequests() {
   const holdNoticeHtml = hs
     ? `<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#1e293b;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
          <span><i class="fas fa-hourglass-half" style="color:#d97706;margin-right:6px;"></i> <b>Payterm Hold Summary (PKR):</b> Cleared: <b style="color:#059669;">Rs. ${zyFmtMoney(Number(hs.cleared_pkr || 0), 4)}</b> · On Hold: <b style="color:#d97706;">Rs. ${zyFmtMoney(Number(hs.held_pkr || 0), 4)}</b> (Next release: <b>${zyEsc(hs.next_release_date || '—')}</b>)</span>
-         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (3d) · Biweekly 15/3 (3d) · Monthly 30/5 {W} (5d)</span>
+         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (3d) · Monthly 30/5 {W} (5d)</span>
        </div>`
     : '';
   const m305Start = m305?.cycle_start || mc.start_date || '—';

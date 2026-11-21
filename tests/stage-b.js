@@ -41,25 +41,29 @@ export async function stageB() {
     const fakeOwner = await ow('POST', '/api/users', { username: 'new_owner', password: 'password123', role: 'Owner' });
     check('B0 New Owner cannot be created', fakeOwner.status >= 400);
 
-    // ── B1: Account Deletion & Deactivation Protection ──
-    const agDelCl = await ag('DELETE', `/api/clients/${agentCreateClient.data.id}`);
-    check('B1 Agent cannot delete Client (403)', agDelCl.status === 403);
+    // ── B1: Account Deletion & Deactivation Protection (Strict Agent-Owned Client Privacy) ──
+    const ag2DelCl403 = await ag2('DELETE', `/api/clients/${agentCreateClient.data.id}`);
+    check('B1 Non-owning Agent cannot delete another Agent client (403)', ag2DelCl403.status === 403);
+
+    const owPatchCl403 = await ow('PATCH', `/api/clients/${agentCreateClient.data.id}`, { status: 'inactive' });
+    const owDelCl403 = await ow('DELETE', `/api/clients/${agentCreateClient.data.id}`);
+    check('B1 Owner is strictly blocked (403) from modifying or deleting Agent clients', owPatchCl403.status === 403 && owDelCl403.status === 403);
 
     const deactCl = await ag('PATCH', `/api/clients/${agentCreateClient.data.id}`, { status: 'inactive' });
-    check('B1 Agent can deactivate Client', deactCl.status === 200 && deactCl.data.status === 'inactive');
+    check('B1 Agent can deactivate own Client', deactCl.status === 200 && deactCl.data.status === 'inactive');
 
     const deactLogin = await login('client_by_agent', 'password123');
     check('B1 Deactivated account cannot log in', !deactLogin.ok);
 
-    // Account with history cannot be deleted by Owner unless first deactivated
+    // Account with history cannot be deleted by owning Agent unless first deactivated
     await api('POST', '/api/sms/inbound', { body: { from: 'Apple', to: '233500000005', message: 'Auth Code 555555', sms_id: 'b1-hist-1' }, headers: { 'x-inbound-token': 'inbound-secret' } });
     await sleep(1800);
-    const owDelActiveWithHist = await ow('DELETE', '/api/clients/1');
-    check('B1 Owner cannot delete active Client with history (400)', owDelActiveWithHist.status === 400);
+    const agDelActiveWithHist = await ag('DELETE', '/api/clients/1');
+    check('B1 Agent cannot delete active Client with history (400)', agDelActiveWithHist.status === 400);
 
-    await ow('PATCH', '/api/clients/1', { status: 'inactive' });
-    const owDelDeactWithHist = await ow('DELETE', '/api/clients/1');
-    check('B1 Owner can delete deactivated Client with history (200)', owDelDeactWithHist.status === 200);
+    await ag('PATCH', '/api/clients/1', { status: 'inactive' });
+    const agDelDeactWithHist = await ag('DELETE', '/api/clients/1');
+    check('B1 Owning Agent can delete deactivated Client with history (200)', agDelDeactWithHist.status === 200);
 
     const allSmsAfter = readJson(dir, 'sms_log');
     check('B1 Client SMS history kept and never auto-removed', allSmsAfter.some(s => s.message && s.message.includes('555555')));

@@ -1094,6 +1094,101 @@
   }
   window.zySideSub = window.zyToggleGroup || zySideSub;
 
+  /* ── Clean Human-Readable Frontend Error Formatter (No Raw HTTP Codes) ── */
+  function zyHumanizeError(raw, statusCode) {
+    let text = '';
+    if (raw && typeof raw === 'object') {
+      text = raw.error || raw.detail || raw.message || '';
+    } else {
+      text = String(raw ?? '').trim();
+    }
+
+    // Unwrap raw JSON error strings such as '{"error":"..."}' or 'API Error 400: {"error":"..."}'
+    const jsonStart = text.indexOf('{');
+    if (jsonStart !== -1 && text.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(text.slice(jsonStart));
+        if (parsed && typeof parsed === 'object') {
+          const inner = parsed.error || parsed.detail || parsed.message;
+          if (inner) text = String(inner).trim();
+        }
+      } catch (_) {}
+    }
+
+    // Strip technical prefixes & raw HTTP status codes (400, 403, 404, 409, 429, 430, 500, etc.)
+    text = text
+      .replace(/^(?:API\s*Error|HTTP\s*Error|HTTP|Error|Request\s*failed)\s*\d{3}\s*[:\-–—]?\s*/i, '')
+      .replace(/\s*\((?:HTTP\s*)?\d{3}\)\s*$/i, '')
+      .replace(/^Error:\s*/i, '')
+      .trim();
+
+    const lower = text.toLowerCase();
+
+    // Never show raw HTML pages or stack traces to users
+    if (!text || text.startsWith('<') || lower.includes('<!doctype') || lower.includes('<html')) {
+      const code = Number(statusCode || 0);
+      if (code === 400) return 'Please check your input and try again.';
+      if (code === 401) return 'Your session has expired. Please sign in again.';
+      if (code === 403) return 'You do not have permission to perform this action.';
+      if (code === 404) return 'The requested item could not be found.';
+      if (code === 409) return 'A request for this item is already pending.';
+      if (code === 429) return 'Your daily or weekly limit for this range has been reached. Please try again later.';
+      if (code >= 500) return 'Unable to complete your request right now. Please try again in a moment.';
+      return 'Something went wrong. Please try again.';
+    }
+
+    if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('load failed')) {
+      return 'Connection interrupted. Please check your internet connection and try again.';
+    }
+    if (lower.includes('no available numbers') || lower.includes('no free numbers')) {
+      return text;
+    }
+    if (lower.includes('request header fields too large') || Number(statusCode) === 431 || Number(statusCode) === 430) {
+      return 'This action could not be completed right now. Please refresh the page and try again.';
+    }
+    if (/^\d{3}\s*(bad request|forbidden|not found|too many requests|internal server error|conflict)?$/i.test(text)) {
+      const code = Number(statusCode || parseInt(text, 10) || 0);
+      if (code === 429) return 'Your limit for this range has been reached. Please try again later.';
+      if (code === 409) return 'A pending request already exists for this range.';
+      if (code === 403) return 'You do not have permission to perform this action.';
+      if (code === 404) return 'The requested item could not be found.';
+      return 'Please check your selection and try again.';
+    }
+
+    return text;
+  }
+
+  function zyNudgeModal(targetEl) {
+    const el = targetEl || document.getElementById('modal');
+    if (!el) return;
+    el.classList.remove('zy-modal-nudge');
+    // Force reflow so rapid outside clicks re-trigger the gentle feedback pulse
+    void el.offsetWidth;
+    el.classList.add('zy-modal-nudge');
+    clearTimeout(el._zyNudgeTimer);
+    el._zyNudgeTimer = setTimeout(() => el.classList.remove('zy-modal-nudge'), 320);
+  }
+
+  function zySetModalAlert(containerId, rawMsg, type) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    if (!rawMsg) {
+      box.style.display = 'none';
+      box.innerHTML = '';
+      return;
+    }
+    const clean = zyHumanizeError(rawMsg);
+    const kind = type === 'success' ? 'is-success' : (type === 'info' ? 'is-info' : 'is-error');
+    const icon = type === 'success' ? 'fa-circle-check' : (type === 'info' ? 'fa-circle-info' : 'fa-circle-exclamation');
+    box.className = `zy-modal-alert ${kind}`;
+    box.style.display = 'flex';
+    box.innerHTML = `<i class="fas ${icon}"></i><span>${window.escapeHtml ? window.escapeHtml(clean) : clean}</span>`;
+  }
+
+  window.zyHumanizeError = zyHumanizeError;
+  window.zyNudgeModal = zyNudgeModal;
+  window.zySetModalAlert = zySetModalAlert;
+
   window.BrandTheme = {
     apply: applyBrandTheme,
     applyBrand: applyBrandTheme,

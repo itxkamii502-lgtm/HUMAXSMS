@@ -755,6 +755,7 @@ function zyModal(title, body, footer) {
   const ov = document.getElementById('modal-overlay');
   ov.classList.add('active', 'show');   // 'show' is what style.css actually displays
   ov.style.display = 'flex';
+  document.body.classList.add('zy-modal-open');
 }
 
 /* The panels' own closeModal() only drops the 'show' class, so a modal opened
@@ -767,7 +768,8 @@ function zyModal(title, body, footer) {
     const ov = document.getElementById('modal-overlay');
     if (ov) { ov.classList.remove('active', 'show'); ov.style.display = ''; }
     const m = document.getElementById('modal');
-    if (m) m.classList.remove('zy-modal');
+    if (m) m.classList.remove('zy-modal', 'modal-lg');
+    document.body.classList.remove('zy-modal-open');
   };
 })();
 
@@ -801,41 +803,75 @@ window.zyFormatAllocLimitHint = function(policy, actionWord) {
   return parts.join('<br>');
 };
 
-window.zyOpenRequestNumbersModal = async function(rangeName, rangeId, passedPolicy, onDone) {
+window.zyResolveRangeActivePayterms = function(r) {
+  const labelMap = {
+    Weekly: 'Weekly (7/3) — 3 Day Hold',
+    Monthly: 'Monthly (30/5) {W} — 5 Day Hold'
+  };
+  const obj = (r && typeof r === 'object') ? r : {};
+  const isWn = Boolean(
+    obj.is_whitenoise ||
+    String(obj.provider || '').toLowerCase().includes('whitenoise') ||
+    String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
+    String(obj.range_name || obj.name || '').toLowerCase().includes('whitenoise')
+  );
+  if (isWn) {
+    return { active: ['Monthly'], primary: 'Monthly', isWn: true, labels: labelMap };
+  }
+  return { active: ['Weekly'], primary: 'Weekly', isWn: false, labels: labelMap };
+};
+
+window.zyOpenRequestNumbersModal = async function(rangeName, rangeId, passedPolicy, onDone, rangeObj) {
   const policy = passedPolicy || await window.zyFetchAllocPolicy();
   window._zyOnAllocModalDone = typeof onDone === 'function' ? onDone : null;
   if (policy && policy.mode === 'self_allocate') {
-    return window.zyOpenSelfAllocateModal(rangeName, rangeId, policy, onDone);
+    return window.zyOpenSelfAllocateModal(rangeName, rangeId, policy, onDone, rangeObj);
+  }
+  if (rangeObj && (rangeObj.has_pending_request || Number(rangeObj.pending_request_count || 0) > 0 || rangeObj.block_reason === 'pending_request')) {
+    if (typeof toast === 'function') toast(`You already have a pending request for "${rangeName}". Please wait for approval before requesting again.`, 'warning');
+    return;
+  }
+  const poolStock = rangeObj && (rangeObj.owner_free_count != null || rangeObj.free_count != null || rangeObj.available != null)
+    ? Math.max(0, Number(rangeObj.owner_free_count ?? rangeObj.free_count ?? rangeObj.available ?? 0))
+    : null;
+  if (poolStock !== null && poolStock <= 0) {
+    if (typeof toast === 'function') toast(`No free numbers are currently available for "${rangeName}". Please try another range.`, 'warning');
+    return;
   }
   const maxByDaily = Number(policy.daily_limit) > 0 ? Math.max(0, Number(policy.daily_remaining ?? 0)) : Infinity;
   const maxByTotal = Number(policy.total_limit) > 0 ? Math.max(0, Number(policy.total_remaining ?? 0)) : Infinity;
-  const maxAllowed = Math.min(maxByDaily, maxByTotal, 5000);
+  const maxAllowed = Math.min(maxByDaily, maxByTotal, poolStock !== null ? poolStock : Infinity, 5000);
   const blocked = maxAllowed <= 0 && (Number(policy.daily_limit) > 0 || Number(policy.total_limit) > 0);
+  if (blocked) {
+    const msg = (Number(policy.daily_limit) > 0 && Number(policy.daily_remaining ?? 0) <= 0)
+      ? 'Your daily number request limit has been reached. It resets at 00:00 UTC (05:00 AM PKT).'
+      : 'Your overall number holding limit has been reached. Return unused numbers to request more.';
+    if (typeof toast === 'function') toast(msg, 'warning');
+    return;
+  }
   const limitHint = window.zyFormatAllocLimitHint(policy, 'request');
 
+  const ptInfo = window.zyResolveRangeActivePayterms(rangeObj || { range_name: rangeName });
+  const isLockedPt = ptInfo.active.length === 1;
+  const ptOptionsHtml = ptInfo.active.map(pt =>
+    `<option value="${zyEsc(pt)}" ${pt === ptInfo.primary ? 'selected' : ''}>${zyEsc(ptInfo.labels[pt] || pt)}${isLockedPt ? ' (Locked)' : ''}</option>`
+  ).join('');
+
   zyModal('Request Numbers', `
+    <div id="zy-req-err" class="zy-modal-alert is-error" style="display:none;"></div>
     <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:14px;border:1px solid #e2e8f0;">
       <div style="font-weight:800;color:#0f172a;font-size:14px;">${zyEsc(rangeName)}</div>
-      <div style="font-size:11.5px;color:#475569;margin-top:4px;">Mode: <b>Request Approval</b></div>
+      <div style="font-size:11.5px;color:#475569;margin-top:4px;">Mode: <b>Request Approval</b> · Active Payterm: <b>${zyEsc(ptInfo.active.join(', '))}</b>${poolStock !== null ? ` · Free Pool: <b style="color:#059669;">${poolStock.toLocaleString()}</b>` : ''}</div>
     </div>
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Payment Term</label>
-      ${(String(rangeName || '').toLowerCase().includes('whitenoise') || String(rangeName || '').toLowerCase().includes('monthly'))
-        ? `<select id="req-payterm" class="zy-select-pill" disabled>
-             <option value="Monthly" selected>Monthly (30/5) {W} — 5d Hold (Locked)</option>
-           </select>`
-        : `<select id="req-payterm" class="zy-select-pill">
-             <option value="Weekly" selected>Weekly (7/3) — 3 Day Hold</option>
-             <option value="Biweekly">Biweekly (15/3) — 3 Day Hold</option>
-             <option value="Monthly">Monthly (30/5) {W} — 5 Day Hold</option>
-           </select>`}
+      <select id="req-payterm" class="zy-select-pill" ${isLockedPt ? 'disabled' : ''}>${ptOptionsHtml}</select>
+      ${isLockedPt ? `<div style="font-size:11px;color:#475569;margin-top:4px;">Only <b>${zyEsc(ptInfo.primary)}</b> is enabled on this range.</div>` : ''}
     </div>
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Quantity</label>
-      <input type="number" id="req-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${blocked ? 0 : Math.min(10, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : 10)}" ${blocked ? 'disabled' : ''}>
-      <div style="font-size:11.5px;color:${blocked ? '#dc2626' : '#64748b'};margin-top:6px;line-height:1.5;">
-        ${blocked ? '<b>Limit reached:</b> You have 0 remaining numbers available under your assigned limit.' : limitHint}
-      </div>
+      <input type="number" id="req-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${Math.min(10, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : 10)}">
+      <div style="font-size:11.5px;color:#64748b;margin-top:6px;line-height:1.5;">${limitHint}</div>
     </div>
     <div style="margin-bottom:8px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Notes (Optional)</label>
@@ -844,7 +880,7 @@ window.zyOpenRequestNumbersModal = async function(rangeName, rangeId, passedPoli
   `, `
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;width:100%;">
       <button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>
-      <button type="button" class="zy-btn-pill-submit" id="zy-req-submit-btn" ${blocked ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''} onclick="zySubmitRangeRequest('${zyEsc(rangeName)}','${zyEsc(rangeId || '')}')">Submit Request</button>
+      <button type="button" class="zy-btn-pill-submit" id="zy-req-submit-btn" onclick="zySubmitRangeRequest('${zyEsc(rangeName)}','${zyEsc(rangeId || '')}')">Submit Request</button>
     </div>
   `);
 };
@@ -854,14 +890,22 @@ window.zySubmitRangeRequest = async function(rangeName, rangeId) {
   const qty = parseInt(document.getElementById('req-qty')?.value || '0', 10);
   const notes = (document.getElementById('req-notes')?.value || '').trim();
   const btn = document.getElementById('zy-req-submit-btn');
+  if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-req-err', '');
   if (!qty || qty < 1) {
-    if (typeof toast === 'function') toast('Please enter a valid quantity', 'error');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-req-err', 'Please enter a valid number quantity (at least 1).');
+    else if (typeof toast === 'function') toast('Please enter a valid quantity', 'error');
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
   try {
-    const res = await apiFetch('/api/numbers/request', {
+    const token = typeof getAuthToken === 'function' ? getAuthToken() : '';
+    const response = await fetch('/api/numbers/request', {
       method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}`, 'X-Session-Token': token } : {})
+      },
       body: JSON.stringify({
         range_id: rangeId ? (Number(rangeId) || rangeId) : undefined,
         range_name: rangeName,
@@ -871,8 +915,14 @@ window.zySubmitRangeRequest = async function(rangeName, rangeId) {
         urgency: 'normal'
       })
     });
-    if (!res || res.error) {
-      throw new Error((res && res.error) || 'Failed to submit number request');
+    const rawText = await response.text();
+    let res = null;
+    try { res = JSON.parse(rawText); } catch (_) {}
+    if (!response.ok || !res || res.error) {
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError((res && (res.error || res.message)) || rawText, response.status)
+        : ((res && res.error) || 'Unable to submit your request right now.');
+      throw new Error(cleanMsg);
     }
     if (typeof closeModal === 'function') closeModal();
     const msg = res.message || `Requested ${qty} number(s) for ${rangeName} (${pt})`;
@@ -880,64 +930,116 @@ window.zySubmitRangeRequest = async function(rangeName, rangeId) {
     else if (typeof zyFlash === 'function') zyFlash(msg);
     if (typeof window._zyOnAllocModalDone === 'function') window._zyOnAllocModalDone();
   } catch (e) {
-    if (typeof toast === 'function') toast(e.message || 'Request failed', 'error');
+    const cleanMsg = typeof window.zyHumanizeError === 'function'
+      ? window.zyHumanizeError(e.message || e)
+      : (e.message || 'Unable to submit request.');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-req-err', cleanMsg);
+    else if (typeof toast === 'function') toast(cleanMsg, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Submit Request'; }
   }
 };
 
-window.zyOpenSelfAllocateModal = async function(rangeName, rangeId, passedPolicy, onDone) {
+window.zyOpenSelfAllocateModal = async function(rangeName, rangeId, passedPolicy, onDone, rangeObj) {
   const policy = passedPolicy || await window.zyFetchAllocPolicy();
   window._zyOnAllocModalDone = typeof onDone === 'function' ? onDone : null;
   if (policy && policy.mode === 'request') {
-    return window.zyOpenRequestNumbersModal(rangeName, rangeId, policy, onDone);
+    return window.zyOpenRequestNumbersModal(rangeName, rangeId, policy, onDone, rangeObj);
+  }
+  const poolStock = rangeObj && (rangeObj.available != null || rangeObj.owner_free_count != null || rangeObj.free_count != null)
+    ? Math.max(0, Number(rangeObj.available ?? rangeObj.owner_free_count ?? rangeObj.free_count ?? 0))
+    : null;
+  if (poolStock !== null && poolStock <= 0) {
+    if (typeof toast === 'function') toast(`No free numbers are currently available for "${rangeName}". Please choose another range or try again later.`, 'warning');
+    return;
   }
   const maxByDaily = Number(policy.daily_limit) > 0 ? Math.max(0, Number(policy.daily_remaining ?? 0)) : Infinity;
   const maxByTotal = Number(policy.total_limit) > 0 ? Math.max(0, Number(policy.total_remaining ?? 0)) : Infinity;
-  const maxAllowed = Math.min(maxByDaily, maxByTotal, 5000);
-  const blocked = maxAllowed <= 0 && (Number(policy.daily_limit) > 0 || Number(policy.total_limit) > 0);
-  const limitHint = window.zyFormatAllocLimitHint(policy, 'allocate');
+  const isClientSelf = rangeObj && rangeObj.max_requestable_now != null;
+  const clientCap = isClientSelf ? Math.max(0, Number(rangeObj.max_requestable_now || 0)) : Infinity;
+  const maxAllowed = Math.min(maxByDaily, maxByTotal, clientCap, poolStock !== null ? poolStock : Infinity, 5000);
+  const blocked = maxAllowed <= 0 && (isClientSelf || Number(policy.daily_limit) > 0 || Number(policy.total_limit) > 0);
+  if (blocked) {
+    let blockMsg = `Your daily allocation limit for "${rangeName}" has been reached. It resets at 00:00 UTC (05:00 AM PKT).`;
+    if (isClientSelf && rangeObj.block_reason === 'hold_limit') {
+      blockMsg = `Maximum active holding limit reached for "${rangeName}" (${Number(rangeObj.held_count || 0)}/${Number(rangeObj.max_hold_limit || 50)}). Return numbers first to allocate more.`;
+    } else if (isClientSelf && rangeObj.block_reason === 'weekly_limit') {
+      blockMsg = `Weekly limit reached for "${rangeName}" (${Number(rangeObj.weekly_adds_used || 0)}/${Number(rangeObj.weekly_adds_limit || 3)} additions in 7 days).`;
+    } else if (!isClientSelf && Number(policy.total_limit) > 0 && Number(policy.total_remaining ?? 0) <= 0) {
+      blockMsg = 'Your overall number holding limit has been reached. Return unused numbers to allocate more.';
+    }
+    if (typeof toast === 'function') toast(blockMsg, 'warning');
+    return;
+  }
+  const limitHint = isClientSelf
+    ? `Per-Range Quota: Held <b>${Number(rangeObj.held_count || 0)}/50</b> · Today <b>${Number(rangeObj.today_numbers || 0)}/25</b> · Week <b>${Number(rangeObj.weekly_adds_used || 0)}/3</b>`
+    : window.zyFormatAllocLimitHint(policy, 'allocate');
+
+  const ptInfo = window.zyResolveRangeActivePayterms(rangeObj || { range_name: rangeName });
+  const isLockedPt = ptInfo.active.length === 1;
+  const ptOptionsHtml = ptInfo.active.map(pt =>
+    `<option value="${zyEsc(pt)}" ${pt === ptInfo.primary ? 'selected' : ''}>${zyEsc(ptInfo.labels[pt] || pt)}${isLockedPt ? ' (Locked)' : ''}</option>`
+  ).join('');
 
   zyModal('Self-Allocate Numbers', `
+    <div id="zy-sa-err" class="zy-modal-alert is-error" style="display:none;"></div>
     <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:14px;border:1px solid #e2e8f0;">
       <div style="font-weight:800;color:#0f172a;font-size:14px;">${zyEsc(rangeName)}</div>
-      <div style="font-size:11.5px;color:#047857;margin-top:4px;">Mode: <b>Self-Allocate (Instant Pool Assignment)</b></div>
+      <div style="font-size:11.5px;color:#047857;margin-top:4px;">Mode: <b>Self-Allocate (Instant Pool Assignment)</b> · Payterm: <b>${zyEsc(ptInfo.active.join(', '))}</b>${poolStock !== null ? ` · Free Pool: <b>${poolStock.toLocaleString()}</b>` : ''}</div>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Payment Term</label>
+      <select id="sa-payterm" class="zy-select-pill" ${isLockedPt ? 'disabled' : ''}>${ptOptionsHtml}</select>
     </div>
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Quantity</label>
-      <input type="number" id="sa-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${blocked ? 0 : Math.min(10, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : 10)}" ${blocked ? 'disabled' : ''}>
-      <div style="font-size:11.5px;color:${blocked ? '#dc2626' : '#64748b'};margin-top:6px;line-height:1.5;">
-        ${blocked ? '<b>Limit reached:</b> You have 0 remaining numbers available under your assigned limit.' : limitHint}
-      </div>
+      <input type="number" id="sa-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${Math.min(isClientSelf ? 25 : 10, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : 10)}">
+      <div style="font-size:11.5px;color:#64748b;margin-top:6px;line-height:1.5;">${limitHint}</div>
     </div>
   `, `
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;width:100%;">
       <button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>
-      <button type="button" class="zy-btn-pill-submit" id="zy-sa-submit-btn" ${blocked ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''} onclick="zySubmitSelfAllocate('${zyEsc(rangeName)}','${zyEsc(rangeId || '')}')">Allocate Now</button>
+      <button type="button" class="zy-btn-pill-submit" id="zy-sa-submit-btn" onclick="zySubmitSelfAllocate('${zyEsc(rangeName)}','${zyEsc(rangeId || '')}')">Allocate Now</button>
     </div>
   `);
 };
 
 window.zySubmitSelfAllocate = async function(rangeName, rangeId) {
   const qty = parseInt(document.getElementById('sa-qty')?.value || '0', 10);
+  const pt = document.getElementById('sa-payterm')?.value || '';
   const btn = document.getElementById('zy-sa-submit-btn');
+  if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-sa-err', '');
   if (!qty || qty < 1) {
-    if (typeof toast === 'function') toast('Please enter a valid quantity', 'error');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-sa-err', 'Please enter a valid quantity (at least 1).');
+    else if (typeof toast === 'function') toast('Please enter a valid quantity', 'error');
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Allocating...'; }
   try {
-    const res = await apiFetch('/api/numbers/agent-allocate', {
+    const token = typeof getAuthToken === 'function' ? getAuthToken() : '';
+    const response = await fetch('/api/numbers/agent-allocate', {
       method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}`, 'X-Session-Token': token } : {})
+      },
       body: JSON.stringify({
         range_id: rangeId ? (Number(rangeId) || rangeId) : undefined,
         range_name: rangeName,
+        payterm: pt || undefined,
         count: qty,
         quantity: qty
       })
     });
-    if (!res || res.error) {
-      throw new Error((res && res.error) || 'Self-allocation failed');
+    const rawText = await response.text();
+    let res = null;
+    try { res = JSON.parse(rawText); } catch (_) {}
+    if (!response.ok || !res || res.error) {
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError((res && (res.error || res.message)) || rawText, response.status)
+        : ((res && res.error) || 'No numbers are currently available in this range.');
+      throw new Error(cleanMsg);
     }
     if (typeof closeModal === 'function') closeModal();
     const msg = res.message || `Allocated ${res.allocated_count || qty} number(s) from ${rangeName}`;
@@ -945,9 +1047,236 @@ window.zySubmitSelfAllocate = async function(rangeName, rangeId) {
     else if (typeof zyFlash === 'function') zyFlash(msg);
     if (typeof window._zyOnAllocModalDone === 'function') window._zyOnAllocModalDone();
   } catch (e) {
-    if (typeof toast === 'function') toast(e.message || 'Self-allocation failed', 'error');
+    const cleanMsg = typeof window.zyHumanizeError === 'function'
+      ? window.zyHumanizeError(e.message || e)
+      : (e.message || 'Self-allocation could not be completed.');
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-sa-err', cleanMsg);
+    else if (typeof toast === 'function') toast(cleanMsg, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Allocate Now'; }
+  }
+};
+
+/* ─── PER-RANGE DATE-TO-DATE NUMBER RETURN MODAL (Client & Agent) ─── */
+window._zyRangeRetState = null;
+
+window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
+  window._zyRangeRetState = {
+    rangeId: rangeId ? Number(rangeId) : null,
+    rangeName: String(rangeName || '').trim(),
+    onDone: typeof onDone === 'function' ? onDone : null,
+    batches: [],
+    selectedDates: new Set()
+  };
+
+  zyModal(`Return Range: ${zyEsc(rangeName || 'Range')}`, `
+    <div style="padding:24px 12px;text-align:center;color:#64748b;font-size:13px;">
+      <i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i> Loading date batches for <b>${zyEsc(rangeName || 'this range')}</b>…
+    </div>
+  `, `<button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>`);
+
+  try {
+    const qs = new URLSearchParams();
+    if (rangeId) qs.set('range_id', String(rangeId));
+    if (rangeName) qs.set('range_name', String(rangeName));
+    const res = await apiFetch(`/api/numbers/range-return-batches?${qs.toString()}`);
+    if (!res || res.error) {
+      throw new Error((res && res.error) || 'Failed to load range batches');
+    }
+    const batches = Array.isArray(res.batches) ? res.batches : [];
+    const st = window._zyRangeRetState;
+    if (!st) return;
+    st.batches = batches;
+    st.rangeId = res.range_id || st.rangeId;
+    st.rangeName = res.range_name || st.rangeName;
+    st.minDate = res.min_date || '';
+    st.maxDate = res.max_date || '';
+    st.totalHeld = Number(res.total_held || 0);
+    st.selectedDates = new Set();
+
+    if (!batches.length) {
+      zyModal(`Return Range: ${zyEsc(st.rangeName)}`, `
+        <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:18px;border:1px solid #e2e8f0;text-align:center;">
+          <i class="fas fa-circle-info" style="font-size:22px;color:#64748b;margin-bottom:8px;"></i>
+          <div style="font-weight:700;color:#0f172a;font-size:14px;">No Returnable Numbers in ${zyEsc(st.rangeName)}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px;">You currently hold 0 returnable numbers in this range.</div>
+        </div>
+      `, `<button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>`);
+      return;
+    }
+
+    const batchRowsHtml = batches.map(b => {
+      const sampleText = b.sample_start
+        ? (b.sample_end && b.sample_end !== b.sample_start ? `${b.sample_start} → ${b.sample_end}` : b.sample_start)
+        : '—';
+      const ptsText = Array.isArray(b.payterms) && b.payterms.length ? b.payterms.join(', ') : '';
+      return `
+        <label class="zy-ret-batch-row" data-date="${zyEsc(b.date)}" onclick="zyToggleReturnDateRow(this, '${zyEsc(b.date)}')">
+          <input type="checkbox" class="zy-ret-chk" value="${zyEsc(b.date)}" data-count="${Number(b.count || 0)}" onclick="event.stopPropagation();zySyncReturnDateCheckboxes()">
+          <div class="zy-ret-batch-main">
+            <div class="zy-ret-batch-top">
+              <span class="zy-ret-date-badge"><i class="fas fa-calendar-day"></i> ${zyEsc(b.date)}</span>
+              <span class="zy-ret-count-badge">${Number(b.count || 0)} Number${Number(b.count) === 1 ? '' : 's'}</span>
+              ${ptsText ? `<span class="zy-ret-pt-tag">${zyEsc(ptsText)}</span>` : ''}
+            </div>
+            <div class="zy-ret-sample monospace">${zyEsc(sampleText)}</div>
+          </div>
+        </label>`;
+    }).join('');
+
+    zyModal(`Return Range: ${zyEsc(st.rangeName)}`, `
+      <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:12px;border:1px solid #e2e8f0;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:800;color:#0f172a;font-size:14px;">${zyEsc(st.rangeName)}</div>
+            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Strictly scoped to this range only — choose date(s) to return.</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:10.5px;color:#64748b;font-weight:700;text-transform:uppercase;">Held in Range</div>
+            <div style="font-size:16px;font-weight:800;color:#dc2626;" class="monospace">${st.totalHeld} Numbers</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="zy-ret-date-bar">
+        <div class="zy-ret-date-field">
+          <label for="zy-ret-from">From Date</label>
+          <input type="date" id="zy-ret-from" class="zy-input" value="${zyEsc(st.minDate)}" min="${zyEsc(st.minDate)}" max="${zyEsc(st.maxDate)}">
+        </div>
+        <div class="zy-ret-date-field">
+          <label for="zy-ret-to">To Date</label>
+          <input type="date" id="zy-ret-to" class="zy-input" value="${zyEsc(st.maxDate)}" min="${zyEsc(st.minDate)}" max="${zyEsc(st.maxDate)}">
+        </div>
+        <div class="zy-ret-date-actions">
+          <button type="button" class="apx-btn apx-btn-small" onclick="zyApplyReturnDateSpan()"><i class="fas fa-filter"></i> Select Dates</button>
+          <button type="button" class="apx-btn apx-btn-small" onclick="zySetAllReturnDates(true)">All</button>
+          <button type="button" class="apx-btn apx-btn-small" onclick="zySetAllReturnDates(false)">Clear</button>
+        </div>
+      </div>
+
+      <div style="font-size:11.5px;font-weight:700;color:#475569;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+        <span>Assigned Date Batches (${batches.length} date${batches.length === 1 ? '' : 's'})</span>
+        <span id="zy-ret-sel-summary" style="color:#dc2626;font-weight:800;">0 numbers selected</span>
+      </div>
+      <div class="zy-ret-batch-list" id="zy-ret-batch-list">
+        ${batchRowsHtml}
+      </div>
+    `, `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
+        <span style="font-size:11.5px;color:#64748b;" id="zy-ret-footer-hint">Select at least one date batch above.</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Cancel</button>
+          <button type="button" class="zy-btn-pill-submit" id="zy-ret-submit-btn" disabled style="background:#dc2626;opacity:0.5;cursor:not-allowed;" onclick="zySubmitRangeReturnByDate()">
+            <i class="fas fa-rotate-left"></i> Return Selected
+          </button>
+        </div>
+      </div>
+    `);
+  } catch (err) {
+    zyModal(`Return Range: ${zyEsc(rangeName || 'Range')}`, `
+      <div style="padding:16px;color:#dc2626;font-size:13px;">${zyEsc(err.message || 'Could not load returnable numbers')}</div>
+    `, `<button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>`);
+  }
+};
+
+window.zyToggleReturnDateRow = function(rowEl, dateKey) {
+  const chk = rowEl ? rowEl.querySelector('.zy-ret-chk') : null;
+  if (chk) {
+    chk.checked = !chk.checked;
+    window.zySyncReturnDateCheckboxes();
+  }
+};
+
+window.zyApplyReturnDateSpan = function() {
+  const fromD = (document.getElementById('zy-ret-from')?.value || '').trim();
+  const toD = (document.getElementById('zy-ret-to')?.value || '').trim();
+  const chks = document.querySelectorAll('#zy-ret-batch-list .zy-ret-chk');
+  chks.forEach(chk => {
+    const d = String(chk.value || '');
+    const inRange = (!fromD || d >= fromD) && (!toD || d <= toD);
+    chk.checked = inRange;
+  });
+  window.zySyncReturnDateCheckboxes();
+};
+
+window.zySetAllReturnDates = function(checked) {
+  document.querySelectorAll('#zy-ret-batch-list .zy-ret-chk').forEach(chk => {
+    chk.checked = Boolean(checked);
+  });
+  window.zySyncReturnDateCheckboxes();
+};
+
+window.zySyncReturnDateCheckboxes = function() {
+  const st = window._zyRangeRetState;
+  const chks = Array.from(document.querySelectorAll('#zy-ret-batch-list .zy-ret-chk'));
+  let totalSel = 0;
+  const selDates = [];
+  chks.forEach(chk => {
+    const row = chk.closest('.zy-ret-batch-row');
+    if (chk.checked) {
+      totalSel += Number(chk.getAttribute('data-count') || 0);
+      selDates.push(chk.value);
+      if (row) row.classList.add('is-selected');
+    } else if (row) {
+      row.classList.remove('is-selected');
+    }
+  });
+  if (st) st.selectedDates = new Set(selDates);
+
+  const sumEl = document.getElementById('zy-ret-sel-summary');
+  if (sumEl) sumEl.textContent = `${totalSel} number${totalSel === 1 ? '' : 's'} selected (${selDates.length} date${selDates.length === 1 ? '' : 's'})`;
+
+  const hintEl = document.getElementById('zy-ret-footer-hint');
+  if (hintEl) {
+    hintEl.textContent = totalSel > 0
+      ? `Returning ${totalSel} number(s) strictly from ${st ? st.rangeName : 'this range'}.`
+      : 'Select at least one date batch above.';
+  }
+
+  const btn = document.getElementById('zy-ret-submit-btn');
+  if (btn) {
+    btn.disabled = totalSel <= 0;
+    btn.style.opacity = totalSel > 0 ? '1' : '0.5';
+    btn.style.cursor = totalSel > 0 ? 'pointer' : 'not-allowed';
+    btn.innerHTML = totalSel > 0
+      ? `<i class="fas fa-rotate-left"></i> Return ${totalSel} Number${totalSel === 1 ? '' : 's'}`
+      : `<i class="fas fa-rotate-left"></i> Return Selected`;
+  }
+};
+
+window.zySubmitRangeReturnByDate = async function() {
+  const st = window._zyRangeRetState;
+  if (!st) return;
+  const dates = Array.from(st.selectedDates || []);
+  if (!dates.length) {
+    if (typeof toast === 'function') toast('Please select at least one date batch to return', 'error');
+    return;
+  }
+  const btn = document.getElementById('zy-ret-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Returning...'; }
+  try {
+    const res = await apiFetch('/api/numbers/return-by-date', {
+      method: 'POST',
+      body: JSON.stringify({
+        range_id: st.rangeId || undefined,
+        range_name: st.rangeName,
+        dates
+      })
+    });
+    if (!res || res.error) {
+      throw new Error((res && res.error) || 'Failed to return numbers');
+    }
+    if (typeof closeModal === 'function') closeModal();
+    const msg = res.message || `Returned ${res.returned_count} number(s) from ${st.rangeName}`;
+    if (typeof toast === 'function') toast(msg, 'success');
+    else if (typeof zyFlash === 'function') zyFlash(msg);
+    if (typeof st.onDone === 'function') st.onDone();
+  } catch (err) {
+    if (typeof toast === 'function') toast(err.message || 'Return failed', 'error');
+    if (btn) {
+      btn.disabled = false;
+      window.zySyncReturnDateCheckboxes();
+    }
   }
 };
 const zyTick = on => on ? zyImg('ui_tick', 'zy-tick') : '';
@@ -2219,7 +2548,6 @@ window.zyRenderBulkQueueCard = zyRenderBulkQueueCard;
 
 const ZY_DEFAULT_MASTER_PAYTERMS = [
   'Weekly',
-  'Biweekly',
   'Monthly'
 ];
 
@@ -2229,13 +2557,7 @@ const ZY_PAYTERM_ALIAS_MAP = {
   '7/3': 'Weekly',
   'Weekly (7/3)': 'Weekly',
   'weekly (7/3)': 'Weekly',
-  'Biweekly': 'Biweekly',
-  'biweekly': 'Biweekly',
-  'Bi-Weekly': 'Biweekly',
-  'bi-weekly': 'Biweekly',
-  '15/3': 'Biweekly',
-  'Biweekly (15/3)': 'Biweekly',
-  'biweekly (15/3)': 'Biweekly',
+  'weekly7_3': 'Weekly',
   'Monthly': 'Monthly',
   'monthly': 'Monthly',
   '30/5': 'Monthly',
@@ -2247,7 +2569,8 @@ const ZY_PAYTERM_ALIAS_MAP = {
 
 function zyMasterPaytermsList() {
   if (typeof window !== 'undefined' && Array.isArray(window._masterPayterms) && window._masterPayterms.length) {
-    return window._masterPayterms;
+    const filtered = window._masterPayterms.filter(m => !String(m).toLowerCase().includes('biweek') && String(m) !== '15/3');
+    if (filtered.length) return filtered;
   }
   return ZY_DEFAULT_MASTER_PAYTERMS;
 }
@@ -2258,18 +2581,15 @@ function zyNormalizePayterm(term) {
   if (ZY_PAYTERM_ALIAS_MAP[raw]) return ZY_PAYTERM_ALIAS_MAP[raw];
   const lower = raw.toLowerCase();
   if (ZY_PAYTERM_ALIAS_MAP[lower]) return ZY_PAYTERM_ALIAS_MAP[lower];
-  const master = zyMasterPaytermsList();
-  const match = master.find(m => m.toLowerCase() === lower);
-  return match || raw;
+  if (lower.includes('month') || lower.includes('30/5')) return 'Monthly';
+  return 'Weekly';
 }
 
 function zyRenderPaytermOptions(selectedTerm = '', customList = null) {
   const norm = zyNormalizePayterm(selectedTerm);
-  const isBi = norm === 'Biweekly';
   const isMonthly = norm === 'Monthly';
   return `
-    <option value="Weekly" ${!isBi && !isMonthly ? 'selected' : ''}>Weekly (7/3)</option>
-    <option value="Biweekly" ${isBi ? 'selected' : ''}>Biweekly (15/3)</option>
+    <option value="Weekly" ${!isMonthly ? 'selected' : ''}>Weekly (7/3)</option>
     <option value="Monthly" ${isMonthly ? 'selected' : ''}>Monthly (30/5) {W}</option>
   `;
 }
@@ -2277,11 +2597,10 @@ function zyRenderPaytermOptions(selectedTerm = '', customList = null) {
 function zyPaytermBadge(term) {
   if (!term) return '';
   const norm = zyNormalizePayterm(term);
-  const isBi = norm === 'Biweekly';
   const isMonthly = norm === 'Monthly';
-  const label = isMonthly ? 'Monthly (30/5) {W}' : (isBi ? 'Biweekly (15/3)' : 'Weekly (7/3)');
-  const slug = isMonthly ? 'monthly' : (isBi ? 'biweekly' : 'weekly');
-  const icon = isMonthly ? 'fa-calendar-check' : (isBi ? 'fa-calendar-alt' : 'fa-calendar-week');
+  const label = isMonthly ? 'Monthly (30/5) {W}' : 'Weekly (7/3)';
+  const slug = isMonthly ? 'monthly' : 'weekly';
+  const icon = isMonthly ? 'fa-calendar-check' : 'fa-calendar-week';
   return `<span class="zy-payterm-badge zy-pt-${slug}"><i class="fas ${icon}"></i> ${label}</span>`;
 }
 

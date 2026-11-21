@@ -2093,7 +2093,13 @@
     const closeCreate = () => { state.createModalOpen = false; renderWorkspace(); };
     if (cgClose) cgClose.addEventListener('click', closeCreate);
     if (cgCancel) cgCancel.addEventListener('click', closeCreate);
-    if (cgBackdrop) cgBackdrop.addEventListener('click', (e) => { if (e.target === cgBackdrop) closeCreate(); });
+    if (cgBackdrop) {
+      cgBackdrop.addEventListener('click', (e) => {
+        if (e.target === cgBackdrop && typeof window.zyNudgeModal === 'function') {
+          window.zyNudgeModal(cgBackdrop.querySelector('.zy-cg-modal, .zy-chat-modal') || cgBackdrop.firstElementChild);
+        }
+      });
+    }
     if (cgSubmit) cgSubmit.addEventListener('click', createGroupFromModal);
 
     renderInboxList();

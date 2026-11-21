@@ -107,18 +107,18 @@ async function run() {
     const cl3Card = await cl3('GET', '/api/client/rate-card');
     const cl1R1 = cl1Card.data.ranges.find(r => r.range_id === 1);
     const cl3R1 = cl3Card.data.ranges.find(r => r.range_id === 1);
-    check('3f Agent rates never mix & enriched rate card exposes payterms_pkr/held_count without provider or Agent USD leak',
+    check('3f Agent rates never mix & enriched rate card exposes active payterms_pkr/held_count without provider or Agent USD leak',
       cl1Card.data.ranges.length === 2 && cl1R1.client_rate_pkr === 3.5 &&
       cl3Card.data.ranges.length === 1 && cl3R1.client_rate_pkr === 2.1 &&
       cl1R1.agent_rate === undefined && cl1R1.company_cost === undefined && cl1R1.provider === undefined &&
       cl1R1.payterm === 'Weekly' && cl1R1.held_count === 0 &&
-      cl1R1.payterms_pkr && cl1R1.payterms_pkr.Weekly === 3.5 && typeof cl1R1.payterms_pkr.Monthly === 'number');
+      cl1R1.payterms_pkr && cl1R1.payterms_pkr.Weekly === 3.5 && cl1R1.payterms_pkr.Monthly === undefined);
 
     // Weekly PKR target
     const targetRes = await ag1('PUT', '/api/agent/pkr-target', { weekly_pkr_target: 5000, weekly_pkr_enforce_mode: 'warn' });
     check('3g Agent sets weekly_pkr_target = 5000 PKR', targetRes.status === 200 && targetRes.data.weekly_pkr_target === 5000);
 
-    // 4. Client Number Request batch size [25, 50] & 1-request-per-range-per-day limit
+    // 4. Client Number Request batch size (max 25/day per range, unlimited across ranges)
     const badQtyReq = await cl1('POST', '/api/numbers/request', { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 10 });
     check('4a Client request with disallowed quantity 10 rejected (400)', badQtyReq.status === 400);
 
@@ -126,10 +126,10 @@ async function run() {
     check('4b Client request with 25 on Range 1 accepted and stamped in PKR',
       okReqR1.status === 200 && okReqR1.data.request.client_rate_pkr === 3.5 && okReqR1.data.request.client_currency === 'PKR');
 
-    const dupReqR1 = await cl1('POST', '/api/numbers/request', { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 50 });
+    const dupReqR1 = await cl1('POST', '/api/numbers/request', { range_id: 1, range_name: 'Ghana Orange NS2', quantity: 25 });
     check('4c Second request same day on SAME range blocked (429)', dupReqR1.status === 429);
 
-    const okReqR2 = await cl1('POST', '/api/numbers/request', { range_id: 2, range_name: 'Kenya Safaricom P1', quantity: 50 });
+    const okReqR2 = await cl1('POST', '/api/numbers/request', { range_id: 2, range_name: 'Kenya Safaricom P1', quantity: 25 });
     check('4d Client request same day on DIFFERENT published range (#2) allowed (200)', okReqR2.status === 200);
 
     // Refresh client_one rate card shows requested_today=true on R1 & R2
@@ -189,26 +189,17 @@ async function run() {
     check('7a Client submits 2.50 PKR payout request',
       clPayoutReq.status === 200 && clPayoutReq.data.currency === 'PKR' && clPayoutReq.data.status === 'pending');
 
-    // Owner vs Agent Privacy Boundary
+    // Owner vs Agent Strict Privacy Boundary (Owner stops at Agents; zero Client visibility)
     const owClients = await ow('GET', '/api/clients');
-    const owC1 = (owClients.data.data || []).find(c => c.id === 1);
     const owClientById = await ow('GET', '/api/clients/1');
     const owHierarchy = await ow('GET', '/api/hierarchy');
-    const owHClients = owHierarchy.data[0].agents.flatMap(a => a.clients || []);
-    const owHC1 = owHClients.find(c => c.id === 1);
+    const owHClients = (owHierarchy.data?.[0]?.agents || []).flatMap(a => a.clients || []);
     const owEarnings403 = await ow('GET', '/api/client/1/earnings');
     const owPayouts = await ow('GET', '/api/payout-requests');
     const owPatchClPayout = await ow('PATCH', `/api/payout-requests/${clPayoutReq.data.id}`, { status: 'paid' });
 
-    const hasNoSensitiveFields = obj => obj &&
-      obj.balance === undefined && obj.balance_pkr === undefined &&
-      obj.wallet === undefined && obj.iban === undefined &&
-      obj.bank_name === undefined && obj.account_number === undefined &&
-      obj.email === undefined && obj.phone === undefined &&
-      obj.privacy_redacted === true;
-
-    check('7b Owner sees only basic Client directory (no balance/bank/wallet/email/phone)',
-      hasNoSensitiveFields(owC1) && hasNoSensitiveFields(owClientById.data) && hasNoSensitiveFields(owHC1) && owEarnings403.status === 403);
+    check('7b Owner is strictly blocked (403) from /api/clients, /api/clients/:id, /api/client/:id/earnings & sees zero clients in /api/hierarchy',
+      owClients.status === 403 && owClientById.status === 403 && owHClients.length === 0 && owEarnings403.status === 403);
 
     check('7c Owner cannot view or approve Client PKR payout requests (403)',
       !(owPayouts.data.data || []).some(p => Number(p.id) === Number(clPayoutReq.data.id)) &&

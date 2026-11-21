@@ -89,17 +89,19 @@ async function apiFetch(path, opts = {}, retries = 2) {
       try {
         const parsed = JSON.parse(errorText);
         detail = parsed.error || parsed.detail || parsed.message || errorText;
-      } catch (e) {
-        if (typeof detail === 'string' && detail.trim().startsWith('<')) {
-          detail = `HTTP ${response.status}: ${response.statusText || 'Request failed'}`;
-        }
-      }
-      throw new Error(detail);
+      } catch (e) {}
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(detail, response.status)
+        : detail;
+      throw new Error(cleanMsg);
     }
 
     const data = await response.json();
     if (data && data.error && !('success' in data)) {
-      throw new Error(data.error);
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(data.error)
+        : data.error;
+      throw new Error(cleanMsg);
     }
     return data;
   } catch (err) {
@@ -108,8 +110,11 @@ async function apiFetch(path, opts = {}, retries = 2) {
       return apiFetch(path, opts, retries - 1);
     }
     if (!opts.silent) {
+      const cleanMsg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError(err.message || err)
+        : (err.message || 'Connection error. Please try again.');
       console.warn(`apiFetch [${path}]:`, err.message || err);
-      toast(err.message || 'Network error', 'error');
+      toast(cleanMsg, 'error');
     }
     return null;
   }
@@ -184,7 +189,7 @@ window.setupUsernameAvailabilityCheck = function(inputId, feedbackId, submitBtnI
   }
 };
 
-// ── Modal System ──────────────────────────────────────────────────
+// ── Modal System (Explicit Close Only — Never Dismisses on Outside Click) ──
 function openModal(title, html) {
   const overlay = document.getElementById('modal-overlay');
   const titleEl = document.getElementById('modal-title');
@@ -198,6 +203,7 @@ function openModal(title, html) {
   }
   bodyEl.innerHTML = html;
   overlay.classList.add('show');
+  document.body.classList.add('zy-modal-open');
 }
 
 function closeModal() {
@@ -208,14 +214,20 @@ function closeModal() {
     try { window._logoCropper.destroy(); } catch(e){}
     window._logoCropper = null;
   }
-  if (overlay) overlay.classList.remove('show');
+  if (overlay) {
+    overlay.classList.remove('show', 'active');
+    overlay.style.display = '';
+  }
+  document.body.classList.remove('zy-modal-open');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   const overlay = document.getElementById('modal-overlay');
   if (overlay) {
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeModal();
+      if (e.target === overlay && typeof window.zyNudgeModal === 'function') {
+        window.zyNudgeModal(document.getElementById('modal'));
+      }
     });
   }
 });
@@ -280,8 +292,6 @@ function renderManagementTabs(activeTab = 'agents') {
   return `
     <div class="tabs" style="margin-bottom:16px;display:flex;gap:8px;border-bottom:1px solid var(--border);padding-bottom:12px;overflow-x:auto;">
       <button class="btn ${activeTab === 'agents' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderAdminAgents()"><i class="fas fa-user-secret"></i> Agents</button>
-      <button class="btn ${activeTab === 'clients' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderAdminClients()"><i class="fas fa-user-group"></i> Clients</button>
-      <button class="btn ${activeTab === 'hierarchy' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderHierarchy()"><i class="fas fa-sitemap"></i> Hierarchy Tree</button>
       <button class="btn ${activeTab === 'all' ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="renderUsers(1)"><i class="fas fa-users"></i> All Accounts</button>
     </div>
   `;
@@ -635,8 +645,8 @@ function loadPage(page) {
     'credit-notes': renderCreditNotesHub,
     'users': renderUsers,
     'agents': renderAdminAgents,
-    'clients': renderAdminClients,
-    'hierarchy': renderHierarchy,
+    'clients': renderAdminAgents,
+    'hierarchy': renderAdminAgents,
     'account-balances': renderAccountBalances,
     'audit-logs': renderAuditLogs,
     'login-activity': renderLoginActivity,
@@ -718,9 +728,11 @@ async function renderCrApiPanels() {
             `<span class="fs-12 ${cn.last_status?.startsWith('Error') ? 'text-danger' : 'text-success'}">${cn.last_status || '—'}</span>`,
             cn.total_pulled || 0,
             statusBadge(cn.active ? 'active' : 'paused'),
-            `<button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
-             <button class="btn btn-outline btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Pause' : 'Resume'}"><i class="fas fa-${cn.active ? 'pause' : 'play'}"></i></button>
-             <button class="btn btn-outline btn-sm" onclick="deleteCrApiConn(${cn.id})" title="Remove"><i class="fas fa-trash"></i></button>`
+            `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
+              <button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
+              <button class="btn btn-${cn.active ? 'warning' : 'success'} btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Stop / Pause connection' : 'Start / Resume connection'}"><i class="fas fa-${cn.active ? 'stop' : 'play'}"></i> ${cn.active ? 'Stop' : 'Resume'}</button>
+              ${cn.active ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteCrApiConn(${cn.id}, '${escapeHtml(String(cn.panel_name || 'CR API Connection')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
+            </div>`
           ])
         ) : `<div class="empty-state"><i class="fas fa-link"></i><p>No CR API connections yet — click "Add Connection" to pull OTPs in from another panel.</p></div>`}
       </div>
@@ -802,13 +814,94 @@ async function toggleCrApiConn(id, active) {
   } catch (err) { toast('Failed to update connection', 'error'); }
 }
 
-async function deleteCrApiConn(id) {
-  if (!confirm('Remove this CR API connection? OTPs will stop pulling in from it.')) return;
+window._zyProtectedDeleteCfg = null;
+
+window.openProtectedConnDeleteModal = function(cfg) {
+  window._zyProtectedDeleteCfg = cfg;
+  const cachedUser = (() => {
+    try { return JSON.parse(sessionStorage.getItem('admin_user') || localStorage.getItem('admin_user') || '{}'); } catch (_) { return {}; }
+  })();
+  const needs2fa = Boolean(cachedUser && cachedUser.two_fa);
+  openModal(cfg.title || 'Protected Connection Removal', `
+    <div id="zy-pdel-err" class="zy-modal-alert is-error" style="display:none;"></div>
+    <div class="zy-modal-summary-card" style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-weight:800;color:#991b1b;font-size:13.5px;"><i class="fas fa-shield-halved" style="margin-right:6px;"></i>Security Verification Required</div>
+      <div style="font-size:12px;color:#7f1d1d;margin-top:4px;line-height:1.45;">
+        You are permanently removing <strong>${escapeHtml(cfg.label || 'this stopped connection')}</strong>. Existing SMS logs and earnings remain intact.
+      </div>
+    </div>
+    <form onsubmit="submitProtectedConnDelete(event)">
+      <div class="form-group">
+        <label class="form-label">Owner Password *</label>
+        <input type="password" id="zy-pdel-pwd" required placeholder="Enter your Owner password" autocomplete="current-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label">2FA Authenticator Code ${needs2fa ? '*' : '(if 2FA enabled)'}</label>
+        <input type="text" id="zy-pdel-2fa" ${needs2fa ? 'required' : ''} placeholder="6-digit code" maxlength="8" inputmode="numeric">
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-danger" id="zy-pdel-btn"><i class="fas fa-trash-can"></i> Permanently Remove</button>
+      </div>
+    </form>
+  `);
+};
+
+async function submitProtectedConnDelete(event) {
+  event.preventDefault();
+  const cfg = window._zyProtectedDeleteCfg;
+  if (!cfg) return;
+  const password = (document.getElementById('zy-pdel-pwd')?.value || '').trim();
+  const two_fa_code = (document.getElementById('zy-pdel-2fa')?.value || '').trim();
+  const btn = document.getElementById('zy-pdel-btn');
+  if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-pdel-err', '');
+  if (!password) {
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-pdel-err', 'Please enter your Owner password.');
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Verifying...'; }
   try {
-    await apiFetch(`/api/cr-api-connections/${id}`, { method: 'DELETE' });
-    toast('✅ Connection removed', 'warning');
-    renderCrApiPanels();
-  } catch (err) { toast('Failed to remove connection', 'error'); }
+    const token = getAuthToken();
+    const res = await fetch(cfg.endpoint, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}`, 'X-Session-Token': token } : {})
+      },
+      body: JSON.stringify({ password, two_fa_code })
+    });
+    const text = await res.text();
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) {}
+    if (!res.ok || !parsed || !parsed.success) {
+      const msg = typeof window.zyHumanizeError === 'function'
+        ? window.zyHumanizeError((parsed && (parsed.error || parsed.message)) || text, res.status)
+        : ((parsed && parsed.error) || 'Could not remove connection.');
+      if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-pdel-err', msg);
+      else toast(msg, 'error');
+      return;
+    }
+    closeModal();
+    if (typeof cfg.onDone === 'function') await cfg.onDone();
+  } catch (err) {
+    const msg = typeof window.zyHumanizeError === 'function' ? window.zyHumanizeError(err.message || err) : 'Connection error.';
+    if (typeof window.zySetModalAlert === 'function') window.zySetModalAlert('zy-pdel-err', msg);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-trash-can"></i> Permanently Remove'; }
+  }
+}
+
+async function deleteCrApiConn(id, name) {
+  window.openProtectedConnDeleteModal({
+    title: 'Protected Remove: CR API Connection',
+    label: name || `CR API Connection #${id}`,
+    endpoint: `/api/cr-api-connections/${id}`,
+    onDone: async () => {
+      toast('CR API connection permanently removed.', 'warning');
+      await renderCrApiPanels();
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -894,9 +987,10 @@ async function renderWhitenoisePanels() {
               `<strong>${escapeHtml(cn.panel_name || cn.name || 'Whitenoise')}</strong>`,
               escapeHtml(cn.mode || 'api_key'),
               escapeHtml(cn.last_status || 'Polling Retired'),
-              `<div style="display:inline-flex;gap:4px;">
-                <button class="btn btn-outline btn-sm" onclick="openEditWhitenoiseModal(${cn.id})"><i class="fas fa-pen"></i></button>
-                <button class="btn btn-danger btn-sm" onclick="deleteWhitenoiseConn(${cn.id})"><i class="fas fa-trash"></i></button>
+              `<div style="display:inline-flex;gap:4px;flex-wrap:wrap;">
+                <button class="btn btn-${cn.active !== false ? 'warning' : 'success'} btn-sm" onclick="toggleWhitenoiseConn(${cn.id}, ${cn.active === false})"><i class="fas fa-${cn.active !== false ? 'stop' : 'play'}"></i> ${cn.active !== false ? 'Stop' : 'Resume'}</button>
+                <button class="btn btn-outline btn-sm" onclick="openEditWhitenoiseModal(${cn.id})" title="Edit"><i class="fas fa-pen"></i></button>
+                ${cn.active !== false ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteWhitenoiseConn(${cn.id}, '${escapeHtml(String(cn.panel_name || cn.name || 'Whitenoise')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
               </div>`
             ])
           ) : `<div style="font-size:12.5px;color:#94a3b8;padding:8px 0;">No legacy API connections configured (recommended for Excel-only mode).</div>`}
@@ -1227,15 +1321,16 @@ async function toggleWhitenoiseConn(id, active) {
   }
 }
 
-async function deleteWhitenoiseConn(id) {
-  if (!confirm('Remove this Whitenoise connection?')) return;
-  try {
-    await apiFetch(`/api/whitenoise-connections/${id}`, { method: 'DELETE' });
-    toast('Whitenoise connection removed', 'warning');
-    await renderWhitenoisePanels();
-  } catch (err) {
-    toast('Failed to remove Whitenoise connection', 'error');
-  }
+async function deleteWhitenoiseConn(id, name) {
+  window.openProtectedConnDeleteModal({
+    title: 'Protected Remove: Whitenoise Connection',
+    label: name || `Whitenoise Connection #${id}`,
+    endpoint: `/api/whitenoise-connections/${id}`,
+    onDone: async () => {
+      toast('Whitenoise connection permanently removed.', 'warning');
+      await renderWhitenoisePanels();
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -2374,14 +2469,12 @@ async function renderAllocationHistory(page = 1) {
 function zyNormalizeRangePaytermKey(raw) {
   const s = String(raw || '').toLowerCase();
   if (s.includes('month') || s.includes('30/5')) return 'Monthly';
-  if (s.includes('biweek') || s.includes('15/3')) return 'Biweekly';
   return 'Weekly';
 }
 
 function zyFormatRangePaytermText(key) {
   const k = zyNormalizeRangePaytermKey(key);
   if (k === 'Monthly') return 'Monthly (30/5) {W}';
-  if (k === 'Biweekly') return 'Biweekly (15/3)';
   return 'Weekly (7/3)';
 }
 
@@ -2392,31 +2485,27 @@ function zyResolveRangePaytermRates(r) {
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : null;
   };
+  const isWn = Boolean(
+    (r && r.is_whitenoise) ||
+    String((r && r.provider) || '').toLowerCase().includes('whitenoise') ||
+    String((r && r.payout_schedule) || '').toLowerCase() === 'monthly30_5' ||
+    String((r && (r.range_name || r.name)) || '').toLowerCase().includes('whitenoise')
+  );
   const rawW = readNum(pts['Weekly'] !== undefined ? pts['Weekly'] : pts['7/3']);
-  const rawB = readNum(pts['Biweekly'] !== undefined ? pts['Biweekly'] : pts['15/3']);
   const rawM = readNum(pts['Monthly'] !== undefined ? pts['Monthly'] : pts['30/5']);
   const fallbackRate = readNum(r && r.payout) ?? 0;
 
-  let activeKeys = [];
-  if (Array.isArray(r && r.active_payterms) && r.active_payterms.length) {
-    activeKeys = [...new Set(r.active_payterms.map(zyNormalizeRangePaytermKey))];
-  } else {
-    const present = [];
-    if (rawW !== null) present.push('Weekly');
-    if (rawB !== null) present.push('Biweekly');
-    if (rawM !== null) present.push('Monthly');
-    if (present.length > 0 && present.length < 3) {
-      activeKeys = present;
-    } else {
-      activeKeys = [zyNormalizeRangePaytermKey((r && r.payterm) || 'Weekly')];
-    }
+  if (isWn) {
+    return {
+      activeKeys: ['Monthly'],
+      Weekly: null,
+      Monthly: rawM !== null ? rawM : fallbackRate
+    };
   }
-
   return {
-    activeKeys,
-    Weekly: activeKeys.includes('Weekly') ? (rawW !== null ? rawW : fallbackRate) : null,
-    Biweekly: activeKeys.includes('Biweekly') ? (rawB !== null ? rawB : fallbackRate) : null,
-    Monthly: activeKeys.includes('Monthly') ? (rawM !== null ? rawM : fallbackRate) : null
+    activeKeys: ['Weekly'],
+    Weekly: rawW !== null ? rawW : fallbackRate,
+    Monthly: null
   };
 }
 
@@ -2438,7 +2527,7 @@ async function renderSmsRanges() {
             <i class="fas fa-table-list" style="margin-right:6px;"></i> Ranges &amp; Rate Card
           </div>
           <div class="page-subtitle" style="font-size:12.5px;">
-            Unified telecom master catalog: Country prefixes, carrier costs &amp; active payterm rates — Weekly (7/3), Biweekly (15/3), Monthly (30/5) {W}
+            Unified telecom master catalog: Country prefixes, carrier costs &amp; active payterm rates — Weekly (7/3) for Standard · Monthly (30/5) {W} for Whitenoise
           </div>
         </div>
         <div class="page-actions" style="display:flex;gap:8px;">
@@ -2489,8 +2578,9 @@ async function renderSmsRanges() {
     const rangeRows = data.map(r => {
       const resolved = zyResolveRangePaytermRates(r);
       const costVal = parseFloat(r.company_cost !== undefined ? r.company_cost : (r.cost ?? 0)) || 0;
-      const qty = Number(r.numbers_count || r.qty || 0);
-      const free = Number(r.free_count !== undefined ? r.free_count : qty);
+      const qty = Number(r.total_count ?? r.numbers_count ?? r.qty ?? 0);
+      const free = Number(r.free_count ?? r.unassigned_count ?? 0);
+      const held = Number(r.held_count ?? Math.max(0, qty - free));
       const rangeName = String(r.range_name || r.name || r.country || '—').trim();
       const providerName = String(r.provider || 'Direct').trim();
       const cleanPrefix = String(r.prefix || '').trim().replace(/^\++/, '') || '—';
@@ -2512,10 +2602,10 @@ async function renderSmsRanges() {
         { v: paytermDisplay, h: `<span>${escapeHtml(paytermDisplay)}</span>` },
         { v: costVal, h: `<span class="monospace fw-600">${currSym} ${zyFmtMoney(costVal, 4)}</span>` },
         fmtRateCell(resolved.Weekly),
-        fmtRateCell(resolved.Biweekly),
         fmtRateCell(resolved.Monthly),
-        { v: qty, h: `<span class="monospace fw-600">${qty}</span>` },
-        { v: free, h: `<span class="monospace fw-600">${free}</span>` },
+        { v: qty, h: `<span class="monospace fw-600">${qty.toLocaleString()}</span>` },
+        { v: free, h: `<span class="monospace fw-600" style="color:${free > 0 ? '#059669' : '#dc2626'};">${free.toLocaleString()}</span>` },
+        { v: held, h: `<span class="monospace fw-600" style="color:#2563eb;">${held.toLocaleString()}</span>` },
         { v: isActive ? 'Active' : 'Inactive', h: `<span>${isActive ? 'Active' : 'Inactive'}</span>` },
         {
           v: '',
@@ -2531,7 +2621,7 @@ async function renderSmsRanges() {
     const rangesHost = document.getElementById('owner-ranges-body');
     if (rangesHost && typeof zyDT2 === 'function') {
       rangesHost.innerHTML = zyDT2('dt-ranges', {
-        cols: ['Range', 'Provider', 'Prefix', 'Currency', 'Payterm', 'Cost', 'Weekly (7/3)', 'Biweekly (15/3)', 'Monthly (30/5) {W}', 'Total', 'Free', 'Status', 'Action'],
+        cols: ['Range', 'Provider', 'Prefix', 'Currency', 'Payterm', 'Cost', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Total', 'Free Pool', 'Held', 'Status', 'Action'],
         rows: rangeRows,
         perPage: 25
       });
@@ -2654,22 +2744,18 @@ function openAddRangeModal() {
           <h5 style="margin:0 0 10px 0;font-size:12px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;padding-bottom:6px;">
             <i class="fas fa-coins"></i> Your Agent's Payouts
           </h5>
-          <div style="font-size:10.5px;margin-bottom:8px;">Fill only the payterm(s) you want active — blank columns will show <b>N/A</b>.</div>
+          <div style="font-size:10.5px;margin-bottom:8px;">Standard routes lock to <b>Weekly (7/3)</b> · Whitenoise routes lock to <b>Monthly (30/5) {W}</b>.</div>
           <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
             <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:6px 0;"><b>Weekly (7/3)</b><div style="font-size:10px;">Weekly payment · 3 day hold</div></td>
+              <td style="padding:6px 0;"><b>Weekly (7/3)</b><div style="font-size:10px;">Standard routes · 3 day hold</div></td>
               <td align="right"><input type="number" id="pt-weekly" value="0.012" placeholder="N/A" step="0.0001" style="width:90px;height:26px;font-family:monospace;font-size:11.5px;text-align:right;"></td>
             </tr>
-            <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:6px 0;"><b>Biweekly (15/3)</b><div style="font-size:10px;">2 weeks payment · 3 day hold</div></td>
-              <td align="right"><input type="number" id="pt-biweekly" value="" placeholder="N/A" step="0.0001" style="width:90px;height:26px;font-family:monospace;font-size:11.5px;text-align:right;"></td>
-            </tr>
             <tr>
-              <td style="padding:6px 0;"><b>Monthly (30/5) {W}</b><div style="font-size:10px;">Monthly payment · 5 day hold</div></td>
+              <td style="padding:6px 0;"><b>Monthly (30/5) {W}</b><div style="font-size:10px;">Whitenoise routes · 5 day hold</div></td>
               <td align="right"><input type="number" id="pt-monthly" value="" placeholder="N/A" step="0.0001" style="width:90px;height:26px;font-family:monospace;font-size:11.5px;text-align:right;"></td>
             </tr>
           </table>
-          <div style="font-size:10.5px;margin-top:8px;"><i class="fas fa-calendar-check"></i> Provider <b>Whitenoise</b> automatically locks ranges to <b>Monthly (30/5) {W}</b> (5d hold).</div>
+          <div style="font-size:10.5px;margin-top:8px;"><i class="fas fa-calendar-check"></i> Provider <b>Whitenoise</b> uses <b>Monthly (30/5) {W}</b> only; all other providers use <b>Weekly (7/3)</b> only.</div>
         </div>
       </div>
 
@@ -2694,7 +2780,6 @@ async function submitAddRange(event) {
     const companyCost = parseFloat(document.getElementById('range-company-cost').value) || 0;
 
     const rawW = (document.getElementById('pt-weekly')?.value ?? '').trim();
-    const rawB = (document.getElementById('pt-biweekly')?.value ?? '').trim();
     const rawM = (document.getElementById('pt-monthly')?.value ?? '').trim();
 
     if (!country || !prefix) {
@@ -2702,26 +2787,29 @@ async function submitAddRange(event) {
       return;
     }
 
-    const isWn = provider.toLowerCase().includes('whitenoise');
+    const isWn = provider.toLowerCase().includes('whitenoise') || range_name.toLowerCase().includes('whitenoise');
     const payterms = {};
-    if (rawW !== '' && !isNaN(parseFloat(rawW))) payterms['Weekly'] = parseFloat(rawW);
-    if (rawB !== '' && !isNaN(parseFloat(rawB))) payterms['Biweekly'] = parseFloat(rawB);
-    if (rawM !== '' && !isNaN(parseFloat(rawM))) payterms['Monthly'] = parseFloat(rawM);
+    const parsedW = rawW !== '' && !isNaN(parseFloat(rawW)) ? parseFloat(rawW) : null;
+    const parsedM = rawM !== '' && !isNaN(parseFloat(rawM)) ? parseFloat(rawM) : null;
 
     if (isWn) {
-      const wnRate = payterms['Monthly'] ?? payterms['Biweekly'] ?? payterms['Weekly'] ?? 0;
-      delete payterms['Weekly'];
-      delete payterms['Biweekly'];
+      const wnRate = parsedM !== null ? parsedM : parsedW;
+      if (wnRate === null) {
+        toast('Please enter the Monthly (30/5) {W} payout rate', 'error');
+        return;
+      }
       payterms['Monthly'] = wnRate;
+    } else {
+      const wkRate = parsedW !== null ? parsedW : parsedM;
+      if (wkRate === null) {
+        toast('Please enter the Weekly (7/3) payout rate', 'error');
+        return;
+      }
+      payterms['Weekly'] = wkRate;
     }
 
-    const active_payterms = Object.keys(payterms);
-    if (!active_payterms.length) {
-      toast('Please enter a rate for at least one payterm', 'error');
-      return;
-    }
-
-    const primaryPayterm = isWn ? 'Monthly' : active_payterms[0];
+    const active_payterms = isWn ? ['Monthly'] : ['Weekly'];
+    const primaryPayterm = active_payterms[0];
     const primaryPayout = payterms[primaryPayterm] ?? 0;
 
     const btn = document.getElementById('range-submit-btn');
@@ -2818,7 +2906,6 @@ function openViewRangeModal(r) {
         </h5>
         <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
           <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 0;">Weekly (7/3) · 3d Hold</td><td align="right" class="monospace"><b>${fmtVal(resolved.Weekly)}</b></td></tr>
-          <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 0;">Biweekly (15/3) · 3d Hold</td><td align="right" class="monospace"><b>${fmtVal(resolved.Biweekly)}</b></td></tr>
           <tr><td style="padding:6px 0;">Monthly (30/5) {W} · 5d Hold</td><td align="right" class="monospace"><b>${fmtVal(resolved.Monthly)}</b></td></tr>
         </table>
       </div>
@@ -2832,7 +2919,6 @@ function openViewRangeModal(r) {
 function openEditRangeModal(r) {
   const resolved = zyResolveRangePaytermRates(r);
   const weeklyVal = resolved.Weekly !== null ? resolved.Weekly : '';
-  const biweeklyVal = resolved.Biweekly !== null ? resolved.Biweekly : '';
   const monthlyVal = resolved.Monthly !== null ? resolved.Monthly : '';
   const compCost = r.company_cost !== undefined ? r.company_cost : (r.cost ?? 0);
 
@@ -2889,18 +2975,14 @@ function openEditRangeModal(r) {
           <h5 style="margin:0 0 10px 0;font-size:12px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;padding-bottom:6px;">
             <i class="fas fa-coins"></i> Payterm Rates ($)
           </h5>
-          <div style="font-size:10.5px;margin-bottom:8px;">Fill only the payterm(s) you want active — blank columns show <b>N/A</b>.</div>
+          <div style="font-size:10.5px;margin-bottom:8px;">Standard routes lock to <b>Weekly (7/3)</b> · Whitenoise routes lock to <b>Monthly (30/5) {W}</b>.</div>
           <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
             <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:6px 0;"><b>Weekly (7/3)</b><div style="font-size:10px;">Weekly payout · 3d hold</div></td>
+              <td style="padding:6px 0;"><b>Weekly (7/3)</b><div style="font-size:10px;">Standard routes · 3d hold</div></td>
               <td align="right"><input type="number" id="er-pt-weekly" value="${weeklyVal}" placeholder="N/A" step="0.0001" style="width:85px;height:26px;font-family:monospace;font-size:11px;text-align:right;"></td>
             </tr>
-            <tr style="border-bottom:1px solid #e2e8f0;">
-              <td style="padding:6px 0;"><b>Biweekly (15/3)</b><div style="font-size:10px;">2 weeks payout · 3d hold</div></td>
-              <td align="right"><input type="number" id="er-pt-biweekly" value="${biweeklyVal}" placeholder="N/A" step="0.0001" style="width:85px;height:26px;font-family:monospace;font-size:11px;text-align:right;"></td>
-            </tr>
             <tr>
-              <td style="padding:6px 0;"><b>Monthly (30/5) {W}</b><div style="font-size:10px;">Monthly payout · 5d hold</div></td>
+              <td style="padding:6px 0;"><b>Monthly (30/5) {W}</b><div style="font-size:10px;">Whitenoise routes · 5d hold</div></td>
               <td align="right"><input type="number" id="er-pt-monthly" value="${monthlyVal}" placeholder="N/A" step="0.0001" style="width:85px;height:26px;font-family:monospace;font-size:11px;text-align:right;"></td>
             </tr>
           </table>
@@ -2920,32 +3002,34 @@ async function submitEditRange(event, rangeId) {
   try {
     const range_name = document.getElementById('er-name').value.trim();
     const providerVal = document.getElementById('er-provider').value.trim() || 'Manual';
-    const isWn = providerVal.toLowerCase().includes('whitenoise');
+    const isWn = providerVal.toLowerCase().includes('whitenoise') || range_name.toLowerCase().includes('whitenoise');
     const companyCost = parseFloat(document.getElementById('er-company-cost').value) || 0;
 
     const rawW = (document.getElementById('er-pt-weekly')?.value ?? '').trim();
-    const rawB = (document.getElementById('er-pt-biweekly')?.value ?? '').trim();
     const rawM = (document.getElementById('er-pt-monthly')?.value ?? '').trim();
 
+    const parsedW = rawW !== '' && !isNaN(parseFloat(rawW)) ? parseFloat(rawW) : null;
+    const parsedM = rawM !== '' && !isNaN(parseFloat(rawM)) ? parseFloat(rawM) : null;
     const payterms = {};
-    if (rawW !== '' && !isNaN(parseFloat(rawW))) payterms['Weekly'] = parseFloat(rawW);
-    if (rawB !== '' && !isNaN(parseFloat(rawB))) payterms['Biweekly'] = parseFloat(rawB);
-    if (rawM !== '' && !isNaN(parseFloat(rawM))) payterms['Monthly'] = parseFloat(rawM);
 
     if (isWn) {
-      const wnRate = payterms['Monthly'] ?? payterms['Biweekly'] ?? payterms['Weekly'] ?? 0;
-      delete payterms['Weekly'];
-      delete payterms['Biweekly'];
+      const wnRate = parsedM !== null ? parsedM : parsedW;
+      if (wnRate === null) {
+        toast('Please enter the Monthly (30/5) {W} payout rate', 'error');
+        return;
+      }
       payterms['Monthly'] = wnRate;
+    } else {
+      const wkRate = parsedW !== null ? parsedW : parsedM;
+      if (wkRate === null) {
+        toast('Please enter the Weekly (7/3) payout rate', 'error');
+        return;
+      }
+      payterms['Weekly'] = wkRate;
     }
 
-    const active_payterms = Object.keys(payterms);
-    if (!active_payterms.length) {
-      toast('Please enter a rate for at least one payterm', 'error');
-      return;
-    }
-
-    const primaryPayterm = isWn ? 'Monthly' : active_payterms[0];
+    const active_payterms = isWn ? ['Monthly'] : ['Weekly'];
+    const primaryPayterm = active_payterms[0];
     const primaryPayout = payterms[primaryPayterm] ?? 0;
 
     const btn = document.getElementById('er-submit-btn');
@@ -3051,7 +3135,6 @@ function renderUploadTabContent() {
             <label class="form-label">Payment Term *</label>
             <select id="nr-term" onchange="toggleNrTermRate()">
               <option value="Weekly" selected>Weekly (7/3) — 3d Hold</option>
-              <option value="Biweekly">Biweekly (15/3) — 3d Hold</option>
               <option value="Monthly">Monthly (30/5) {W} — 5d Hold</option>
             </select>
           </div>
@@ -3098,7 +3181,6 @@ function renderUploadTabContent() {
           <label class="form-label">Payment Term *</label>
           <select id="bri-term" onchange="toggleBriTermRate()">
             <option value="Weekly" selected>Weekly (7/3) — 3d Hold</option>
-            <option value="Biweekly">Biweekly (15/3) — 3d Hold</option>
             <option value="Monthly">Monthly (30/5) {W} — 5d Hold</option>
           </select>
         </div>
@@ -3143,14 +3225,14 @@ function toggleNewRangeFields() {
 function toggleNrTermRate() {
   const term = document.getElementById('nr-term')?.value || 'Weekly';
   const label = document.getElementById('nr-term-rate-label');
-  const title = term === 'Monthly' ? 'Monthly (30/5) {W}' : (term === 'Biweekly' ? 'Biweekly (15/3)' : 'Weekly (7/3)');
+  const title = term === 'Monthly' ? 'Monthly (30/5) {W}' : 'Weekly (7/3)';
   if (label) label.textContent = `${title} Payment ($) *`;
 }
 
 function toggleBriTermRate() {
   const term = document.getElementById('bri-term')?.value || 'Weekly';
   const label = document.getElementById('bri-term-rate-label');
-  const title = term === 'Monthly' ? 'Monthly (30/5) {W}' : (term === 'Biweekly' ? 'Biweekly (15/3)' : 'Weekly (7/3)');
+  const title = term === 'Monthly' ? 'Monthly (30/5) {W}' : 'Weekly (7/3)';
   if (label) label.textContent = `${title} Payment ($) *`;
 }
 
@@ -3187,7 +3269,7 @@ async function submitImportToRange() {
       prefix: document.getElementById('nr-prefix')?.value.trim() || '',
       cost: document.getElementById('nr-cost')?.value || 0,
       payterm: term,
-      payout_schedule: term === 'Monthly' ? 'monthly30_5' : (term === 'Biweekly' ? 'biweekly15_3' : 'weekly7_3'),
+      payout_schedule: term === 'Monthly' ? 'monthly30_5' : 'weekly7_3',
       payout: rate,
       otp_limit: document.getElementById('nr-otp-limit')?.value || 0
     };
@@ -3261,7 +3343,7 @@ async function submitBulkRangeImportFile(file) {
           ✅ Created ${d.ranges_created} range(s), imported ${d.numbers_imported} number(s).
         </div>
         ${buildTable(['Range', 'Country', 'Provider', 'Cost', 'Term', 'Payout'],
-          d.ranges.map(r => [r.name, r.country, r.provider, '$' + r.cost, r.payterm || (r.payout_schedule === 'monthly30_5' ? 'Monthly (30/5) {W}' : (r.payout_schedule === 'biweekly15_3' ? 'Biweekly (15/3)' : 'Weekly (7/3)')), '$' + r.payout]))}
+          d.ranges.map(r => [r.name, r.country, r.provider, '$' + r.cost, r.payterm || (r.payout_schedule === 'monthly30_5' ? 'Monthly (30/5) {W}' : 'Weekly (7/3)'), '$' + r.payout]))}
       `;
     }
     toast('Bulk import complete', 'success');
@@ -4647,7 +4729,7 @@ async function renderAdminAgents(page = 1) {
           ['#', 'Username', 'Full Name', 'Balance', 'Clients', 'Numbers', 'Today OTP', 'Commission', 'Status', 'Actions'],
           (data?.data || []).map((a, idx) => [
             `<strong class="monospace">#${(page - 1) * 25 + idx + 1}</strong>`,
-            `<strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}`,
+            `<strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}`,
             escapeHtml(a.full_name || '—'),
             `<span class="text-success fw-600">$${zyFmtMoney((a.balance || 0), 2)}</span>`,
             a.clients_count || 0,
@@ -4658,7 +4740,7 @@ async function renderAdminAgents(page = 1) {
             `<div style="display:inline-flex;gap:4px;align-items:center;">
               <button class="btn btn-outline btn-sm" onclick="openViewUserModal(${Number(a.id)},'agent')" title="View Agent Details"><i class="fas fa-eye"></i></button>
               <button class="btn btn-outline btn-sm" onclick="openEditAgentModal(${Number(a.id)})" title="Edit Agent"><i class="fas fa-pen"></i></button>
-              <button class="btn btn-outline btn-sm" onclick="openResetPasswordModal(${Number(a.id)},'${escapeHtml(a.username)}','agents')" title="Reset Password"><i class="fas fa-key"></i></button>
+              <button class="btn btn-outline btn-sm" onclick="openResetPasswordModal(${Number(a.id)},'${escapeHtml(a.username)}','agents',${Boolean(a.two_fa)})" title="${a.two_fa ? 'Reset Password (Requires Agent 2FA OTP)' : 'Reset Password'}"><i class="fas fa-key"></i></button>
               <button class="btn btn-outline btn-sm" onclick="openAgentBalanceModal(${Number(a.id)},'${escapeHtml(a.username)}',${Number(a.balance) || 0})" title="Adjust Balance"><i class="fas fa-dollar-sign"></i></button>
               <button class="btn btn-${a.status === 'active' ? 'warning' : 'success'} btn-sm" onclick="toggleAgentAdmin(${Number(a.id)},'${escapeHtml(a.status)}')" title="${a.status === 'active' ? 'Suspend' : 'Activate'}"><i class="fas fa-${a.status === 'active' ? 'pause' : 'play'}"></i></button>
               <button class="btn btn-danger btn-sm" onclick="deleteAgentAdmin(${Number(a.id)})" title="Delete"><i class="fas fa-trash"></i></button>
@@ -4761,6 +4843,16 @@ async function openEditAgentModal(id) {
           <div class="form-group"><label class="form-label">Commission %</label><input type="number" value="${Number(agent.commission_rate) || 0}" id="edit-ag-comm" step="0.1" min="0" max="100"></div>
         </div>
         <div class="form-group"><label class="form-label">New Password (optional)</label><input type="password" id="edit-ag-pass" autocomplete="new-password" placeholder="Leave blank to keep current"></div>
+        ${agent.two_fa ? `
+        <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+          <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:6px;">
+            <i class="fas fa-shield-halved"></i> Agent 2FA Protection Active
+          </div>
+          <div style="font-size:11.5px;color:#78350f;margin-bottom:6px;">
+            Changing this Agent's password requires a live 6-digit code from the Agent's Authenticator app.
+          </div>
+          <input type="text" id="edit-ag-2fa-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="Enter 6-digit Agent 2FA OTP (required only if changing password)" style="font-family:monospace;letter-spacing:2px;font-weight:700;">
+        </div>` : ''}
         <div style="background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
           <div style="font-weight:700;font-size:12px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Number Acquisition Override (Optional)</div>
           <div class="form-row">
@@ -4821,6 +4913,16 @@ async function submitEditAgent(event, id) {
   if (pass) {
     if (pass.length < 6) { toast('Password must be at least 6 characters', 'error'); return; }
     payload.password = pass;
+    const otpEl = document.getElementById('edit-ag-2fa-code');
+    if (otpEl) {
+      const code = otpEl.value.trim().replace(/\s+/g, '');
+      if (!/^\d{6}$/.test(code)) {
+        toast("Enter the live 6-digit code from this Agent's Authenticator app to change their password", 'error');
+        otpEl.focus();
+        return;
+      }
+      payload.two_fa_code = code;
+    }
   }
   const btn = document.getElementById('edit-ag-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Saving...'; }
@@ -5584,12 +5686,22 @@ async function openViewUserModal(id, role = 'user') {
   }
 }
 
-function openResetPasswordModal(id, username, table = 'users') {
+function openResetPasswordModal(id, username, table = 'users', has2fa = false) {
+  const requireAgentOtp = table === 'agents' && Boolean(has2fa);
   openModal(`Reset Password — ${escapeHtml(username)}`, `
-    <form id="reset-pwd-form" onsubmit="submitResetPassword(event, ${id}, '${table}')" autocomplete="off">
+    <form id="reset-pwd-form" onsubmit="submitResetPassword(event, ${id}, '${table}', ${requireAgentOtp})" autocomplete="off">
       <div style="font-size:13px;color:#64748b;margin-bottom:14px;">
         Set a new secure password for <strong>${escapeHtml(username)}</strong>.
       </div>
+      ${requireAgentOtp ? `
+      <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+        <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:4px;">
+          <i class="fas fa-shield-halved"></i> Agent 2FA Protection Active
+        </div>
+        <div style="font-size:11.5px;color:#78350f;">
+          This Agent has 2FA enabled. Password cannot be changed without a live 6-digit code from the Agent's Authenticator app.
+        </div>
+      </div>` : ''}
       <div class="form-group">
         <label class="form-label">New Password *</label>
         <input type="password" id="rp-pwd" placeholder="Minimum 6 characters" minlength="6" required autocomplete="new-password">
@@ -5598,6 +5710,11 @@ function openResetPasswordModal(id, username, table = 'users') {
         <label class="form-label">Confirm Password *</label>
         <input type="password" id="rp-pwd-confirm" placeholder="Re-enter password" minlength="6" required autocomplete="new-password">
       </div>
+      ${requireAgentOtp ? `
+      <div class="form-group">
+        <label class="form-label">Agent 2FA OTP Code (6 digits) *</label>
+        <input type="text" id="rp-2fa-code" inputmode="numeric" maxlength="6" placeholder="000000" required autocomplete="one-time-code" style="font-family:monospace;letter-spacing:3px;font-weight:700;">
+      </div>` : ''}
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
         <button type="submit" class="btn btn-primary" id="rp-submit-btn"><i class="fas fa-key"></i> Update Password</button>
@@ -5606,12 +5723,22 @@ function openResetPasswordModal(id, username, table = 'users') {
   `);
 }
 
-async function submitResetPassword(event, id, table = 'users') {
+async function submitResetPassword(event, id, table = 'users', requireAgentOtp = false) {
   event.preventDefault();
   const pwd = document.getElementById('rp-pwd')?.value || '';
   const pwd2 = document.getElementById('rp-pwd-confirm')?.value || '';
   if (!pwd || pwd.length < 6) { toast('Password must be at least 6 characters', 'error'); return; }
   if (pwd !== pwd2) { toast('Passwords do not match', 'error'); return; }
+
+  const body = { password: pwd };
+  if (requireAgentOtp || document.getElementById('rp-2fa-code')) {
+    const code = (document.getElementById('rp-2fa-code')?.value || '').trim().replace(/\s+/g, '');
+    if (!/^\d{6}$/.test(code)) {
+      toast("Enter the live 6-digit code from this Agent's Authenticator app", 'error');
+      return;
+    }
+    body.two_fa_code = code;
+  }
 
   const btn = document.getElementById('rp-submit-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Updating...'; }
@@ -5619,7 +5746,7 @@ async function submitResetPassword(event, id, table = 'users') {
   try {
     const res = await apiFetch(`/api/${table}/${id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ password: pwd })
+      body: JSON.stringify(body)
     });
     if (res && (res.id || res.success || !res.error)) {
       closeModal();
@@ -6795,8 +6922,8 @@ async function renderGeneralSettings() {
             </div>
             <div class="form-group">
               <label class="form-label" style="font-weight:600;"><i class="fas fa-calendar-alt"></i> Master Payterm List (Owner Only)</label>
-              <input type="text" value="${escapeHtml((data.payterms && data.payterms.length ? data.payterms : ['Weekly', 'Biweekly', 'Monthly']).join(', '))}" id="s-payterms" placeholder="Weekly, Biweekly, Monthly">
-              <div class="text-muted fs-11" style="margin-top:4px;">Active schedules: Weekly (7/3 · 3d hold), Biweekly (15/3 · 3d hold), Monthly (30/5 {W} · 5d hold). Server rejects unknown strings.</div>
+              <input type="text" value="${escapeHtml((data.payterms && data.payterms.length ? data.payterms.filter(p => !String(p).toLowerCase().includes('biweek')) : ['Weekly', 'Monthly']).join(', '))}" id="s-payterms" placeholder="Weekly, Monthly">
+              <div class="text-muted fs-11" style="margin-top:4px;">Active schedules: Weekly (7/3 · 3d hold) for standard routes, Monthly (30/5 {W} · 5d hold) for Whitenoise routes.</div>
             </div>
             <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:12px 14px;margin-top:14px;">
               <div style="font-size:12.5px;font-weight:700;color:#312e81;margin-bottom:8px;">

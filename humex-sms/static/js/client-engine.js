@@ -15,16 +15,16 @@ let CLIENT_USER = {};
       if (sessionStorage.getItem('admin_logged_in') !== '1') {
         try {
           if (window.top && window.top !== window) {
-            window.top.location.href = '/login';
+            window.top.location.replace('/ints/login');
             return;
           }
         } catch (e) {}
-        window.location.href = '/login';
+        window.location.replace('/ints/login');
         return;
       }
       const checkU = JSON.parse(sessionStorage.getItem('admin_user') || '{}');
       if (!['Client'].includes(checkU.role)) {
-        window.location.href = '/login';
+        window.location.replace('/ints/login');
         return;
       }
     }
@@ -39,11 +39,11 @@ let CLIENT_USER = {};
     console.error('Auth init error:', err);
     try {
       if (window.top && window.top !== window) {
-        window.top.location.href = '/login';
+        window.top.location.replace('/ints/login');
         return;
       }
     } catch (e) {}
-    window.location.href = '/login';
+    window.location.replace('/ints/login');
   }
 })();
 
@@ -346,15 +346,15 @@ function doLogout() {
     sessionStorage.clear();
   } catch (e) {}
   try {
-    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include', keepalive: true }).catch(() => {});
   } catch (e) {}
   try {
     if (window.top && window.top !== window) {
-      window.top.location.href = '/login';
+      window.top.location.replace('/ints/login');
       return;
     }
   } catch (e) {}
-  window.location.href = '/login';
+  window.location.replace('/ints/login');
 }
 
 // ── Router ────────────────────────────────────────────────────────
@@ -394,6 +394,10 @@ function resetIdleTimer() {
   _idleTimer = setTimeout(autoLogoutIdle, IDLE_LIMIT_MS);
 }
 function autoLogoutIdle() {
+  if (window.HumexAuth && typeof window.HumexAuth.clearSession === 'function') {
+    window.HumexAuth.clearSession();
+    return;
+  }
   try {
     sessionStorage.removeItem('admin_logged_in');
     sessionStorage.removeItem('admin_user');
@@ -401,11 +405,11 @@ function autoLogoutIdle() {
   } catch (e) {}
   try {
     if (window.top && window.top !== window) {
-      window.top.location.href = '/login';
+      window.top.location.replace('/ints/login');
       return;
     }
   } catch (e) {}
-  window.location.href = '/login';
+  window.location.replace('/ints/login');
 }
 ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'].forEach(evt => {
   document.addEventListener(evt, resetIdleTimer, { passive: true });

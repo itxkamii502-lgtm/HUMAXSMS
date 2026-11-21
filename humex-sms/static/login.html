@@ -537,8 +537,27 @@ async function generateCaptcha() {
 
 const reloadBtn = document.getElementById('reloadCaptcha');
 if (reloadBtn) reloadBtn.addEventListener('click', () => generateCaptcha());
+(function cleanLoginLandingState() {
+  try {
+    ['admin_current_page', 'agent_current_page', 'client_current_page'].forEach(k => {
+      sessionStorage.removeItem(k);
+      localStorage.removeItem(k);
+    });
+    if (window.location.pathname !== '/ints/login' || window.location.search || window.location.hash) {
+      window.history.replaceState(null, '', '/ints/login');
+    }
+  } catch (_) {}
+})();
 generateCaptcha();
-window.addEventListener('pageshow', (e) => { if (e.persisted) generateCaptcha(); });
+window.addEventListener('pageshow', (e) => {
+  try {
+    ['admin_current_page', 'agent_current_page', 'client_current_page'].forEach(k => {
+      sessionStorage.removeItem(k);
+      localStorage.removeItem(k);
+    });
+  } catch (_) {}
+  if (e.persisted) generateCaptcha();
+});
 setInterval(() => {
   if (document.visibilityState !== 'hidden') generateCaptcha();
 }, 8 * 60 * 1000);

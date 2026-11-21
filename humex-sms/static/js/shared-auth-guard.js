@@ -118,6 +118,12 @@
       delete cleanUser.token;
       const userJson = JSON.stringify(cleanUser);
 
+      // Reset any previous session page pointer so fresh login ALWAYS opens Dashboard cleanly
+      ['admin_current_page', 'agent_current_page', 'client_current_page'].forEach(function (k) {
+        try { sessionStorage.removeItem(k); } catch (_) {}
+        try { localStorage.removeItem(k); } catch (_) {}
+      });
+
       // Tab-isolated session metadata
       sessionStorage.setItem('admin_logged_in', '1');
       sessionStorage.setItem('admin_user', userJson);
@@ -153,21 +159,40 @@
     try {
       fetch('/api/auth/logout', {
         method: 'POST',
-        credentials: 'include'
+        credentials: 'include',
+        keepalive: true
       }).catch(function () {});
     } catch (e) {}
     try {
       if (window.top && window.top !== window) {
-        window.top.location.replace('/login');
+        window.top.location.replace('/ints/login');
         return;
       }
     } catch (e) {}
-    window.location.replace('/login');
+    window.location.replace('/ints/login');
+  }
+
+  let _pageshowGuardBound = false;
+  function bindBfcacheGuard() {
+    if (_pageshowGuardBound) return;
+    _pageshowGuardBound = true;
+    window.addEventListener('pageshow', function (e) {
+      if (!isLoggedIn() || (e && e.persisted && !isLoggedIn())) {
+        try {
+          if (window.top && window.top !== window) {
+            window.top.location.replace('/ints/login');
+            return;
+          }
+        } catch (_) {}
+        window.location.replace('/ints/login');
+      }
+    });
   }
 
   // Strict page guard: ensures current page is allowed for the active role
   function enforce(allowedRoles) {
     syncSession();
+    bindBfcacheGuard();
 
     if (!isLoggedIn()) {
       window.__AUTH_BLOCKED__ = true;
@@ -206,7 +231,7 @@
   function initCrossTabWatcher(allowedRoles) {
     window.addEventListener('storage', function (e) {
       if (e.key === 'auth_logout_timestamp') {
-        window.location.replace('/login');
+        window.location.replace('/ints/login');
       }
     });
   }

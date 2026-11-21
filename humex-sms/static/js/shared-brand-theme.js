@@ -972,7 +972,7 @@
       return;
     }
     const routes = { owner: '/', agent: '/agent', client: '/client' };
-    window.location.href = routes[role] || '/';
+    window.location.replace(routes[role] || '/');
   };
 
   document.addEventListener('keydown', (e) => {

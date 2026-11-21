@@ -245,16 +245,12 @@
       // 2. Delegate to real page renderer
       prev(page);
 
-      // 3. Sync browser history & <title> without full page reload
+      // 3. Sync canonical URL & <title> in-place (replaceState prevents browser Back-button history traps on logout/login)
       const label = resolveLabel(page);
       if (!isNavigatingHistory) {
         try {
           const targetUrl = urlFor(page);
-          if (location.pathname !== targetUrl) {
-            history.pushState({ page, role }, '', targetUrl);
-          } else {
-            history.replaceState({ page, role }, '', targetUrl);
-          }
+          history.replaceState({ page, role }, '', targetUrl);
           document.title = formatTitle(page);
         } catch (e) {}
       } else {

@@ -920,6 +920,8 @@ async function renderOwnerCdr2() {
       </div>
     </div>
 
+    <div id="cdr2-owner-portal-bar" style="margin-bottom:10px;"></div>
+
     <div style="display:flex;gap:0;border-bottom:1px solid var(--border,#e2e8f0);margin-bottom:10px;">
       <button type="button" id="cdr2-tab-stats" onclick="zyOwnerCdr2SwitchTab('stats')"
         style="padding:7px 14px;font-size:12.5px;font-weight:600;border:none;background:transparent;cursor:pointer;border-bottom:2px solid #2563eb;color:#2563eb;">
@@ -1064,10 +1066,160 @@ async function renderOwnerCdr2() {
     console.warn('Error populating CDR 2 filters:', err);
   }
 
+  zyLoadOwnerWhitenoisePortalBar();
   zyLoadWhitenoiseCoverageStrip(today.slice(0, 7));
   renderOwnerCdr2Load(1);
 }
 window.renderOwnerCdr2 = renderOwnerCdr2;
+
+window._zyOwnerWnPortalCache = window._zyOwnerWnPortalCache || null;
+window._zyOwnerWnPwdVisible = false;
+
+window.zyLoadOwnerWhitenoisePortalBar = async function () {
+  const host = document.getElementById('cdr2-owner-portal-bar');
+  if (!host) return;
+  try {
+    const res = await apiFetch('/api/owner/whitenoise-portal', { silent: true });
+    const portal = (res && res.portal) || { url: '', username: '', password: '', notes: '' };
+    window._zyOwnerWnPortalCache = portal;
+    window.zyRenderOwnerWhitenoisePortalBar(portal);
+  } catch (_) {
+    host.innerHTML = '';
+  }
+};
+
+window.zyRenderOwnerWhitenoisePortalBar = function (portal) {
+  const host = document.getElementById('cdr2-owner-portal-bar');
+  if (!host) return;
+  const p = portal || window._zyOwnerWnPortalCache || {};
+  const hasUrl = Boolean(p.url && /^https?:\/\//i.test(p.url));
+  const hasUser = Boolean(p.username);
+  const hasPwd = Boolean(p.password);
+  const configured = hasUrl || hasUser || hasPwd;
+  const pwdDisplay = hasPwd ? (window._zyOwnerWnPwdVisible ? zyEsc(p.password) : '••••••••••') : '<span style="opacity:.6;">Not set</span>';
+
+  host.innerHTML = `
+    <div class="zy-wn-portal-bar">
+      <div class="zy-wn-portal-head">
+        <div class="zy-wn-portal-title">
+          <i class="fas fa-key" style="color:#2563eb;"></i>
+          <span>Original Whitenoise Portal Access</span>
+          <span class="zy-wn-portal-badge">Owner Only</span>
+        </div>
+        <button type="button" class="btn btn-outline btn-sm" onclick="window.zyOpenOwnerWnPortalModal()">
+          <i class="fas fa-pen-to-square"></i> ${configured ? 'Edit Credentials' : 'Add Portal Credentials'}
+        </button>
+      </div>
+      ${configured ? `
+        <div class="zy-wn-portal-grid">
+          <div class="zy-wn-portal-field">
+            <span class="zy-wn-portal-lbl">Portal Link</span>
+            <div class="zy-wn-portal-val-row">
+              ${hasUrl
+                ? `<a href="${zyEsc(p.url)}" target="_blank" rel="noopener noreferrer" class="zy-wn-portal-link" title="${zyEsc(p.url)}"><i class="fas fa-arrow-up-right-from-square"></i> ${zyEsc(p.url)}</a>`
+                : `<span class="zy-wn-portal-empty">Not set</span>`}
+              ${hasUrl ? `<button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((window._zyOwnerWnPortalCache||{}).url, 'Portal link')" title="Copy Portal Link"><i class="far fa-copy"></i> Copy</button>` : ''}
+            </div>
+          </div>
+
+          <div class="zy-wn-portal-field">
+            <span class="zy-wn-portal-lbl">Username</span>
+            <div class="zy-wn-portal-val-row">
+              <span class="zy-wn-portal-mono">${hasUser ? zyEsc(p.username) : '<span style="opacity:.6;">Not set</span>'}</span>
+              ${hasUser ? `<button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((window._zyOwnerWnPortalCache||{}).username, 'Username')" title="Copy Username"><i class="far fa-copy"></i> Copy</button>` : ''}
+            </div>
+          </div>
+
+          <div class="zy-wn-portal-field">
+            <span class="zy-wn-portal-lbl">Password</span>
+            <div class="zy-wn-portal-val-row">
+              <span class="zy-wn-portal-mono" id="zy-wn-portal-pwd-val">${pwdDisplay}</span>
+              ${hasPwd ? `
+                <button type="button" class="zy-wn-copy-btn" onclick="window._zyOwnerWnPwdVisible=!window._zyOwnerWnPwdVisible;window.zyRenderOwnerWhitenoisePortalBar();" title="${window._zyOwnerWnPwdVisible ? 'Hide password' : 'Show password'}">
+                  <i class="far ${window._zyOwnerWnPwdVisible ? 'fa-eye-slash' : 'fa-eye'}"></i>
+                </button>
+                <button type="button" class="zy-wn-copy-btn is-accent" onclick="window.zyCopyTextSafe((window._zyOwnerWnPortalCache||{}).password, 'Password')" title="1-Click Copy Password">
+                  <i class="far fa-copy"></i> Copy
+                </button>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+      ` : `
+        <div class="zy-wn-portal-empty-hint">
+          Save your original Whitenoise portal link, username, and password here for instant 1-click copy &amp; quick login.
+        </div>
+      `}
+    </div>
+  `;
+};
+
+window.zyOpenOwnerWnPortalModal = function () {
+  const p = window._zyOwnerWnPortalCache || { url: '', username: '', password: '', notes: '' };
+  const bodyHtml = `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="font-size:12.5px;color:var(--text-muted,#64748b);line-height:1.5;">
+        Store your original Whitenoise portal URL and login details for quick 1-click copy from CDR 2. This is strictly visible only to Owner.
+      </div>
+      <div>
+        <label class="form-label" for="wn-portal-url">Original Portal Link (URL)</label>
+        <input type="url" id="wn-portal-url" class="form-input" placeholder="https://portal.example.com/login" value="${zyEsc(p.url || '')}">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div>
+          <label class="form-label" for="wn-portal-user">Username / Email</label>
+          <input type="text" id="wn-portal-user" class="form-input" autocomplete="off" placeholder="Enter username" value="${zyEsc(p.username || '')}">
+        </div>
+        <div>
+          <label class="form-label" for="wn-portal-pass">Password</label>
+          <input type="text" id="wn-portal-pass" class="form-input" autocomplete="off" placeholder="Enter password" value="${zyEsc(p.password || '')}">
+        </div>
+      </div>
+      <div id="wn-portal-modal-alert" class="zy-modal-alert" style="display:none;"></div>
+    </div>
+  `;
+  const footHtml = `
+    <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    <button type="button" class="btn btn-primary" id="btn-save-wn-portal" onclick="window.zySaveOwnerWnPortal()">
+      <i class="fas fa-save"></i> Save Credentials
+    </button>
+  `;
+  if (typeof zyModal === 'function') {
+    zyModal('Original Whitenoise Portal Credentials', bodyHtml, footHtml);
+  }
+};
+
+window.zySaveOwnerWnPortal = async function () {
+  const btn = document.getElementById('btn-save-wn-portal');
+  const url = (document.getElementById('wn-portal-url')?.value || '').trim();
+  const username = (document.getElementById('wn-portal-user')?.value || '').trim();
+  const password = (document.getElementById('wn-portal-pass')?.value || '');
+  if (url && !/^https?:\/\//i.test(url)) {
+    if (typeof window.zySetModalAlert === 'function') {
+      window.zySetModalAlert('wn-portal-modal-alert', 'Portal link must start with https:// or http://', 'error');
+    }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+  try {
+    const res = await apiFetch('/api/owner/whitenoise-portal', {
+      method: 'PUT',
+      body: JSON.stringify({ url, username, password })
+    });
+    window._zyOwnerWnPortalCache = (res && res.portal) || { url, username, password };
+    window.zyRenderOwnerWhitenoisePortalBar(window._zyOwnerWnPortalCache);
+    if (typeof closeModal === 'function') closeModal();
+    if (typeof toast === 'function') toast('Portal credentials saved', 'success');
+  } catch (err) {
+    const msg = typeof window.zyHumanizeError === 'function' ? window.zyHumanizeError(err) : (err.message || 'Failed to save credentials');
+    if (typeof window.zySetModalAlert === 'function') {
+      window.zySetModalAlert('wn-portal-modal-alert', msg, 'error');
+    } else if (typeof toast === 'function') {
+      toast(msg, 'error');
+    }
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Credentials'; }
+  }
+};
 
 window.zyLoadWhitenoiseCoverageStrip = async function (monthYm) {
   const host = document.getElementById('cdr2-coverage-strip');

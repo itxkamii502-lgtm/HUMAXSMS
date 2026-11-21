@@ -6645,7 +6645,7 @@ function normRole(r) { r = String(r || '').toLowerCase(); return r === 'admin' ?
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // First matching rule wins. Roles are lower-case; 'owner' includes the legacy 'admin'.
 const API_RULES = [
-  { p: /^\/(backup|login-panels|cr-api-connections|whitenoise-connections|whitenoise-excel|firewall)(\/|$)/, roles: ['owner'] },
+  { p: /^\/(backup|login-panels|cr-api-connections|whitenoise-connections|whitenoise-excel|firewall|owner)(\/|$)/, roles: ['owner'] },
   { p: /^\/(reports|dashboard|cli-routes)(\/|$)/, roles: ['owner'] },
   { p: /^\/numbers\/(upload|import-to-range|bulk-range-import|bulk-delete-many|download|test|blacklist)(\/.*)?$/, roles: ['owner'] },
   { p: /^\/numbers\/(bulk-allocate|allocation-history)(\/.*)?$/, roles: ['owner', 'agent'] },
@@ -7258,6 +7258,8 @@ app.get('/api/auth/me', (req, res) => {
     theme_key: validUserThemeKey,
     theme_mode: (dbUser.theme_mode === 'dark' || dbUser.theme_mode === 'light' || dbUser.theme_mode === 'system') ? dbUser.theme_mode : '',
     whitenoise_access: wnAccess,
+    cdr2_terms_accepted: Boolean(dbUser.cdr2_terms_accepted_at),
+    cdr2_terms_accepted_at: dbUser.cdr2_terms_accepted_at || null,
     permissions: sessionUser.role === 'Owner' ? ['all'] : [sessionUser.role.toLowerCase()]
   });
 });
@@ -16319,6 +16321,162 @@ app.get('/api/cdr2/export', requireAuth, (req, res) => {
   return handleSmsLogsQuery(req, res, { whitenoiseOnly: true });
 });
 
+const CDR2_TERMS_VERSION = '1.0';
+const PKT_OFFSET_MS_SHARED = 5 * 60 * 60 * 1000;
+
+function getPktDateYmd(offsetDays = 0, nowDate = new Date()) {
+  const pkt = new Date(nowDate.getTime() + PKT_OFFSET_MS_SHARED + offsetDays * 86400000);
+  const y = pkt.getUTCFullYear();
+  const m = String(pkt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(pkt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getCdr2UploadStatus(nowDate = new Date()) {
+  const todayPkt = getPktDateYmd(0, nowDate);
+  const yesterdayPkt = getPktDateYmd(-1, nowDate);
+  const stats = readDb('whitenoise_daily_stats') || [];
+  let latestDate = '';
+  let yesterdayUploaded = false;
+  let yesterdaySmsTotal = 0;
+  for (const row of stats) {
+    if (!row || row.rolled_back) continue;
+    const dt = String(row.date || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) continue;
+    if (!latestDate || dt > latestDate) latestDate = dt;
+    if (dt === yesterdayPkt) {
+      yesterdayUploaded = true;
+      yesterdaySmsTotal += Number(row.sms_count || 0);
+    }
+  }
+  const pktNow = new Date(nowDate.getTime() + PKT_OFFSET_MS_SHARED);
+  const nextNoonPktMs = Date.UTC(
+    pktNow.getUTCFullYear(),
+    pktNow.getUTCMonth(),
+    pktNow.getUTCDate(),
+    12, 0, 0
+  ) - PKT_OFFSET_MS_SHARED;
+  const secondsUntilNoon = Math.max(0, Math.floor((nextNoonPktMs - nowDate.getTime()) / 1000));
+  return {
+    today_pkt: todayPkt,
+    yesterday_pkt: yesterdayPkt,
+    yesterday_uploaded: yesterdayUploaded,
+    yesterday_sms_total: yesterdaySmsTotal,
+    latest_uploaded_date: latestDate || null,
+    upload_time_label: '12:00 PM PKT',
+    upload_hour_pkt: 12,
+    next_upload_iso: new Date(nextNoonPktMs).toISOString(),
+    seconds_until_noon: secondsUntilNoon,
+    is_past_noon_pkt: pktNow.getUTCHours() >= 12
+  };
+}
+
+// GET /api/cdr2/status — Daily 12:00 PM PKT report upload status + user's first-time terms state (privacy-safe)
+app.get('/api/cdr2/status', requireAuth, (req, res) => {
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  const found = findUserAnywhere(req.sessionUser.username);
+  const dbUser = (found && found.user) || {};
+  const isOwner = normRole(req.sessionUser.role) === 'owner';
+  const uploadStatus = getCdr2UploadStatus();
+  res.json({
+    success: true,
+    ...uploadStatus,
+    terms_version: CDR2_TERMS_VERSION,
+    terms_accepted: isOwner ? true : Boolean(dbUser.cdr2_terms_accepted_at),
+    terms_accepted_at: dbUser.cdr2_terms_accepted_at || null
+  });
+});
+
+// POST /api/cdr2/accept-terms — Persist first-time Monthly Route Terms & Conditions acceptance for current user
+app.post('/api/cdr2/accept-terms', requireAuth, (req, res) => {
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  const accepted = Boolean(req.body && req.body.accepted);
+  if (!accepted) {
+    return res.status(400).json({ error: 'Please confirm that you accept the Monthly Route Terms & Conditions.' });
+  }
+  const found = findUserAnywhere(req.sessionUser.username);
+  if (!found || !found.user || !found.table) {
+    return res.status(404).json({ error: 'Account record not found.' });
+  }
+  const nowIso = new Date().toISOString();
+  updateUserRecord(found.table, found.user.id, {
+    cdr2_terms_accepted_at: nowIso,
+    cdr2_terms_version: CDR2_TERMS_VERSION
+  });
+  logAudit(req.sessionUser.username, 'CDR 2 Terms Accepted', `Accepted Monthly Route Terms v${CDR2_TERMS_VERSION}`, 'CDR2');
+  res.json({
+    success: true,
+    terms_accepted: true,
+    terms_accepted_at: nowIso,
+    terms_version: CDR2_TERMS_VERSION
+  });
+});
+
+// ── Owner-Only Original Whitenoise Portal Quick Credentials ────────────────
+function sanitizePortalHttpUrl(rawUrl) {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+app.get('/api/owner/whitenoise-portal', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const settings = readDb('settings') || {};
+  const portal = (settings && typeof settings.whitenoise_portal_access === 'object' && settings.whitenoise_portal_access)
+    ? settings.whitenoise_portal_access
+    : {};
+  res.json({
+    success: true,
+    portal: {
+      url: String(portal.url || ''),
+      username: String(portal.username || ''),
+      password: String(portal.password || ''),
+      notes: String(portal.notes || ''),
+      updated_at: portal.updated_at || null
+    }
+  });
+});
+
+app.put('/api/owner/whitenoise-portal', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner permissions required.' });
+  }
+  const body = req.body || {};
+  const rawUrl = String(body.url || '').trim();
+  const safeUrl = sanitizePortalHttpUrl(rawUrl);
+  if (rawUrl && safeUrl === null) {
+    return res.status(400).json({ error: 'Please enter a valid portal URL starting with https:// or http://.' });
+  }
+  const username = String(body.username || '').trim().slice(0, 160);
+  const password = String(body.password || '').slice(0, 200);
+  const notes = String(body.notes || '').trim().slice(0, 240);
+
+  const settings = readDb('settings') || {};
+  const portalObj = {
+    url: safeUrl || '',
+    username,
+    password,
+    notes,
+    updated_at: new Date().toISOString()
+  };
+  settings.whitenoise_portal_access = portalObj;
+  writeDb('settings', settings);
+  logAudit(req.sessionUser.username, 'Whitenoise Portal Credentials Updated', `Portal URL ${portalObj.url ? 'configured' : 'cleared'}`, 'CDR2');
+  res.json({ success: true, portal: portalObj });
+});
+
 // ── Whitenoise Excel-Only Daily Stats Endpoints (Owner Only) ────────────────
 function pruneWhitenoisePreviewCache() {
   const now = Date.now();
@@ -17889,6 +18047,242 @@ function countUnreadForActor(conv, actorKey, allMessages) {
   return unread;
 }
 
+// ── Live Chat Group Auto Night/Morning Schedule (PKT Asia/Karachi) ─────────
+const DEFAULT_GROUP_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
+const DEFAULT_GROUP_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
+const SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function getPktClockParts(nowDate = new Date()) {
+  const pkt = new Date(nowDate.getTime() + PKT_OFFSET_MS_SHARED);
+  const y = pkt.getUTCFullYear();
+  const mo = pkt.getUTCMonth();
+  const d = pkt.getUTCDate();
+  const hh = pkt.getUTCHours();
+  const mm = pkt.getUTCMinutes();
+  const ss = pkt.getUTCSeconds();
+  const pad = n => String(n).padStart(2, '0');
+  const prev = new Date(pkt.getTime() - 86400000);
+  const next = new Date(pkt.getTime() + 86400000);
+  return {
+    year: y,
+    monthIdx: mo,
+    day: d,
+    ymd: `${y}-${pad(mo + 1)}-${pad(d)}`,
+    prevYmd: `${prev.getUTCFullYear()}-${pad(prev.getUTCMonth() + 1)}-${pad(prev.getUTCDate())}`,
+    nextYmd: `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`,
+    hour: hh,
+    minute: mm,
+    second: ss,
+    minutesOfDay: hh * 60 + mm
+  };
+}
+
+function pktYmdTimeToUtcMs(ymd, timeStr) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  const [hh, mm] = String(timeStr).split(':').map(Number);
+  return Date.UTC(y, m - 1, d, hh, mm, 0) - PKT_OFFSET_MS_SHARED;
+}
+
+function normalizeGroupSchedule(raw, existing = null) {
+  const prev = (existing && typeof existing === 'object') ? existing : {};
+  if (!raw || typeof raw !== 'object') {
+    return {
+      enabled: Boolean(prev.enabled),
+      close_time: SCHEDULE_TIME_RE.test(String(prev.close_time || '')) ? String(prev.close_time) : '23:00',
+      open_time: SCHEDULE_TIME_RE.test(String(prev.open_time || '')) ? String(prev.open_time) : '09:00',
+      close_message: String(prev.close_message || DEFAULT_GROUP_CLOSE_MSG).trim().slice(0, 500) || DEFAULT_GROUP_CLOSE_MSG,
+      open_message: String(prev.open_message || DEFAULT_GROUP_OPEN_MSG).trim().slice(0, 500) || DEFAULT_GROUP_OPEN_MSG,
+      timezone: 'Asia/Karachi',
+      last_close_cycle: prev.last_close_cycle || null,
+      last_open_cycle: prev.last_open_cycle || null
+    };
+  }
+  const enabled = Boolean(raw.enabled);
+  const close_time = String(raw.close_time !== undefined ? raw.close_time : (prev.close_time || '23:00')).trim();
+  const open_time = String(raw.open_time !== undefined ? raw.open_time : (prev.open_time || '09:00')).trim();
+  if (!SCHEDULE_TIME_RE.test(close_time) || !SCHEDULE_TIME_RE.test(open_time)) {
+    return { error: 'Please choose valid Close and Open times (HH:MM format).' };
+  }
+  if (enabled && close_time === open_time) {
+    return { error: 'Close time and Open time cannot be the same.' };
+  }
+  const close_message = String(raw.close_message !== undefined ? raw.close_message : (prev.close_message || DEFAULT_GROUP_CLOSE_MSG)).trim().slice(0, 500) || DEFAULT_GROUP_CLOSE_MSG;
+  const open_message = String(raw.open_message !== undefined ? raw.open_message : (prev.open_message || DEFAULT_GROUP_OPEN_MSG)).trim().slice(0, 500) || DEFAULT_GROUP_OPEN_MSG;
+  return {
+    enabled,
+    close_time,
+    open_time,
+    close_message,
+    open_message,
+    timezone: 'Asia/Karachi',
+    last_close_cycle: prev.last_close_cycle || null,
+    last_open_cycle: prev.last_open_cycle || null
+  };
+}
+
+function evaluateGroupSchedule(schedule, nowDate = new Date()) {
+  const norm = normalizeGroupSchedule(null, schedule);
+  if (!norm.enabled) {
+    return {
+      enabled: false,
+      is_closed: false,
+      close_time: norm.close_time,
+      open_time: norm.open_time,
+      close_message: norm.close_message,
+      open_message: norm.open_message,
+      timezone: 'Asia/Karachi',
+      reopen_at_iso: null,
+      next_close_at_iso: null,
+      remaining_seconds: 0,
+      cycle_key: null
+    };
+  }
+
+  const [ch, cm] = norm.close_time.split(':').map(Number);
+  const [oh, om] = norm.open_time.split(':').map(Number);
+  const closeMin = ch * 60 + cm;
+  const openMin = oh * 60 + om;
+  const clk = getPktClockParts(nowDate);
+  const nowMin = clk.minutesOfDay;
+  const nowMs = nowDate.getTime();
+
+  let isClosed = false;
+  let reopenMs = null;
+  let nextCloseMs = null;
+  let cycleKey = null;
+
+  if (closeMin > openMin) {
+    // Overnight schedule (e.g., 23:00 -> 09:00)
+    if (nowMin >= closeMin) {
+      isClosed = true;
+      cycleKey = `close:${clk.ymd}:${norm.close_time}`;
+      reopenMs = pktYmdTimeToUtcMs(clk.nextYmd, norm.open_time);
+    } else if (nowMin < openMin) {
+      isClosed = true;
+      cycleKey = `close:${clk.prevYmd}:${norm.close_time}`;
+      reopenMs = pktYmdTimeToUtcMs(clk.ymd, norm.open_time);
+    } else {
+      isClosed = false;
+      cycleKey = `open:${clk.ymd}:${norm.open_time}`;
+      nextCloseMs = pktYmdTimeToUtcMs(clk.ymd, norm.close_time);
+    }
+  } else {
+    // Daytime schedule (e.g., 13:00 -> 15:00)
+    if (nowMin >= closeMin && nowMin < openMin) {
+      isClosed = true;
+      cycleKey = `close:${clk.ymd}:${norm.close_time}`;
+      reopenMs = pktYmdTimeToUtcMs(clk.ymd, norm.open_time);
+    } else {
+      isClosed = false;
+      if (nowMin >= openMin) {
+        cycleKey = `open:${clk.ymd}:${norm.open_time}`;
+        nextCloseMs = pktYmdTimeToUtcMs(clk.nextYmd, norm.close_time);
+      } else {
+        cycleKey = `open:${clk.prevYmd}:${norm.open_time}`;
+        nextCloseMs = pktYmdTimeToUtcMs(clk.ymd, norm.close_time);
+      }
+    }
+  }
+
+  return {
+    enabled: true,
+    is_closed: isClosed,
+    close_time: norm.close_time,
+    open_time: norm.open_time,
+    close_message: norm.close_message,
+    open_message: norm.open_message,
+    timezone: 'Asia/Karachi',
+    reopen_at_iso: reopenMs ? new Date(reopenMs).toISOString() : null,
+    next_close_at_iso: nextCloseMs ? new Date(nextCloseMs).toISOString() : null,
+    remaining_seconds: reopenMs ? Math.max(0, Math.floor((reopenMs - nowMs) / 1000)) : 0,
+    cycle_key: cycleKey
+  };
+}
+
+function processGroupSchedulesTick(nowDate = new Date()) {
+  try {
+    const convs = readDb('chat_conversations') || [];
+    if (!convs.length) return false;
+    let allMessages = null;
+    let convsDirty = false;
+    let msgsDirty = false;
+
+    for (const conv of convs) {
+      if (!conv || conv.type !== 'agent_group' || !conv.schedule || !conv.schedule.enabled) continue;
+      const ev = evaluateGroupSchedule(conv.schedule, nowDate);
+      if (!ev.enabled || !ev.cycle_key) continue;
+
+      const shouldPostClose = ev.is_closed && conv.schedule.last_close_cycle !== ev.cycle_key;
+      const shouldPostOpen = !ev.is_closed && conv.schedule.last_open_cycle !== ev.cycle_key;
+      if (!shouldPostClose && !shouldPostOpen) continue;
+
+      if (!allMessages) allMessages = readDb('chat_messages') || [];
+      const agentKey = `agent:${Number(conv.owner_agent_id)}`;
+      const adminSummary = resolveActorSummaryByKey(agentKey) || {
+        key: agentKey,
+        role: 'agent',
+        display_name: 'Group Admin',
+        username: 'Admin'
+      };
+      const nowIso = nowDate.toISOString();
+      const autoType = shouldPostClose ? 'night_close' : 'morning_open';
+      const body = shouldPostClose ? ev.close_message : ev.open_message;
+
+      const msgRecord = {
+        id: nextId(allMessages),
+        conversation_id: Number(conv.id),
+        sender_key: adminSummary.key,
+        sender_role: 'agent',
+        sender_name: adminSummary.display_name || adminSummary.username || 'Group Admin',
+        body,
+        reply_to: null,
+        deleted: false,
+        is_auto_schedule: true,
+        auto_type: autoType,
+        created_at: nowIso
+      };
+      allMessages.push(msgRecord);
+      msgsDirty = true;
+
+      if (shouldPostClose) conv.schedule.last_close_cycle = ev.cycle_key;
+      if (shouldPostOpen) conv.schedule.last_open_cycle = ev.cycle_key;
+
+      if (!conv.read_cursors) conv.read_cursors = {};
+      conv.read_cursors[adminSummary.key] = msgRecord.id;
+      conv.last_message_id = msgRecord.id;
+      conv.last_message_preview = body.slice(0, 120);
+      conv.last_message_sender_key = adminSummary.key;
+      conv.last_message_sender_name = msgRecord.sender_name;
+      conv.last_message_at = nowIso;
+      conv.updated_at = nowIso;
+      convsDirty = true;
+
+      sendChatWsEvent({
+        type: 'chat:message',
+        conversation_id: Number(conv.id),
+        conversation_type: conv.type,
+        conversation_title: conv.title,
+        alert_priority: 'admin_alert',
+        message: msgRecord
+      }, conv.participants || []);
+
+      sendChatWsEvent({
+        type: 'chat:group_updated',
+        conversation_id: Number(conv.id),
+        schedule_changed: true,
+        auto_type: autoType
+      }, conv.participants || []);
+    }
+
+    if (msgsDirty && allMessages) writeDb('chat_messages', allMessages);
+    if (convsDirty) writeDb('chat_conversations', convs);
+    return convsDirty;
+  } catch (err) {
+    console.error('[CHAT-SCHEDULE] Tick error:', err);
+    return false;
+  }
+}
+
 function hydrateConversationForActor(conv, actor, allMessages) {
   const unread = countUnreadForActor(conv, actor.key, allMessages);
   const pinnedMsg = conv.pinned_message_id
@@ -17907,6 +18301,11 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     ? (conv.participants || []).map(k => resolveActorSummaryByKey(k)).filter(Boolean)
     : [];
 
+  const scheduleNorm = conv.type === 'agent_group' ? normalizeGroupSchedule(null, conv.schedule) : null;
+  const scheduleState = conv.type === 'agent_group' ? evaluateGroupSchedule(scheduleNorm) : null;
+  const closedForMember = Boolean(conv.type === 'agent_group' && scheduleState && scheduleState.is_closed && actor.role !== 'agent');
+  const adminOnlyLocked = Boolean(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent');
+
   return {
     id: Number(conv.id),
     type: conv.type,
@@ -17917,8 +18316,18 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     members,
     peer,
     admin_only: Boolean(conv.admin_only),
+    schedule: scheduleNorm ? {
+      enabled: scheduleNorm.enabled,
+      close_time: scheduleNorm.close_time,
+      open_time: scheduleNorm.open_time,
+      close_message: scheduleNorm.close_message,
+      open_message: scheduleNorm.open_message,
+      timezone: scheduleNorm.timezone
+    } : null,
+    schedule_state: scheduleState,
     can_manage: conv.type === 'agent_group' && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id,
-    can_send: !(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent'),
+    can_send: !adminOnlyLocked && !closedForMember,
+    lock_reason: closedForMember ? 'scheduled_closed' : (adminOnlyLocked ? 'admin_only' : null),
     pinned_message_id: pinnedMsg ? Number(pinnedMsg.id) : null,
     pinned_message: pinnedMsg ? {
       id: Number(pinnedMsg.id),
@@ -17945,6 +18354,8 @@ function hydrateConversationForActor(conv, actor, allMessages) {
 app.get('/api/chat/bootstrap', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  processGroupSchedulesTick();
 
   const contacts = getAllowedChatContacts(actor);
   const allConvs = readDb('chat_conversations') || [];
@@ -18031,6 +18442,8 @@ app.get('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
 
+  processGroupSchedulesTick();
+
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
   const conv = convs.find(c => Number(c.id) === convId);
@@ -18076,6 +18489,8 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
 
+  processGroupSchedulesTick();
+
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
   const conv = convs.find(c => Number(c.id) === convId);
@@ -18083,9 +18498,17 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Access denied to this conversation.' });
   }
 
-  // Enforce Admin-Only Group Send Mode
-  if (conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+  // Enforce Admin-Only & Quiet Hours lock
+  if (conv.type === 'agent_group') {
+    if (conv.admin_only && actor.role !== 'agent') {
+      return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+    }
+    const schedState = evaluateGroupSchedule(conv.schedule);
+    if (schedState.enabled && schedState.is_closed && actor.role !== 'agent') {
+      return res.status(403).json({
+        error: `This group is currently closed for scheduled quiet hours and will reopen automatically at ${schedState.open_time} PKT.`
+      });
+    }
   }
 
   const rawBody = String((req.body && req.body.body) || '').trim();
@@ -18190,14 +18613,24 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
 
+  processGroupSchedulesTick();
+
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
   const conv = convs.find(c => Number(c.id) === convId);
   if (!conv || !canAccessConversation(actor, conv)) {
     return res.status(403).json({ error: 'Access denied to this conversation.' });
   }
-  if (conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+  if (conv.type === 'agent_group') {
+    if (conv.admin_only && actor.role !== 'agent') {
+      return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
+    }
+    const schedState = evaluateGroupSchedule(conv.schedule);
+    if (schedState.enabled && schedState.is_closed && actor.role !== 'agent') {
+      return res.status(403).json({
+        error: `This group is currently closed for scheduled quiet hours and will reopen automatically at ${schedState.open_time} PKT.`
+      });
+    }
   }
 
   chatImageUpload.single('image')(req, res, async (uploadErr) => {
@@ -18460,6 +18893,20 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   const readCursors = {};
   participants.forEach(pk => { readCursors[pk] = 0; });
 
+  let scheduleObj = normalizeGroupSchedule(null);
+  if (req.body && req.body.schedule !== undefined) {
+    const parsedSched = normalizeGroupSchedule(req.body.schedule, null);
+    if (parsedSched.error) return res.status(400).json({ error: parsedSched.error });
+    scheduleObj = parsedSched;
+    if (scheduleObj.enabled) {
+      const evInit = evaluateGroupSchedule(scheduleObj);
+      if (!evInit.is_closed && evInit.cycle_key) {
+        // Pre-mark current open cycle so creating an open-hours schedule does not immediately spam morning greeting
+        scheduleObj.last_open_cycle = evInit.cycle_key;
+      }
+    }
+  }
+
   const groupConv = {
     id: nextId(convs),
     type: 'agent_group',
@@ -18468,6 +18915,7 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
     description,
     participants,
     admin_only: adminOnly,
+    schedule: scheduleObj,
     pinned_message_id: null,
     read_cursors: readCursors,
     last_message_id: 0,
@@ -18481,13 +18929,19 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   convs.push(groupConv);
   writeDb('chat_conversations', convs);
 
+  if (scheduleObj.enabled) {
+    processGroupSchedulesTick();
+  }
+
+  const freshConvs = readDb('chat_conversations') || convs;
+  const freshGroup = freshConvs.find(c => Number(c.id) === Number(groupConv.id)) || groupConv;
   const allMessages = readDb('chat_messages') || [];
-  const hydrated = hydrateConversationForActor(groupConv, actor, allMessages);
+  const hydrated = hydrateConversationForActor(freshGroup, actor, allMessages);
 
   sendChatWsEvent({
     type: 'chat:group_created',
-    conversation_id: groupConv.id,
-    title: groupConv.title
+    conversation_id: freshGroup.id,
+    title: freshGroup.title
   }, participants);
 
   res.status(201).json({ conversation: hydrated });
@@ -18516,20 +18970,47 @@ app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
   if (req.body && req.body.admin_only !== undefined) {
     conv.admin_only = Boolean(req.body.admin_only);
   }
+  let scheduleUpdated = false;
+  if (req.body && req.body.schedule !== undefined) {
+    const prevSched = conv.schedule || null;
+    const nextSched = normalizeGroupSchedule(req.body.schedule, prevSched);
+    if (nextSched.error) return res.status(400).json({ error: nextSched.error });
+    const timingChanged = !prevSched || prevSched.close_time !== nextSched.close_time || prevSched.open_time !== nextSched.open_time || (!prevSched.enabled && nextSched.enabled);
+    if (nextSched.enabled && timingChanged) {
+      const evNow = evaluateGroupSchedule(nextSched);
+      if (!evNow.is_closed && evNow.cycle_key) {
+        // Avoid firing an immediate morning greeting when admin configures schedule during daytime open hours
+        nextSched.last_open_cycle = evNow.cycle_key;
+        nextSched.last_close_cycle = null;
+      } else {
+        // Currently inside closed window: allow night message to post immediately once
+        nextSched.last_close_cycle = null;
+      }
+    }
+    conv.schedule = nextSched;
+    scheduleUpdated = true;
+  }
   conv.updated_at = new Date().toISOString();
   writeDb('chat_conversations', convs);
 
+  if (scheduleUpdated && conv.schedule && conv.schedule.enabled) {
+    processGroupSchedulesTick();
+  }
+
+  const freshConvs = readDb('chat_conversations') || convs;
+  const freshConv = freshConvs.find(c => Number(c.id) === convId) || conv;
   const allMessages = readDb('chat_messages') || [];
   sendChatWsEvent({
     type: 'chat:group_updated',
     conversation_id: convId,
-    title: conv.title,
-    description: conv.description,
-    admin_only: conv.admin_only,
-    pinned_message_id: conv.pinned_message_id
-  }, conv.participants);
+    title: freshConv.title,
+    description: freshConv.description,
+    admin_only: freshConv.admin_only,
+    pinned_message_id: freshConv.pinned_message_id,
+    schedule_changed: scheduleUpdated
+  }, freshConv.participants);
 
-  res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
+  res.json({ conversation: hydrateConversationForActor(freshConv, actor, allMessages) });
 });
 
 // POST /api/chat/groups/:id/members — Owning Agent adds or removes own Clients
@@ -18879,6 +19360,9 @@ server.listen(PORT, BIND_HOST, () => {
   runPaytermMigration();
   seedOwnershipLedgerIfEmpty();
   cleanupOrphanedNumbers();
+  processGroupSchedulesTick();
+  const groupSchedTimer = setInterval(() => processGroupSchedulesTick(), 15000);
+  if (groupSchedTimer && typeof groupSchedTimer.unref === 'function') groupSchedTimer.unref();
   console.log(`[HUMEX SMS] Server running on http://${BIND_HOST}:${PORT}`);
   console.log(`  ➜  Local:   http://localhost:${PORT}/`);
   console.log(`  ➜  Network: http://${BIND_HOST}:${PORT}/`);

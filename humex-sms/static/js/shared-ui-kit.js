@@ -3843,4 +3843,285 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   window.zyRenderWeeklyAreaChart(chartId, cfg.weeklyLabels, cfg.weeklyTraffic);
 };
 
+/* ═══ SAFE 1-CLICK CLIPBOARD COPY HELPER ═══ */
+window.zyCopyTextSafe = function (text, label) {
+  const val = String(text == null ? '' : text);
+  if (!val) {
+    if (typeof toast === 'function') toast('Nothing to copy yet.', 'warning');
+    return;
+  }
+  const done = () => {
+    if (typeof toast === 'function') toast(`${label || 'Text'} copied!`, 'success');
+  };
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(val).then(done).catch(() => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        done();
+      } catch (_) {
+        if (typeof toast === 'function') toast('Could not copy to clipboard.', 'error');
+      }
+    });
+  } else {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = val;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch (_) {
+      if (typeof toast === 'function') toast('Could not copy to clipboard.', 'error');
+    }
+  }
+};
+
+/* ═══ CDR 2 (MONTHLY ROUTE) DAILY 12:00 PM PKT UPLOAD BANNER ═══ */
+window._zyCdr2NoonTimer = window._zyCdr2NoonTimer || null;
+
+window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
+  const host = document.getElementById(hostId || 'cdr2-daily-banner');
+  if (!host || !statusObj) return;
+  if (window._zyCdr2NoonTimer) {
+    clearInterval(window._zyCdr2NoonTimer);
+    window._zyCdr2NoonTimer = null;
+  }
+
+  const isUr = Boolean(window.HumexI18n && typeof window.HumexI18n.getLanguage === 'function' && window.HumexI18n.getLanguage() === 'roman_ur');
+  const uploaded = Boolean(statusObj.yesterday_uploaded);
+  const yDate = statusObj.yesterday_pkt || '';
+  const latestDate = statusObj.latest_uploaded_date || '';
+  const nextIso = statusObj.next_upload_iso || '';
+
+  const formatHMS = (secs) => {
+    const s = Math.max(0, Math.floor(secs));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    const p = n => String(n).padStart(2, '0');
+    return `${p(h)}:${p(m)}:${p(r)}`;
+  };
+
+  const getSecsLeft = () => {
+    if (!nextIso) return 0;
+    return Math.max(0, Math.ceil((new Date(nextIso).getTime() - Date.now()) / 1000));
+  };
+
+  const secsNow = getSecsLeft();
+  const titleText = uploaded
+    ? (isUr ? 'Kal Wali Daily Report Update Ho Chuki Hai' : 'Yesterday’s Daily Report Is Updated')
+    : (isUr ? 'Daily Report Upload Timing: 12:00 PM PKT' : 'Daily Report Upload Schedule: 12:00 PM PKT');
+
+  const descText = uploaded
+    ? (isUr
+        ? `Kal (${zyEsc(yDate)}) ki report upload ho chuki hai. Rozana pichle din ki report 12:00 PM PKT tak update hoti hai.`
+        : `Yesterday’s (${zyEsc(yDate)}) daily report is live. New daily reports are uploaded every day around 12:00 PM PKT.`)
+    : (isUr
+        ? `Kal (${zyEsc(yDate)}) wali aap ki report abhi 12:00 PM PKT tak upload ho jaye gi — thora intezar karein, update hotay hi yahan show ho jaye gi.`
+        : `Yesterday’s (${zyEsc(yDate)}) report is scheduled for 12:00 PM PKT and will appear automatically as soon as uploaded.`);
+
+  const badgeHtml = uploaded
+    ? `<span class="zy-cdr2-status-pill is-ready"><i class="fas fa-circle-check"></i> ${isUr ? 'Updated' : 'Updated'} · ${zyEsc(yDate)}</span>`
+    : (secsNow > 0
+        ? `<span class="zy-cdr2-status-pill is-wait"><i class="far fa-clock"></i> ${isUr ? 'Upload mein waqt' : 'Next Upload'}: <strong id="zy-cdr2-noon-cd">${formatHMS(secsNow)}</strong></span>`
+        : `<span class="zy-cdr2-status-pill is-pending"><i class="fas fa-hourglass-half"></i> ${isUr ? 'Upload ka intezar' : 'Awaiting 12:00 PM Upload'}</span>`);
+
+  host.innerHTML = `
+    <div class="zy-cdr2-notice-banner ${uploaded ? 'is-ready' : 'is-waiting'}">
+      <div class="zy-cdr2-notice-ico">
+        <i class="fas ${uploaded ? 'fa-calendar-check' : 'fa-clock'}"></i>
+      </div>
+      <div class="zy-cdr2-notice-body">
+        <div class="zy-cdr2-notice-top">
+          <span class="zy-cdr2-notice-title">${titleText}</span>
+          ${badgeHtml}
+        </div>
+        <div class="zy-cdr2-notice-desc">${descText}</div>
+        ${latestDate ? `<div class="zy-cdr2-notice-meta"><i class="fas fa-database"></i> ${isUr ? 'Aakhri uploaded report date' : 'Latest uploaded report'}: <strong>${zyEsc(latestDate)}</strong> · Monthly (30/5) {W}</div>` : ''}
+      </div>
+      <div class="zy-cdr2-notice-actions">
+        <button type="button" class="btn btn-outline btn-sm" onclick="window.zyOpenCdr2TermsModal({ viewOnly: true })">
+          <i class="fas fa-file-contract"></i> ${isUr ? 'Terms' : 'Terms'}
+        </button>
+      </div>
+    </div>
+  `;
+
+  if (!uploaded && secsNow > 0) {
+    window._zyCdr2NoonTimer = setInterval(() => {
+      const cdEl = document.getElementById('zy-cdr2-noon-cd');
+      if (!cdEl) {
+        clearInterval(window._zyCdr2NoonTimer);
+        window._zyCdr2NoonTimer = null;
+        return;
+      }
+      const rem = getSecsLeft();
+      cdEl.textContent = formatHMS(rem);
+      if (rem <= 0) {
+        clearInterval(window._zyCdr2NoonTimer);
+        window._zyCdr2NoonTimer = null;
+      }
+    }, 1000);
+  }
+};
+
+/* ═══ CDR 2 (MONTHLY ROUTE) FIRST-TIME TERMS & CONDITIONS MODAL ═══ */
+window.zyOpenCdr2TermsModal = function (opts) {
+  const cfg = opts || {};
+  const viewOnly = Boolean(cfg.viewOnly);
+  const existing = document.getElementById('zy-cdr2-terms-backdrop');
+  if (existing) existing.remove();
+
+  const isUr = Boolean(window.HumexI18n && typeof window.HumexI18n.getLanguage === 'function' && window.HumexI18n.getLanguage() === 'roman_ur');
+
+  const wrap = document.createElement('div');
+  wrap.id = 'zy-cdr2-terms-backdrop';
+  wrap.className = 'zy-cdr2-terms-backdrop';
+  wrap.innerHTML = `
+    <div class="zy-cdr2-terms-card" role="dialog" aria-modal="true" aria-label="Monthly Route Terms and Conditions">
+      <div class="zy-cdr2-terms-head">
+        <div class="zy-cdr2-terms-head-l">
+          <div class="zy-cdr2-terms-ico"><i class="fas fa-shield-halved"></i></div>
+          <div>
+            <div class="zy-cdr2-terms-title">${isUr ? 'Monthly Route (CDR 2) — Terms & Conditions' : 'Monthly Route (CDR 2) — Terms & Conditions'}</div>
+            <div class="zy-cdr2-terms-sub">${isUr ? 'Kaam shuru karne se pehle zaroori hidayat parh lein' : 'Please review these key terms before using CDR 2'}</div>
+          </div>
+        </div>
+        ${viewOnly ? `<button type="button" class="zy-cdr2-terms-x" id="zy-cdr2-terms-x" aria-label="Close">&times;</button>` : ''}
+      </div>
+
+      <div class="zy-cdr2-terms-body">
+        <div class="zy-cdr2-term-item">
+          <div class="zy-cdr2-term-num">1</div>
+          <div>
+            <div class="zy-cdr2-term-h">${isUr ? 'Monthly Basis Settlement (30/5)' : 'Monthly Basis Settlement (30/5)'}</div>
+            <div class="zy-cdr2-term-p">
+              ${isUr
+                ? 'Ye route strictly <strong>Monthly (30/5)</strong> settlement cycle par chalta hai — is ka payout weekly nahi balkay monthly closing ke baad clear hota hai.'
+                : 'This route operates strictly on a <strong>Monthly (30/5)</strong> settlement cycle rather than weekly payouts.'}
+            </div>
+          </div>
+        </div>
+
+        <div class="zy-cdr2-term-item">
+          <div class="zy-cdr2-term-num">2</div>
+          <div>
+            <div class="zy-cdr2-term-h">${isUr ? 'Rozana Report Update (12:00 PM PKT)' : 'Daily Report Schedule (12:00 PM PKT)'}</div>
+            <div class="zy-cdr2-term-p">
+              ${isUr
+                ? 'Pichle din ki official SMS report rozana <strong>12:00 PM PKT</strong> ke qareeb upload hoti hai. Report update hone tak thora intezar karein.'
+                : 'Previous day’s official SMS stats are uploaded daily around <strong>12:00 PM PKT</strong> and reflected automatically once published.'}
+            </div>
+          </div>
+        </div>
+
+        <div class="zy-cdr2-term-item is-warn">
+          <div class="zy-cdr2-term-num">3</div>
+          <div>
+            <div class="zy-cdr2-term-h">${isUr ? 'Apni Zimmedari & Carrier Settlement Policy' : 'Voluntary Participation & Carrier Settlement'}</div>
+            <div class="zy-cdr2-term-p">
+              ${isUr
+                ? 'Monthly route par kaam karna mukammal tor par aap ki apni marzi aur risk par hai. Carrier company se monthly settlement receive hotay hi aap ka payout foran release kar diya jata hai — aam tor par company settlements regular clear karti hai, lekin final payout upstream carrier confirmation par munhasir hota hai.'
+                : 'Working on this monthly route is voluntary and at your own discretion. Payouts are released promptly upon receipt of the monthly carrier settlement — while upstream settlements are routinely fulfilled, final disbursement remains subject to carrier confirmation and payout release.'}
+            </div>
+          </div>
+        </div>
+
+        <div id="zy-cdr2-terms-alert" class="zy-modal-alert" style="display:none;margin-top:10px;"></div>
+
+        ${!viewOnly ? `
+          <label class="zy-cdr2-terms-check">
+            <input type="checkbox" id="zy-cdr2-terms-cb">
+            <span>${isUr
+              ? 'Main ne Monthly Route (CDR 2) ki tamam Terms & Conditions parh li hain aur un se ittefaq karta hoon.'
+              : 'I have read, understood, and agree to the Monthly Route (CDR 2) Terms & Conditions.'}</span>
+          </label>
+        ` : ''}
+      </div>
+
+      <div class="zy-cdr2-terms-foot">
+        ${viewOnly ? `
+          <button type="button" class="btn btn-primary btn-sm" id="zy-cdr2-terms-close-btn">${isUr ? 'Band Karein' : 'Close'}</button>
+        ` : `
+          <button type="button" class="btn btn-primary" id="zy-cdr2-terms-accept-btn" disabled>
+            <i class="fas fa-check-circle"></i> ${isUr ? 'Qubool Karein aur Aage Barhein' : 'Accept & Continue to CDR 2'}
+          </button>
+        `}
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(wrap);
+  document.body.classList.add('zy-modal-open');
+
+  const closeWrap = () => {
+    wrap.remove();
+    if (!document.querySelector('#modal-overlay.open')) {
+      document.body.classList.remove('zy-modal-open');
+    }
+  };
+
+  // Never close on outside click — gentle nudge only
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap && typeof window.zyNudgeModal === 'function') {
+      window.zyNudgeModal(wrap.querySelector('.zy-cdr2-terms-card'));
+    }
+  });
+
+  if (viewOnly) {
+    const xBtn = document.getElementById('zy-cdr2-terms-x');
+    const cBtn = document.getElementById('zy-cdr2-terms-close-btn');
+    if (xBtn) xBtn.addEventListener('click', closeWrap);
+    if (cBtn) cBtn.addEventListener('click', closeWrap);
+    return;
+  }
+
+  const cb = document.getElementById('zy-cdr2-terms-cb');
+  const accBtn = document.getElementById('zy-cdr2-terms-accept-btn');
+  if (cb && accBtn) {
+    cb.addEventListener('change', () => {
+      accBtn.disabled = !cb.checked;
+    });
+    accBtn.addEventListener('click', async () => {
+      if (!cb.checked) return;
+      accBtn.disabled = true;
+      const origHtml = accBtn.innerHTML;
+      accBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+      try {
+        await apiFetch('/api/cdr2/accept-terms', {
+          method: 'POST',
+          body: JSON.stringify({ accepted: true })
+        });
+        closeWrap();
+        if (typeof toast === 'function') {
+          toast(isUr ? 'Terms & Conditions save ho gayi hain' : 'Terms & Conditions accepted', 'success');
+        }
+        if (typeof cfg.onAccepted === 'function') cfg.onAccepted();
+      } catch (err) {
+        const msg = typeof window.zyHumanizeError === 'function' ? window.zyHumanizeError(err) : (err.message || 'Could not save acceptance');
+        if (typeof window.zySetModalAlert === 'function') {
+          window.zySetModalAlert('zy-cdr2-terms-alert', msg, 'error');
+        } else if (typeof toast === 'function') {
+          toast(msg, 'error');
+        }
+        accBtn.disabled = false;
+        accBtn.innerHTML = origHtml;
+      }
+    });
+  }
+};
+
+
 

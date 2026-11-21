@@ -62,8 +62,81 @@
     audioUnlocked: false,
     totalUnread: 0,
     pendingImages: [],
-    dragDepth: 0
+    dragDepth: 0,
+    scheduleTickTimer: null,
+    scheduleExpiryRefreshing: false
   };
+
+  const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
+  const DEFAULT_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
+
+  function formatTime12h(hhmm) {
+    const parts = String(hhmm || '').split(':');
+    if (parts.length !== 2) return String(hhmm || '');
+    const h = Number(parts[0]);
+    const m = String(parts[1]).padStart(2, '0');
+    if (!Number.isFinite(h)) return String(hhmm || '');
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return `${h12}:${m} ${suffix}`;
+  }
+
+  function formatCountdownHMS(totalSeconds) {
+    const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+  }
+
+  function getRemainingScheduleSeconds(conv) {
+    const st = conv && conv.schedule_state;
+    if (!st || !st.enabled || !st.is_closed || !st.reopen_at_iso) return 0;
+    const ms = new Date(st.reopen_at_iso).getTime() - Date.now();
+    return Math.max(0, Math.ceil(ms / 1000));
+  }
+
+  function stopScheduleCountdownTick() {
+    if (state.scheduleTickTimer) {
+      clearInterval(state.scheduleTickTimer);
+      state.scheduleTickTimer = null;
+    }
+  }
+
+  function startScheduleCountdownTick() {
+    stopScheduleCountdownTick();
+    const conv = getActiveConv();
+    if (!conv || conv.type !== 'agent_group' || !conv.schedule_state || !conv.schedule_state.enabled || !conv.schedule_state.is_closed) {
+      return;
+    }
+    const updateDom = () => {
+      const active = getActiveConv();
+      if (!state.mounted || !active || !active.schedule_state || !active.schedule_state.is_closed) {
+        stopScheduleCountdownTick();
+        return;
+      }
+      const rem = getRemainingScheduleSeconds(active);
+      const formatted = formatCountdownHMS(rem);
+      document.querySelectorAll('[data-zy-sched-countdown]').forEach(el => {
+        el.textContent = formatted;
+      });
+      if (rem <= 0 && !state.scheduleExpiryRefreshing) {
+        state.scheduleExpiryRefreshing = true;
+        stopScheduleCountdownTick();
+        setTimeout(async () => {
+          try {
+            await fetchBootstrap(true);
+            if (state.activeConvId) await loadMessages(state.activeConvId, { silent: true });
+          } finally {
+            state.scheduleExpiryRefreshing = false;
+          }
+        }, 1200);
+      }
+    };
+    updateDom();
+    state.scheduleTickTimer = setInterval(updateDom, 1000);
+  }
 
   function esc(v) {
     return String(v == null ? '' : v)
@@ -1216,6 +1289,51 @@
     }
   }
 
+  async function saveGroupSchedule(convId) {
+    const enEl = document.getElementById('zy-gd-sched-enabled');
+    const closeEl = document.getElementById('zy-gd-sched-close');
+    const openEl = document.getElementById('zy-gd-sched-open');
+    const closeMsgEl = document.getElementById('zy-gd-sched-close-msg');
+    const openMsgEl = document.getElementById('zy-gd-sched-open-msg');
+
+    const enabled = Boolean(enEl && enEl.checked);
+    const close_time = (closeEl && closeEl.value) ? closeEl.value.trim() : '23:00';
+    const open_time = (openEl && openEl.value) ? openEl.value.trim() : '09:00';
+    const close_message = (closeMsgEl && closeMsgEl.value) ? closeMsgEl.value.trim() : DEFAULT_CLOSE_MSG;
+    const open_message = (openMsgEl && openMsgEl.value) ? openMsgEl.value.trim() : DEFAULT_OPEN_MSG;
+
+    if (enabled && close_time === open_time) {
+      if (typeof toast === 'function') toast('Close time and Open time cannot be the same.', 'warning');
+      return;
+    }
+
+    try {
+      const data = await reqJson(`/api/chat/groups/${convId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          schedule: { enabled, close_time, open_time, close_message, open_message }
+        })
+      });
+      if (data.conversation) {
+        const idx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+        if (idx !== -1) state.conversations[idx] = data.conversation;
+        await loadMessages(convId, { silent: true });
+        renderWorkspace();
+      }
+      if (typeof toast === 'function') {
+        toast(
+          enabled
+            ? `Auto schedule saved (${formatTime12h(close_time)} – ${formatTime12h(open_time)} PKT)`
+            : 'Auto night/morning schedule disabled',
+          'success'
+        );
+      }
+    } catch (err) {
+      const msg = typeof window.zyHumanizeError === 'function' ? window.zyHumanizeError(err) : (err.message || 'Failed to save schedule');
+      if (typeof toast === 'function') toast(msg, 'error');
+    }
+  }
+
   async function updateGroupMembers(convId, addIds, removeIds) {
     try {
       const data = await reqJson(`/api/chat/groups/${convId}/members`, {
@@ -1328,8 +1446,9 @@
         const isGroup = c.type === 'agent_group';
         const isOnline = !isGroup && Boolean(c.peer && c.peer.online);
         const typingText = getTypingText(c.id);
+        const schedClosed = isGroup && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
         const roleSub = isGroup
-          ? `Group · ${(c.members || []).length} members${c.admin_only ? ' · Admin only' : ''}`
+          ? `Group · ${(c.members || []).length} members${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
           : (c.peer && c.peer.role === 'owner' ? 'Owner' : (c.peer && c.peer.role === 'agent' ? 'Agent' : 'Client'));
 
         const previewHtml = typingText
@@ -1421,6 +1540,11 @@
       const onlineCnt = (conv.members || []).filter(m => m.online).length;
       const parts = [`${(conv.members || []).length} members`];
       if (onlineCnt > 0) parts.push(`${onlineCnt} online`);
+      if (conv.schedule_state && conv.schedule_state.enabled && conv.schedule_state.is_closed) {
+        parts.push(`🌙 Closed · Reopens ${formatTime12h(conv.schedule_state.open_time)} PKT`);
+      } else if (conv.schedule && conv.schedule.enabled) {
+        parts.push(`Auto ${formatTime12h(conv.schedule.close_time)}–${formatTime12h(conv.schedule.open_time)} PKT`);
+      }
       if (conv.admin_only) parts.push('Only Admin can send');
       subEl.textContent = parts.join(' · ');
     } else if (conv.peer) {
@@ -1517,11 +1641,19 @@
         ? `<div class="zy-chat-text"><i class="fas fa-ban"></i> This message was deleted</div>`
         : (hasCaption ? `<div class="zy-chat-text">${esc(m.body).replace(/\n/g, '<br>')}</div>` : '');
 
+      const autoBadgeHtml = m.is_auto_schedule && !m.deleted
+        ? `<div class="zy-chat-auto-tag ${m.auto_type === 'night_close' ? 'is-night' : 'is-morning'}">
+             <i class="fas ${m.auto_type === 'night_close' ? 'fa-moon' : 'fa-sun'}"></i>
+             <span>${m.auto_type === 'night_close' ? 'Scheduled Quiet Hours' : 'Auto Morning Opening'}</span>
+           </div>`
+        : '';
+
       return `
         ${divider}
         <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'}" data-msg-id="${m.id}">
-          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''}">
+          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
             ${actionsHtml}
+            ${autoBadgeHtml}
             ${senderLabel}
             ${replyBlock}
             ${mediaHtml}
@@ -1682,6 +1814,34 @@
                 </div>
                 <input type="checkbox" id="zy-gd-admin-only" ${conv.admin_only ? 'checked' : ''}>
               </label>
+            </div>
+            <div class="zy-gd-section zy-gd-sched-box">
+              <label class="zy-gd-toggle-row" style="margin-bottom:8px;">
+                <div>
+                  <div class="zy-gd-toggle-title"><i class="fas fa-moon" style="color:#6366f1;margin-right:4px;"></i> Auto Night Close &amp; Morning Open</div>
+                  <div class="zy-gd-toggle-sub">Daily quiet hours (PKT) with countdown &amp; auto messages</div>
+                </div>
+                <input type="checkbox" id="zy-gd-sched-enabled" ${conv.schedule && conv.schedule.enabled ? 'checked' : ''}>
+              </label>
+              <div id="zy-gd-sched-fields" style="display:${conv.schedule && conv.schedule.enabled ? 'block' : 'none'};margin-top:8px;">
+                <div class="zy-gd-time-grid">
+                  <div>
+                    <label class="zy-gd-label" for="zy-gd-sched-close">Close Time (PKT)</label>
+                    <input type="time" id="zy-gd-sched-close" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.close_time) || '23:00')}">
+                  </div>
+                  <div>
+                    <label class="zy-gd-label" for="zy-gd-sched-open">Open Time (PKT)</label>
+                    <input type="time" id="zy-gd-sched-open" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.open_time) || '09:00')}">
+                  </div>
+                </div>
+                <label class="zy-gd-label" for="zy-gd-sched-close-msg" style="margin-top:10px;">Night Close Message (Auto Sent)</label>
+                <textarea id="zy-gd-sched-close-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Good Night message...">${esc((conv.schedule && conv.schedule.close_message) || DEFAULT_CLOSE_MSG)}</textarea>
+                <label class="zy-gd-label" for="zy-gd-sched-open-msg" style="margin-top:10px;">Morning Open Message (Auto Sent)</label>
+                <textarea id="zy-gd-sched-open-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Assalam-o-Alaikum morning message...">${esc((conv.schedule && conv.schedule.open_message) || DEFAULT_OPEN_MSG)}</textarea>
+              </div>
+              <button type="button" class="zy-gd-btn-primary" id="zy-gd-save-sched" style="margin-top:10px;">
+                <i class="fas fa-clock"></i> Save Schedule
+              </button>
             </div>
             <div class="zy-gd-section">
               <div class="zy-gd-label">Add My Clients</div>
@@ -1853,6 +2013,26 @@
           </div>
         </div>
 
+        ${(isGroup && conv.schedule_state && conv.schedule_state.enabled && conv.schedule_state.is_closed) ? `
+          <div class="zy-chat-night-banner" id="zy-chat-night-banner">
+            <div class="zy-chat-night-ico"><i class="fas fa-moon"></i></div>
+            <div class="zy-chat-night-body">
+              <div class="zy-chat-night-head">
+                <span class="zy-chat-night-title">Group Closed · Quiet Hours</span>
+                <span class="zy-chat-night-timer" title="Time remaining until auto-open">
+                  <i class="far fa-clock"></i>
+                  <span data-zy-sched-countdown>${esc(formatCountdownHMS(getRemainingScheduleSeconds(conv)))}</span>
+                </span>
+              </div>
+              <div class="zy-chat-night-msg">${esc((conv.schedule_state && conv.schedule_state.close_message) || DEFAULT_CLOSE_MSG)}</div>
+              <div class="zy-chat-night-sub">
+                Reopens automatically at <strong>${esc(formatTime12h(conv.schedule_state.open_time))} PKT</strong>
+                ${conv.can_manage ? ' · Clients are muted (Admin can still post or edit schedule in Manage)' : ''}
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
         ${conv.can_send ? `
           <div class="zy-chat-composer-wrap">
             <div class="zy-chat-emoji-pop" id="zy-chat-emoji-pop" style="display:none;"></div>
@@ -1867,9 +2047,13 @@
             </div>
           </div>
         ` : `
-          <div class="zy-chat-locked-bar">
-            <i class="fas fa-lock"></i>
-            <span>Only your Agent (Group Admin) can send messages in this group.</span>
+          <div class="zy-chat-locked-bar ${conv.lock_reason === 'scheduled_closed' ? 'is-night-lock' : ''}">
+            <i class="fas ${conv.lock_reason === 'scheduled_closed' ? 'fa-moon' : 'fa-lock'}"></i>
+            <span>${
+              conv.lock_reason === 'scheduled_closed'
+                ? `Messaging is paused for quiet hours · Auto-opens in <strong data-zy-sched-countdown>${esc(formatCountdownHMS(getRemainingScheduleSeconds(conv)))}</strong> (${esc(formatTime12h(conv.schedule_state && conv.schedule_state.open_time))} PKT)`
+                : 'Only your Agent (Group Admin) can send messages in this group.'
+            }</span>
           </div>
         `}
       </div>
@@ -1881,6 +2065,7 @@
     renderReplyStrip();
     renderMediaStrip();
     renderEmojiPopover();
+    startScheduleCountdownTick();
 
     // Wire header & composer events
     const backBtn = document.getElementById('zy-chat-back');
@@ -2005,6 +2190,15 @@
     if (gdSave) gdSave.addEventListener('click', () => saveGroupMeta(conv.id));
     const gdAdminOnly = document.getElementById('zy-gd-admin-only');
     if (gdAdminOnly) gdAdminOnly.addEventListener('change', (e) => toggleGroupAdminOnly(conv.id, e.target.checked));
+    const gdSchedToggle = document.getElementById('zy-gd-sched-enabled');
+    const gdSchedFields = document.getElementById('zy-gd-sched-fields');
+    if (gdSchedToggle && gdSchedFields) {
+      gdSchedToggle.addEventListener('change', (e) => {
+        gdSchedFields.style.display = e.target.checked ? 'block' : 'none';
+      });
+    }
+    const gdSaveSched = document.getElementById('zy-gd-save-sched');
+    if (gdSaveSched) gdSaveSched.addEventListener('click', () => saveGroupSchedule(conv.id));
     const gdAddBtn = document.getElementById('zy-gd-add-btn');
     if (gdAddBtn) {
       gdAddBtn.addEventListener('click', () => {
@@ -2135,6 +2329,7 @@
     unmount() {
       state.mounted = false;
       state.emojiOpen = false;
+      stopScheduleCountdownTick();
     },
     refreshBadge: () => fetchBootstrap(true),
     getUnreadCount: () => state.totalUnread,

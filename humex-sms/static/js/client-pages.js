@@ -989,6 +989,8 @@ async function pgCdr2() {
       </div>
     </div>
 
+    <div id="cdr2-daily-banner" style="margin-bottom:10px;"></div>
+
     <div class="zy-filter-grid" data-cdr-compact="1">
       <div class="zy-cdr-head-row">
         <span><i class="fas fa-sliders" style="color:#2563eb;margin-right:6px;"></i> Daily Stats Filters</span>
@@ -1051,7 +1053,10 @@ async function pgCdr2() {
       </div>
     </div>`;
 
-  const rateCardRes = await apiFetch('/api/client/rate-card').catch(() => ({ ranges: [] }));
+  const [rateCardRes, cdr2Status] = await Promise.all([
+    apiFetch('/api/client/rate-card').catch(() => ({ ranges: [] })),
+    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null)
+  ]);
   if (rateCardRes?.usd_to_pkr_rate) window._zyClientFx = Number(rateCardRes.usd_to_pkr_rate);
   const ranges = (Array.isArray(rateCardRes?.ranges) ? rateCardRes.ranges : []).filter(r => zyClientIsWhitenoiseObj(r));
   const rEl = document.getElementById('cdr2-range');
@@ -1059,7 +1064,17 @@ async function pgCdr2() {
     rEl.innerHTML = `<option value="">All Monthly Ranges</option>` +
       ranges.map(r => `<option value="${r.range_id || r.id}">${zyEsc(r.range_name || r.name || r.country || '')}${r.prefix ? ` (${zyEsc(r.prefix)})` : ''}</option>`).join('');
   }
-  pgClientCdr2Load(1);
+  if (cdr2Status && typeof window.zyRenderCdr2DailyBanner === 'function') {
+    window.zyRenderCdr2DailyBanner('cdr2-daily-banner', cdr2Status);
+  }
+  if (cdr2Status && !cdr2Status.terms_accepted && typeof window.zyOpenCdr2TermsModal === 'function') {
+    window.zyOpenCdr2TermsModal({
+      viewOnly: false,
+      onAccepted: () => pgClientCdr2Load(1)
+    });
+  } else {
+    pgClientCdr2Load(1);
+  }
 }
 
 window.zyResetClientCdr2Filters = function() {

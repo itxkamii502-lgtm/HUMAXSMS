@@ -2059,6 +2059,8 @@ async function pgCdr2() {
       </div>
     </div>
 
+    <div id="cdr2-daily-banner" style="margin-bottom:10px;"></div>
+
     <div class="zy-filter-grid" data-cdr-compact="1">
       <div class="zy-cdr-head-row">
         <span><i class="fas fa-sliders" style="color:#2563eb;margin-right:6px;"></i> Daily Stats Filters</span>
@@ -2125,15 +2127,28 @@ async function pgCdr2() {
       </div>
     </div>`;
 
-  const ranges = zyList(await apiFetch('/api/numbers/sms-ranges').catch(() => []))
-    .filter(r => zyIsWhitenoiseObj(r));
+  const [rangesRaw, cdr2Status] = await Promise.all([
+    apiFetch('/api/numbers/sms-ranges').catch(() => []),
+    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null)
+  ]);
+  const ranges = zyList(rangesRaw).filter(r => zyIsWhitenoiseObj(r));
   const rEl = document.getElementById('cdr2-range');
   if (rEl) {
     rEl.innerHTML = `<option value="">All Monthly Ranges</option>` +
       ranges.map(r => `<option value="${r.id}">${zyEsc(r.range_name || r.name || r.country || '')}${r.prefix ? ` (${zyEsc(r.prefix)})` : ''}</option>`).join('');
   }
+  if (cdr2Status && typeof window.zyRenderCdr2DailyBanner === 'function') {
+    window.zyRenderCdr2DailyBanner('cdr2-daily-banner', cdr2Status);
+  }
   await zyFillClients('cdr2-client', 'All');
-  zyAgentCdr2Load(1);
+  if (cdr2Status && !cdr2Status.terms_accepted && typeof window.zyOpenCdr2TermsModal === 'function') {
+    window.zyOpenCdr2TermsModal({
+      viewOnly: false,
+      onAccepted: () => zyAgentCdr2Load(1)
+    });
+  } else {
+    zyAgentCdr2Load(1);
+  }
 }
 
 window.zyResetAgentCdr2Filters = function() {

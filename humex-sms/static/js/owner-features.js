@@ -159,7 +159,7 @@ async function saveService(event, id) {
 }
 
 async function deleteService(id) {
-  if (!confirm('Delete this service?')) return;
+  if (!(await zyConfirm('Delete this service?', { title: 'Delete Service', confirmLabel: 'Delete', danger: true }))) return;
 
   try {
     const result = await apiFetch(`/api/services/${id}`, {

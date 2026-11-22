@@ -1081,7 +1081,18 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
     if (rangeName) qs.set('range_name', String(rangeName));
     const res = await apiFetch(`/api/numbers/range-return-batches?${qs.toString()}`);
     if (!res || res.error) {
-      throw new Error((res && res.error) || 'Failed to load range batches');
+      const errMsg = (res && res.error) || 'Failed to load range batches';
+      if (errMsg.toLowerCase().includes('contact your agent')) {
+        zyModal('Contact Your Agent', `
+          <div style="padding:18px 14px;text-align:center;">
+            <i class="fas fa-user-tie" style="font-size:28px;color:#2563eb;margin-bottom:10px;display:block;"></i>
+            <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:6px;">Monthly Route Return Restricted</div>
+            <div style="font-size:13px;color:#475569;line-height:1.5;">${zyEsc(errMsg)}</div>
+          </div>
+        `, `<button type="button" class="zy-btn-blue" onclick="closeModal()">OK</button>`);
+        return;
+      }
+      throw new Error(errMsg);
     }
     const batches = Array.isArray(res.batches) ? res.batches : [];
     const st = window._zyRangeRetState;
@@ -1375,7 +1386,8 @@ function zyFilterBox(id, onShow, extraBtn) {
   let lastDay = getLocalDateStr();
 
   // Watch every 10 seconds for date changes (midnight rollover or day change)
-  setInterval(() => {
+  if (window._autoDateWatcherTimer) clearInterval(window._autoDateWatcherTimer);
+  window._autoDateWatcherTimer = setInterval(() => {
     const currentDay = getLocalDateStr();
     if (currentDay !== lastDay) {
       const oldDay = lastDay;
@@ -3618,6 +3630,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const alertHtml = cfg.alertHtml || '';
   const hero = cfg.hero || {};
   const todaySms = Number(hero.value || 0);
+  const chartTodayTotal = cfg.chartTodayTotal != null ? Number(cfg.chartTodayTotal) : todaySms;
   const yestSms = Number(hero.yesterday || 0);
   const diff = todaySms - yestSms;
   const deltaText = yestSms > 0
@@ -3627,6 +3640,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const moneyCards = (cfg.moneyCards || []).slice(0, 2);
   const shortcuts = (cfg.shortcuts || []).slice(0, 6);
   const volumes = (cfg.volumes || []).slice(0, 4);
+  const volGridClass = volumes.length === 3 ? 'zy-ud-vol-grid zy-ud-vol-grid-3' : 'zy-ud-vol-grid';
   const summaryRows = (cfg.summaryRows || []).slice(0, 4);
   const latestRanges = cfg.latestRanges || [];
   const topAccess = cfg.topAccess || [];
@@ -3678,7 +3692,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <tbody>
           ${latestRanges.slice(0, 5).map(r => `
             <tr>
-              <td><strong>${zyEsc(r.name)}</strong></td>
+              <td><strong class="${r.isWn ? 'zy-wn-range-name' : ''}">${zyEsc(r.name)}</strong></td>
               <td><span class="zy-ud-rate-pill">${zyEsc(r.rateFormatted)}</span></td>
               <td class="r" style="color:var(--sp-text-muted);font-size:12px;">${zyEsc(r.dateAdded || 'Active')}</td>
             </tr>
@@ -3785,7 +3799,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
             <div class="zy-ud-card-title"><i class="fas fa-layer-group"></i> Volume Overview</div>
             <span class="zy-ud-card-sub">SMS Counts</span>
           </div>
-          <div class="zy-ud-vol-grid">
+          <div class="${volGridClass}">
             ${volBoxesHtml}
           </div>
         </div>
@@ -3793,7 +3807,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <div class="zy-ud-card zy-ud-chart-card">
           <div class="zy-ud-card-head">
             <div class="zy-ud-card-title"><i class="fas fa-chart-area"></i> SMS Stats Last 7 Days</div>
-            <span class="zy-ud-today-pill zy-ud-num">${todaySms.toLocaleString()} SMS today</span>
+            <span class="zy-ud-today-pill zy-ud-num">${chartTodayTotal.toLocaleString()} SMS today</span>
           </div>
           <div class="zy-ud-chart-wrap" id="${zyEsc(chartId)}"></div>
         </div>
@@ -4120,6 +4134,374 @@ window.zyOpenCdr2TermsModal = function (opts) {
         accBtn.innerHTML = origHtml;
       }
     });
+  }
+};
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CUSTOM IFRAME-SAFE CONFIRM & PROMPT DIALOGS (Replaces native confirm/prompt)
+   ═══════════════════════════════════════════════════════════════════════ */
+window.zyConfirm = function (message, opts = {}) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById('zy-confirm-overlay');
+    if (existing) existing.remove();
+    const esc = (s) => (typeof escapeHtml === 'function' ? escapeHtml(String(s ?? '')) : String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+    const title = opts.title || 'Confirm Action';
+    const okLabel = opts.confirmText || 'Confirm';
+    const cancelLabel = opts.cancelText || 'Cancel';
+    const isDanger = opts.danger !== false;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'zy-confirm-overlay';
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(15,23,42,0.58);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;padding:16px;';
+    wrap.innerHTML = `
+      <div style="background:var(--bg-surface,#ffffff);color:var(--text-primary,#0f172a);border:1px solid var(--border-color,#e2e8f0);border-radius:12px;max-width:440px;width:100%;box-shadow:0 20px 50px rgba(15,23,42,0.28);overflow:hidden;">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border-color,#e2e8f0);display:flex;align-items:center;gap:10px;background:${isDanger ? '#fef2f2' : '#f8fafc'};">
+          <span style="width:30px;height:30px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;background:${isDanger ? '#fee2e2' : '#dbeafe'};color:${isDanger ? '#dc2626' : '#2563eb'};font-size:14px;">
+            <i class="fas ${isDanger ? 'fa-triangle-exclamation' : 'fa-circle-question'}"></i>
+          </span>
+          <span style="font-weight:700;font-size:14.5px;color:#0f172a;">${esc(title)}</span>
+        </div>
+        <div style="padding:18px;font-size:13.5px;line-height:1.55;color:var(--text-secondary,#334155);white-space:pre-line;">${esc(message)}</div>
+        <div style="padding:12px 18px;border-top:1px solid var(--border-color,#e2e8f0);display:flex;justify-content:flex-end;gap:8px;background:var(--bg-subtle,#f8fafc);">
+          <button type="button" id="zy-confirm-cancel" class="btn btn-sm" style="padding:7px 14px;border-radius:7px;border:1px solid #cbd5e1;background:#ffffff;color:#334155;font-weight:600;cursor:pointer;">${esc(cancelLabel)}</button>
+          <button type="button" id="zy-confirm-ok" class="btn btn-sm" style="padding:7px 16px;border-radius:7px;border:none;background:${isDanger ? '#dc2626' : '#2563eb'};color:#ffffff;font-weight:600;cursor:pointer;">${esc(okLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+
+    const cleanup = (val) => {
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') cleanup(false);
+    };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) cleanup(false); });
+    wrap.querySelector('#zy-confirm-cancel').addEventListener('click', () => cleanup(false));
+    const okBtn = wrap.querySelector('#zy-confirm-ok');
+    okBtn.addEventListener('click', () => cleanup(true));
+    setTimeout(() => { try { okBtn.focus(); } catch (_) {} }, 20);
+  });
+};
+
+window.zyPrompt = function (message, defaultValue = '', opts = {}) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById('zy-prompt-overlay');
+    if (existing) existing.remove();
+    const esc = (s) => (typeof escapeHtml === 'function' ? escapeHtml(String(s ?? '')) : String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+    const title = opts.title || 'Input Required';
+    const okLabel = opts.confirmText || 'Submit';
+    const cancelLabel = opts.cancelText || 'Cancel';
+    const placeholder = opts.placeholder || '';
+
+    const wrap = document.createElement('div');
+    wrap.id = 'zy-prompt-overlay';
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(15,23,42,0.58);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;padding:16px;';
+    wrap.innerHTML = `
+      <div style="background:var(--bg-surface,#ffffff);color:var(--text-primary,#0f172a);border:1px solid var(--border-color,#e2e8f0);border-radius:12px;max-width:440px;width:100%;box-shadow:0 20px 50px rgba(15,23,42,0.28);overflow:hidden;">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border-color,#e2e8f0);display:flex;align-items:center;gap:10px;background:#f8fafc;">
+          <span style="width:30px;height:30px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;background:#dbeafe;color:#2563eb;font-size:14px;">
+            <i class="fas fa-pen-to-square"></i>
+          </span>
+          <span style="font-weight:700;font-size:14.5px;color:#0f172a;">${esc(title)}</span>
+        </div>
+        <div style="padding:18px;">
+          <div style="font-size:13.5px;line-height:1.5;color:var(--text-secondary,#334155);margin-bottom:10px;">${esc(message)}</div>
+          <input type="text" id="zy-prompt-input" value="${esc(defaultValue)}" placeholder="${esc(placeholder)}" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13.5px;outline:none;">
+        </div>
+        <div style="padding:12px 18px;border-top:1px solid var(--border-color,#e2e8f0);display:flex;justify-content:flex-end;gap:8px;background:var(--bg-subtle,#f8fafc);">
+          <button type="button" id="zy-prompt-cancel" class="btn btn-sm" style="padding:7px 14px;border-radius:7px;border:1px solid #cbd5e1;background:#ffffff;color:#334155;font-weight:600;cursor:pointer;">${esc(cancelLabel)}</button>
+          <button type="button" id="zy-prompt-ok" class="btn btn-sm" style="padding:7px 16px;border-radius:7px;border:none;background:#2563eb;color:#ffffff;font-weight:600;cursor:pointer;">${esc(okLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+
+    const inputEl = wrap.querySelector('#zy-prompt-input');
+    const cleanup = (val) => {
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') cleanup(null);
+      else if (e.key === 'Enter' && document.activeElement === inputEl) cleanup(inputEl.value);
+    };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) cleanup(null); });
+    wrap.querySelector('#zy-prompt-cancel').addEventListener('click', () => cleanup(null));
+    wrap.querySelector('#zy-prompt-ok').addEventListener('click', () => cleanup(inputEl.value));
+    setTimeout(() => { try { inputEl.focus(); inputEl.select(); } catch (_) {} }, 20);
+  });
+};
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LIVE ACCESS — API-ONLY MASKED OTP LIVE STREAM (Owner / Agent / Client)
+   Exact 3 Columns: Range | CLI | SMS (OTP masked as XXX server-side)
+   ═══════════════════════════════════════════════════════════════════════ */
+window._zyLiveAccessRows = [];
+window._zyLiveAccessIds = new Set();
+window._zyLiveAccessPollTimer = null;
+window._zyLiveAccessPage = 1;
+window._zyLiveAccessLimit = 25;
+window._zyLiveAccessHasNext = false;
+window._zyLiveAccessHasPrev = false;
+
+window.zyRenderLiveAccessPager = function () {
+  const pager = document.getElementById('zy-live-access-pager');
+  if (!pager) return;
+  const page = Number(window._zyLiveAccessPage || 1);
+  const isLive = page === 1;
+  const hasPrev = Boolean(window._zyLiveAccessHasPrev && page > 1);
+  const hasNext = Boolean(window._zyLiveAccessHasNext);
+
+  pager.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 14px;background:#f8fafc;border-top:1px solid #cbd5e1;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button type="button" class="btn btn-sm ${isLive ? 'btn-success' : 'btn-outline'}" onclick="zyGoLiveAccessLive()" style="font-weight:700;display:inline-flex;align-items:center;gap:6px;">
+          <span style="width:8px;height:8px;border-radius:50%;background:${isLive ? '#ffffff' : '#10b981'};display:inline-block;"></span>
+          Live
+        </button>
+        <span style="font-size:12px;color:#64748b;font-weight:600;">${isLive ? 'Showing latest 25 live messages' : `Viewing page ${page} (25 per page)`}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button type="button" class="btn btn-sm btn-outline" onclick="zyGoLiveAccessPage(${page - 1})" ${hasPrev ? '' : 'disabled'} style="min-width:86px;">
+          <i class="fas fa-chevron-left"></i> Previous
+        </button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="zyGoLiveAccessPage(${page + 1})" ${hasNext ? '' : 'disabled'} style="min-width:86px;">
+          Next <i class="fas fa-chevron-right"></i>
+        </button>
+      </div>
+    </div>`;
+};
+
+window.zyGoLiveAccessLive = function () {
+  window._zyLiveAccessPage = 1;
+  window.zyFetchLiveAccessFeed(false, 1);
+};
+
+window.zyGoLiveAccessPage = function (targetPage) {
+  const nextP = Math.max(1, Number(targetPage) || 1);
+  window._zyLiveAccessPage = nextP;
+  window.zyFetchLiveAccessFeed(false, nextP);
+};
+
+window.zyRenderLiveAccessTableBody = function () {
+  const tbody = document.getElementById('zy-live-access-tbody');
+  if (!tbody) return;
+  const esc = (s) => (typeof escapeHtml === 'function' ? escapeHtml(String(s ?? '')) : String(s ?? ''));
+  const qEl = document.getElementById('zy-live-access-search');
+  const q = qEl ? qEl.value.trim().toLowerCase() : '';
+  const rows = (window._zyLiveAccessRows || []).filter(r => {
+    if (!q) return true;
+    return `${r.range || ''} ${r.cli || ''} ${r.sms || ''}`.toLowerCase().includes(q);
+  });
+  const countBadge = document.getElementById('zy-live-access-count');
+  if (countBadge) {
+    countBadge.textContent = Number(window._zyLiveAccessPage || 1) === 1 ? 'LIVE · 25/Page' : `Page ${window._zyLiveAccessPage}`;
+  }
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:34px;color:#64748b;font-size:13px;">
+      <i class="fas fa-satellite-dish" style="font-size:20px;color:#94a3b8;display:block;margin-bottom:8px;"></i>
+      No API OTP messages available on this page.
+    </td></tr>`;
+    window.zyRenderLiveAccessPager();
+    return;
+  }
+
+  tbody.innerHTML = rows.slice(0, window._zyLiveAccessLimit || 25).map(r => `
+    <tr>
+      <td style="font-weight:600;color:#0f172a;white-space:nowrap;">${esc(r.range || 'International')}</td>
+      <td style="white-space:nowrap;">
+        <span style="display:inline-flex;align-items:center;padding:3px 9px;border-radius:6px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;font-weight:700;font-size:12px;">${esc(r.cli || 'SMS')}</span>
+      </td>
+      <td style="font-family:var(--font-mono,'JetBrains Mono',monospace);font-size:12.5px;color:#1e293b;word-break:break-word;line-height:1.45;">${esc(r.sms || '')}</td>
+    </tr>`).join('');
+  window.zyRenderLiveAccessPager();
+};
+
+window.zyHandleLiveAccessWsEvent = function (item) {
+  if (!item || !document.getElementById('zy-live-access-tbody')) return;
+  // Only live-prepend when user is on Live (Page 1)
+  if (Number(window._zyLiveAccessPage || 1) !== 1) return;
+  const key = item.id != null ? String(item.id) : `${item.range}|${item.cli}|${item.sms}|${item.timestamp}`;
+  if (window._zyLiveAccessIds.has(key)) return;
+  window._zyLiveAccessIds.add(key);
+  window._zyLiveAccessRows.unshift(item);
+  const maxRows = window._zyLiveAccessLimit || 25;
+  if (window._zyLiveAccessRows.length > maxRows) {
+    window._zyLiveAccessRows = window._zyLiveAccessRows.slice(0, maxRows);
+    window._zyLiveAccessHasNext = true;
+  }
+  window.zyRenderLiveAccessTableBody();
+};
+
+window.zySaveLiveAccessToggle = async function (field, checked) {
+  try {
+    const body = {};
+    body[field] = Boolean(checked);
+    const res = await apiFetch('/api/owner/live-access-config', {
+      method: 'PUT',
+      body: JSON.stringify(body)
+    });
+    if (res && res.success) {
+      if (typeof toast === 'function') {
+        const who = field === 'live_access_agents_enabled' ? 'Agents' : 'Clients';
+        toast(`Live Access for ${who} ${checked ? 'Enabled' : 'Disabled'}`, 'success');
+      }
+      const agState = document.getElementById('zy-la-agent-state');
+      const clState = document.getElementById('zy-la-client-state');
+      if (agState) agState.textContent = res.live_access_agents_enabled ? 'ON — All Agents can see Live Access' : 'OFF — Hidden from Agents';
+      if (clState) clState.textContent = res.live_access_clients_enabled ? 'ON — All Clients can see Live Access' : 'OFF — Hidden from Clients';
+    }
+  } catch (err) {
+    if (typeof toast === 'function') toast(err?.message || 'Failed to update Live Access permission', 'error');
+  }
+};
+
+window.zyFetchLiveAccessFeed = async function (silent = false, targetPage = null) {
+  const tbody = document.getElementById('zy-live-access-tbody');
+  if (!tbody) return;
+  const page = Math.max(1, Number(targetPage != null ? targetPage : window._zyLiveAccessPage) || 1);
+  window._zyLiveAccessPage = page;
+  const limit = window._zyLiveAccessLimit || 25;
+  const qEl = document.getElementById('zy-live-access-search');
+  const q = qEl ? qEl.value.trim() : '';
+  try {
+    const qs = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (q) qs.set('search', q);
+    const res = await apiFetch(`/api/live-access?${qs.toString()}`);
+    if (res && res.error) {
+      if (!silent) {
+        tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:28px;color:#dc2626;font-weight:600;">${typeof escapeHtml === 'function' ? escapeHtml(res.error) : res.error}</td></tr>`;
+      }
+      return;
+    }
+    const list = Array.isArray(res?.data) ? res.data : [];
+    window._zyLiveAccessRows = list;
+    window._zyLiveAccessHasNext = Boolean(res?.has_next);
+    window._zyLiveAccessHasPrev = Boolean(res?.has_prev);
+    window._zyLiveAccessIds = new Set(list.map(r => (r.id != null ? String(r.id) : `${r.range}|${r.cli}|${r.sms}|${r.timestamp}`)));
+
+    // Sync Owner toggle switches if present
+    const agToggle = document.getElementById('zy-la-toggle-agents');
+    const clToggle = document.getElementById('zy-la-toggle-clients');
+    const agState = document.getElementById('zy-la-agent-state');
+    const clState = document.getElementById('zy-la-client-state');
+    if (agToggle && typeof res.live_access_agents_enabled === 'boolean') {
+      agToggle.checked = res.live_access_agents_enabled;
+      if (agState) agState.textContent = res.live_access_agents_enabled ? 'ON — All Agents can see Live Access' : 'OFF — Hidden from Agents';
+    }
+    if (clToggle && typeof res.live_access_clients_enabled === 'boolean') {
+      clToggle.checked = res.live_access_clients_enabled;
+      if (clState) clState.textContent = res.live_access_clients_enabled ? 'ON — All Clients can see Live Access' : 'OFF — Hidden from Clients';
+    }
+    window.zyRenderLiveAccessTableBody();
+  } catch (err) {
+    if (!silent) {
+      const msg = (err && err.message) || 'Could not load Live Access feed';
+      tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:28px;color:#dc2626;">${typeof escapeHtml === 'function' ? escapeHtml(msg) : msg}</td></tr>`;
+    }
+  }
+};
+
+window._zyLiveAccessSearchDebounce = null;
+window.zyOnLiveAccessSearchInput = function () {
+  if (window._zyLiveAccessSearchDebounce) clearTimeout(window._zyLiveAccessSearchDebounce);
+  window._zyLiveAccessSearchDebounce = setTimeout(() => {
+    window._zyLiveAccessPage = 1;
+    window.zyFetchLiveAccessFeed(false, 1);
+  }, 260);
+};
+
+window.zyRenderLiveAccessPage = async function (opts = {}) {
+  const role = String(opts.role || 'owner').toLowerCase();
+  const isOwner = role === 'owner' || role === 'admin';
+  const c = document.getElementById('page-content');
+  if (!c) return;
+  if (typeof zyCrumb === 'function') zyCrumb(['Live Access']);
+  const bc = document.getElementById('breadcrumb');
+  if (bc) bc.textContent = 'Live Access';
+
+  window._zyLiveAccessPage = 1;
+  window._zyLiveAccessLimit = 25;
+  if (window._zyLiveAccessPollTimer) {
+    clearInterval(window._zyLiveAccessPollTimer);
+    window._zyLiveAccessPollTimer = null;
+  }
+
+  const ownerControls = isOwner ? `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:14px;">
+      <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:10px;background:#ffffff;border:1.5px solid #cbd5e1;cursor:pointer;">
+        <div>
+          <div style="font-weight:700;font-size:13.5px;color:#0f172a;"><i class="fas fa-user-tie" style="color:#2563eb;margin-right:6px;"></i> Agent Live Access</div>
+          <div id="zy-la-agent-state" style="font-size:12px;color:#64748b;margin-top:2px;">Loading status…</div>
+        </div>
+        <input type="checkbox" id="zy-la-toggle-agents" onchange="zySaveLiveAccessToggle('live_access_agents_enabled', this.checked)" style="width:20px;height:20px;accent-color:#2563eb;cursor:pointer;">
+      </label>
+      <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:10px;background:#ffffff;border:1.5px solid #cbd5e1;cursor:pointer;">
+        <div>
+          <div style="font-weight:700;font-size:13.5px;color:#0f172a;"><i class="fas fa-users" style="color:#059669;margin-right:6px;"></i> Client Live Access</div>
+          <div id="zy-la-client-state" style="font-size:12px;color:#64748b;margin-top:2px;">Loading status…</div>
+        </div>
+        <input type="checkbox" id="zy-la-toggle-clients" onchange="zySaveLiveAccessToggle('live_access_clients_enabled', this.checked)" style="width:20px;height:20px;accent-color:#059669;cursor:pointer;">
+      </label>
+    </div>` : '';
+
+  c.innerHTML = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+      <div>
+        <div class="page-title" style="display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-tower-broadcast" style="color:#10b981;"></i> Live Access
+        </div>
+        <div class="page-subtitle">Real-time API OTP stream with protected masked codes (XXX) — 25 per page</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span id="zy-live-access-count" class="badge badge-green" style="font-size:11.5px;padding:5px 10px;">LIVE · 25/Page</span>
+        <button type="button" class="btn btn-sm btn-primary" onclick="zyGoLiveAccessLive()"><i class="fas fa-bolt"></i> Live</button>
+      </div>
+    </div>
+    ${ownerControls}
+    <div class="apx-card" style="border:1.5px solid #cbd5e1;border-radius:10px;background:#ffffff;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+      <div class="apx-card-header" style="padding:10px 14px;background:#f8fafc;border-bottom:1px solid #cbd5e1;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <span style="font-weight:700;font-size:13px;color:#1e293b;">
+          <i class="fas fa-shield-halved" style="color:#059669;margin-right:6px;"></i> Live API Messages (Masked OTP)
+        </span>
+        <input type="text" id="zy-live-access-search" oninput="zyOnLiveAccessSearchInput()" placeholder="Search Range, CLI, or SMS…" style="padding:6px 11px;border:1px solid #cbd5e1;border-radius:7px;font-size:12.5px;min-width:220px;background:#ffffff;">
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table" style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="width:22%;text-align:left;">Range</th>
+              <th style="width:18%;text-align:left;">CLI</th>
+              <th style="width:60%;text-align:left;">SMS</th>
+            </tr>
+          </thead>
+          <tbody id="zy-live-access-tbody">
+            <tr><td colspan="3" style="text-align:center;padding:30px;color:#64748b;">Loading Live Access stream…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="zy-live-access-pager"></div>
+    </div>`;
+
+  await window.zyFetchLiveAccessFeed(false, 1);
+
+  window._zyLiveAccessPollTimer = setInterval(() => {
+    if (!document.getElementById('zy-live-access-tbody')) {
+      clearInterval(window._zyLiveAccessPollTimer);
+      window._zyLiveAccessPollTimer = null;
+      return;
+    }
+    if (Number(window._zyLiveAccessPage || 1) === 1) {
+      window.zyFetchLiveAccessFeed(true, 1);
+    }
+  }, 5000);
+  if (typeof activePollers !== 'undefined' && Array.isArray(activePollers)) {
+    activePollers.push(window._zyLiveAccessPollTimer);
   }
 };
 

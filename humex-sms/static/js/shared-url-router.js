@@ -16,9 +16,11 @@
       'sms-ranges': 'SMSRanges',
       'sms-rate-card': 'SMSRateCard',
       'upload-numbers': 'UploadNumbers',
+      'smart-sheet-import': 'SmartSheetImport',
       'bulk-range-import': 'BulkRangeImport',
       'blacklist-management': 'Blacklist',
-      'revoke-numbers': 'RevokeNumbers',
+      'revoke-numbers': 'BlockedNumbers',
+      'blocked-numbers': 'BlockedNumbers',
       'number-transfers-log': 'TransferHistory',
       'my-sms': 'SMSReports',
       'cdr2': 'CDR2',
@@ -67,12 +69,14 @@
       '2fa': 'TwoFactorAuth',
       'general-settings': 'GeneralSettings',
       'security-settings': 'SecuritySettings',
-      'system-health': 'SystemHealth'
+      'system-health': 'SystemHealth',
+      'app-links': 'AppsLinks'
     },
     agent: {
       'dashboard': 'SMSDashboard',
       'live-chat': 'LiveChat',
       'my-sms-numbers': 'MySMSNumbers',
+      'blocked-numbers': 'BlockedNumbers',
       'bulk-add': 'BulkAllocation',
       'client-requests': 'NumberRequests',
       'sms-ranges': 'SMSRanges',
@@ -97,7 +101,8 @@
       'my-profile': 'Profile',
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
-      'audit-logs': 'AuditLogs'
+      'audit-logs': 'AuditLogs',
+      'app-links': 'AppsLinks'
     },
     client: {
       'dashboard': 'SMSDashboard',
@@ -117,7 +122,8 @@
       'profile': 'Profile',
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
-      'audit-logs': 'AuditLogs'
+      'audit-logs': 'AuditLogs',
+      'app-links': 'AppsLinks'
     }
   };
   MAPS.admin = MAPS.owner;
@@ -131,11 +137,14 @@
       searchsms: 'my-sms',
       deliverylogs: 'my-sms',
       liveaccess: 'live-otp-feed',
-      notifications: 'notifications'
+      notifications: 'notifications',
+      appslinks: 'app-links',
+      smartsheetimport: 'smart-sheet-import'
     },
     agent: {
       profile: 'my-profile',
       livechat: 'live-chat',
+      appslinks: 'app-links',
       smsranges: 'sms-ranges',
       clientrateset: 'client-rate-set',
       clientpaymentrequests: 'client-payment-requests',
@@ -151,6 +160,7 @@
     client: {
       profile: 'my-profile',
       livechat: 'live-chat',
+      appslinks: 'app-links',
       smsranges: 'sms-overview',
       notifications: 'news'
     }

@@ -21,6 +21,17 @@ const ZY_CLIENT_ICONS = {
     <circle cx="12.2" cy="10" r="1.15" fill="currentColor"/>
     <circle cx="15.2" cy="10" r="1.15" fill="currentColor"/>
   </svg>`,
+  'app-links': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="3.5" y="3.5" width="7.2" height="7.2" rx="2" fill="currentColor" opacity="0.26" stroke="currentColor" stroke-width="1.7"/>
+    <rect x="13.3" y="3.5" width="7.2" height="7.2" rx="2" fill="currentColor" opacity="0.88"/>
+    <rect x="3.5" y="13.3" width="7.2" height="7.2" rx="2" fill="currentColor" opacity="0.88"/>
+    <path d="M14 17h6m-3-3 3 3-3 3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`,
+  'live-access': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <circle cx="12" cy="12" r="2.6" fill="currentColor"/>
+    <path d="M8.2 15.8a5.4 5.4 0 0 1 0-7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+    <path d="M5.2 18.8a9.6 9.6 0 0 1 0-13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" opacity="0.55"/>
+  </svg>`,
   'my-numbers': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <rect x="5.5" y="2.5" width="13" height="19" rx="3" fill="currentColor" opacity="0.22" stroke="currentColor" stroke-width="1.8"/>
     <rect x="8.5" y="6" width="7" height="5.5" rx="1.2" fill="currentColor" opacity="0.88"/>
@@ -71,6 +82,8 @@ const ZY_CLIENT_ICONS = {
 const ZY_CLIENT_MENU = [
   { label: 'Dashboard', page: 'dashboard', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
   { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
+  { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
   { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'Ranges Rate Card', page: 'sms-overview', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'CDR & Statistics', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
@@ -83,6 +96,8 @@ const ZY_CLIENT_MENU = [
 const ZY_LABELS = {
   'dashboard': 'Dashboard',
   'live-chat': 'Live Chat',
+  'app-links': 'Apps Links',
+  'live-access': 'Live Access',
   'my-numbers': 'My Numbers',
   'sms-overview': 'Ranges Rate Card',
   'sms-ranges': 'Ranges Rate Card',
@@ -155,7 +170,9 @@ window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
       el.textContent = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }
   }
-  tick(); setInterval(tick, 1000);
+  tick();
+  if (window._zyClientClockTimer) clearInterval(window._zyClientClockTimer);
+  window._zyClientClockTimer = setInterval(tick, 1000);
 
   let sess = {};
   try { sess = JSON.parse(sessionStorage.getItem('admin_user') || '{}'); } catch (e) {}
@@ -173,11 +190,25 @@ window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
 })();
 
 window.ZY_WHITENOISE_ACCESS = false;
+window.ZY_APP_LINKS_ACCESS = false;
+window.ZY_LIVE_ACCESS_ENABLED = false;
+window.zySyncLiveAccessNav = function(enabled) {
+  window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
+  const laEl = document.getElementById('nav-live-access');
+  if (laEl) laEl.style.display = window.ZY_LIVE_ACCESS_ENABLED ? '' : 'none';
+};
 window.zyRefreshWhitenoiseNav = function(me) {
   const allowed = Boolean(me && me.whitenoise_access);
   window.ZY_WHITENOISE_ACCESS = allowed;
   const el = document.getElementById('nav-cdr2');
   if (el) el.style.display = allowed ? '' : 'none';
+  const appAllowed = Boolean(me && me.app_links_access);
+  window.ZY_APP_LINKS_ACCESS = appAllowed;
+  const appEl = document.getElementById('nav-app-links');
+  if (appEl) appEl.style.display = appAllowed ? '' : 'none';
+  if (me && typeof me.live_access_enabled === 'boolean') {
+    window.zySyncLiveAccessNav(me.live_access_enabled);
+  }
 };
 if (typeof apiFetch === 'function') {
   apiFetch('/api/auth/me', { silent: true })
@@ -255,20 +286,19 @@ pgDashboard = async function () {
           return `${days[dt.getUTCDay()]} ${dt.getUTCDate()}`;
         });
 
-    const todaySmsVal = Number(p.today != null ? p.today : (d.today || 0));
+    const apiTodaySms = Number(p.api_today != null ? p.api_today : (d.today || 0));
+    const apiYestSms = Number(p.api_yesterday != null ? p.api_yesterday : (d.yesterday || 0));
+    const wnTodaySms = Number(p.whitenoise_today || 0);
+    const totalTodaySms = Number(p.today != null ? p.today : (apiTodaySms + wnTodaySms));
     const yestSmsVal = Number(p.yesterday != null ? p.yesterday : (d.yesterday || 0));
     const last7Val = Number(p.last_7_days != null ? p.last_7_days : weeklyTraffic.reduce((a, b) => a + (Number(b) || 0), 0));
     const last30Val = Number(p.last_30_days != null ? p.last_30_days : (d.this_month || 0));
+    const yearSmsVal = Number(p.year != null ? p.year : (d.this_year || 0));
 
     const earnToday = Number(
       p.profit_today_pkr != null
         ? p.profit_today_pkr
         : (earn.today_pkr != null ? earn.today_pkr : ((p.profit_today != null ? p.profit_today : (earn.today || 0)) * fx))
-    );
-    const earnWeek = Number(
-      p.profit_week_pkr != null
-        ? p.profit_week_pkr
-        : (earn.this_week_pkr != null ? earn.this_week_pkr : ((p.profit_week != null ? p.profit_week : (earn.this_week || 0)) * fx))
     );
     const mainBalance = Number(
       earn.main_balance_pkr != null
@@ -285,10 +315,16 @@ pgDashboard = async function () {
       const batchStr = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length
         ? r.allowed_quantities.join(' / ')
         : '25 / 50';
+      const isWn = Boolean(
+        r.is_whitenoise ||
+        String(r.provider || '').toLowerCase().includes('whitenoise') ||
+        String(r.payout_schedule || '').toLowerCase() === 'monthly30_5'
+      );
       return {
         name: r.range_name || r.name || r.country || '—',
         rateFormatted: `Rs. ${zyFmtMoney(ratePkr, 4)}`,
-        dateAdded: r.requested_today ? 'Requested Today' : `Batch ${batchStr}`
+        dateAdded: r.requested_today ? 'Requested Today' : `Batch ${batchStr}`,
+        isWn
       };
     });
 
@@ -314,19 +350,20 @@ pgDashboard = async function () {
         reportsRoute: 'my-sms',
         notificationsRoute: 'news',
         chartId: 'zy-client-week-chart',
+        chartTodayTotal: totalTodaySms,
         weeklyLabels,
         weeklyTraffic,
         hero: {
-          label: 'Today SMS',
-          value: todaySmsVal,
-          yesterday: yestSmsVal,
-          subtitle: 'On your numbers today',
+          label: 'Today SMS (API)',
+          value: apiTodaySms,
+          yesterday: apiYestSms,
+          subtitle: 'API SMS on your numbers today',
           icon: 'fa-check',
           page: 'my-sms'
         },
         moneyCards: [
-          { label: 'My Earnings Today', value: fmtPkr(earnToday), sub: 'Earned today (PKR)', icon: 'fa-sack-dollar', page: 'my-earnings' },
-          { label: 'My Earnings Week', value: fmtPkr(earnWeek), sub: 'Current week (Mon–Sun PKR)', icon: 'fa-chart-line', page: 'my-balance' }
+          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: clientHasWn ? 'Monthly {W} SMS today' : 'Monthly {W} route inactive', icon: 'fa-tower-cell', page: clientHasWn ? 'cdr2' : 'my-sms' },
+          { label: 'Today SMS Total', value: totalTodaySms.toLocaleString(), sub: 'API + Monthly {W} combined today', icon: 'fa-layer-group', page: 'my-sms' }
         ],
         shortcuts: [
           { label: 'My Numbers', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
@@ -339,10 +376,10 @@ pgDashboard = async function () {
           { label: 'Credit Notes', page: 'my-earnings', icon: 'fa-receipt', tone: 'green' }
         ],
         volumes: [
-          { label: 'Today SMS', value: todaySmsVal, page: 'my-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },
           { label: 'SMS Last 7 Days', value: last7Val, page: 'my-sms' },
-          { label: 'SMS Last 30 Days', value: last30Val, page: 'my-sms' }
+          { label: 'SMS Last 30 Days', value: last30Val, page: 'my-sms' },
+          { label: 'Yearly SMS', value: yearSmsVal, page: 'my-sms' }
         ],
         summaryTitle: 'Account Snapshot (PKR)',
         summaryRows: [

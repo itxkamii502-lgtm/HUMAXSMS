@@ -64,7 +64,10 @@
     pendingImages: [],
     dragDepth: 0,
     scheduleTickTimer: null,
-    scheduleExpiryRefreshing: false
+    scheduleExpiryRefreshing: false,
+    selectMode: false,
+    selectedMsgIds: new Set(),
+    expandedDeletedIds: new Set()
   };
 
   const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
@@ -571,12 +574,25 @@
       const msgId = Number(ev.message_id);
       const arr = state.messagesByConv.get(convId);
       if (arr) {
-        const target = arr.find(m => Number(m.id) === msgId);
-        if (target) {
-          target.deleted = true;
-          target.body = 'This message was deleted';
-          target.image = null;
-          target.reply_to = null;
+        const idx = arr.findIndex(m => Number(m.id) === msgId);
+        if (idx !== -1) {
+          if (ev.hidden_for_self) {
+            arr.splice(idx, 1);
+            state.selectedMsgIds.delete(msgId);
+          } else {
+            const target = arr[idx];
+            target.deleted = true;
+            target.body = 'This message was deleted';
+            target.image = null;
+            target.reply_to = null;
+            if (ev.can_preview_deleted) {
+              target.can_preview_deleted = true;
+              target.deleted_preview_body = typeof ev.deleted_preview_body === 'string' ? ev.deleted_preview_body : '';
+              target.deleted_preview_image = ev.deleted_preview_image || null;
+              if (ev.deleted_by_role) target.deleted_by_role = ev.deleted_by_role;
+              if (ev.deleted_at) target.deleted_at = ev.deleted_at;
+            }
+          }
         }
       }
       const conv = state.conversations.find(c => Number(c.id) === convId);
@@ -586,7 +602,15 @@
           conv.pinned_message = null;
         }
         if (Number(conv.last_message_id) === msgId) {
-          conv.last_message_preview = 'This message was deleted';
+          if (ev.hidden_for_self && arr) {
+            const latest = arr.length ? arr[arr.length - 1] : null;
+            conv.last_message_id = latest ? Number(latest.id) : 0;
+            conv.last_message_preview = latest
+              ? (latest.deleted ? 'This message was deleted' : (latest.image ? (latest.body ? `📷 ${String(latest.body)}`.slice(0, 120) : '📷 Photo') : String(latest.body || '').slice(0, 120)))
+              : '';
+          } else {
+            conv.last_message_preview = 'This message was deleted';
+          }
         }
       }
       if (state.mounted) {
@@ -650,6 +674,9 @@
     state.emojiOpen = false;
     state.drawerOpen = false;
     state.confirmDeleteGroup = false;
+    state.selectMode = false;
+    state.selectedMsgIds.clear();
+    state.expandedDeletedIds.clear();
     state.mobileShowThread = true;
     const conv = state.conversations.find(c => Number(c.id) === Number(convId));
     if (conv && conv.unread_count > 0) {
@@ -1185,10 +1212,101 @@
 
   async function deleteMessage(convId, msgId) {
     try {
-      await reqJson(`/api/chat/conversations/${convId}/messages/${msgId}`, { method: 'DELETE' });
+      const data = await reqJson(`/api/chat/conversations/${convId}/messages/${msgId}?hide_self=1`, { method: 'DELETE' });
+      const arr = state.messagesByConv.get(Number(convId));
+      if (arr) {
+        const idx = arr.findIndex(m => Number(m.id) === Number(msgId));
+        if (idx !== -1) arr.splice(idx, 1);
+      }
+      state.selectedMsgIds.delete(Number(msgId));
+      if (data && data.conversation) {
+        const cIdx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+        if (cIdx !== -1) state.conversations[cIdx] = data.conversation;
+      }
+      if (state.mounted) {
+        renderInboxList();
+        if (Number(state.activeConvId) === Number(convId)) renderThreadArea(false);
+      }
     } catch (err) {
       if (typeof toast === 'function') toast(err.message || 'Cannot delete message', 'error');
     }
+  }
+
+  async function bulkDeleteSelectedMessages(convId) {
+    const ids = Array.from(state.selectedMsgIds).map(Number).filter(n => n > 0);
+    if (!ids.length) {
+      if (typeof toast === 'function') toast('Select at least one message first', 'warning');
+      return;
+    }
+    try {
+      const data = await reqJson(`/api/chat/conversations/${convId}/messages/bulk-delete`, {
+        method: 'POST',
+        body: JSON.stringify({ message_ids: ids })
+      });
+      const idSet = new Set(ids);
+      const arr = state.messagesByConv.get(Number(convId)) || [];
+      state.messagesByConv.set(Number(convId), arr.filter(m => !idSet.has(Number(m.id))));
+      state.selectedMsgIds.clear();
+      state.selectMode = false;
+      if (data && data.conversation) {
+        const cIdx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+        if (cIdx !== -1) state.conversations[cIdx] = data.conversation;
+      }
+      recomputeUnread();
+      if (state.mounted) {
+        renderInboxList();
+        renderThreadArea(false);
+      }
+      if (typeof toast === 'function') {
+        toast(`${ids.length} message${ids.length === 1 ? '' : 's'} deleted`, 'success');
+      }
+    } catch (err) {
+      if (typeof toast === 'function') toast(err.message || 'Failed to delete selected messages', 'error');
+    }
+  }
+
+  async function clearChatHistory(convId) {
+    const runClear = async () => {
+      try {
+        const data = await reqJson(`/api/chat/conversations/${convId}/clear-history`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        state.messagesByConv.set(Number(convId), []);
+        state.selectedMsgIds.clear();
+        state.selectMode = false;
+        state.expandedDeletedIds.clear();
+        if (data && data.conversation) {
+          const cIdx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+          if (cIdx !== -1) state.conversations[cIdx] = data.conversation;
+        }
+        recomputeUnread();
+        if (state.mounted) {
+          renderInboxList();
+          renderThreadArea(false);
+        }
+        if (typeof toast === 'function') toast('Chat history cleared', 'success');
+      } catch (err) {
+        if (typeof toast === 'function') toast(err.message || 'Failed to clear chat history', 'error');
+      }
+    };
+
+    if (typeof window.zyConfirm === 'function') {
+      const ok = await window.zyConfirm('Clear Chat History', 'Remove all messages in this chat from your view?');
+      if (ok) await runClear();
+    } else {
+      await runClear();
+    }
+  }
+
+  function updateSelectBarUi() {
+    const bar = document.getElementById('zy-chat-select-bar');
+    if (!bar) return;
+    const cnt = state.selectedMsgIds.size;
+    const cntEl = document.getElementById('zy-chat-sel-count');
+    const delBtn = document.getElementById('zy-chat-sel-del');
+    if (cntEl) cntEl.textContent = `${cnt} selected`;
+    if (delBtn) delBtn.disabled = cnt === 0;
   }
 
   async function pinMessage(convId, msgId) {
@@ -1601,6 +1719,9 @@
       const isMine = state.me && m.sender_key === state.me.key;
       const canDelete = !m.deleted && (isMine || isGroupAdmin);
       const isPinned = Number(conv.pinned_message_id) === Number(m.id);
+      const isSelected = state.selectMode && state.selectedMsgIds.has(Number(m.id));
+      const canPreviewDeleted = Boolean(m.deleted && m.can_preview_deleted);
+      const isPreviewOpen = canPreviewDeleted && state.expandedDeletedIds.has(Number(m.id));
 
       const senderLabel = isGroup && !isMine
         ? `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)}${m.sender_role === 'agent' ? ' · Admin' : ''}</div>`
@@ -1613,7 +1734,7 @@
            </div>`
         : '';
 
-      const actionsHtml = !m.deleted && !m._optimistic
+      const actionsHtml = !state.selectMode && !m.deleted && !m._optimistic
         ? `<div class="zy-chat-msg-actions">
              <button type="button" class="zy-chat-act-btn" data-act="reply" data-mid="${m.id}" title="Reply"><i class="fas fa-reply"></i></button>
              ${isGroupAdmin ? `<button type="button" class="zy-chat-act-btn ${isPinned ? 'is-pinned' : ''}" data-act="pin" data-mid="${m.id}" title="${isPinned ? 'Unpin' : 'Pin message'}"><i class="fas fa-thumbtack"></i></button>` : ''}
@@ -1637,9 +1758,34 @@
            </div>`
         : '';
 
-      const textHtml = m.deleted
-        ? `<div class="zy-chat-text"><i class="fas fa-ban"></i> This message was deleted</div>`
-        : (hasCaption ? `<div class="zy-chat-text">${esc(m.body).replace(/\n/g, '<br>')}</div>` : '');
+      let textHtml = '';
+      if (m.deleted) {
+        if (canPreviewDeleted) {
+          const prevImg = m.deleted_preview_image && m.deleted_preview_image.url ? m.deleted_preview_image : null;
+          const prevBody = typeof m.deleted_preview_body === 'string' ? m.deleted_preview_body.trim() : '';
+          textHtml = `
+            <div class="zy-chat-del-audit">
+              <div class="zy-chat-del-head">
+                <span class="zy-chat-del-lbl"><i class="fas fa-ban"></i> Deleted by sender</span>
+                <button type="button" class="zy-chat-del-toggle" data-toggle-del-preview="${m.id}">
+                  <i class="fas ${isPreviewOpen ? 'fa-eye-slash' : 'fa-eye'}"></i>
+                  <span>${isPreviewOpen ? 'Hide' : 'Preview'}</span>
+                </button>
+              </div>
+              ${isPreviewOpen ? `
+                <div class="zy-chat-del-preview-box">
+                  <div class="zy-chat-del-preview-tag">Original message</div>
+                  ${prevImg ? `<div class="zy-chat-img-wrap" data-open-del-img="${esc(prevImg.url)}" data-img-mid="${m.id}" style="margin-bottom:${prevBody ? '6px' : '0'};"><img class="zy-chat-img" src="${esc(prevImg.url)}" alt="Deleted photo" loading="lazy" decoding="async"></div>` : ''}
+                  ${prevBody ? `<div class="zy-chat-del-preview-txt">${esc(prevBody).replace(/\n/g, '<br>')}</div>` : (!prevImg ? '<div class="zy-chat-del-preview-txt" style="opacity:.7;">(Empty message)</div>' : '')}
+                </div>
+              ` : ''}
+            </div>`;
+        } else {
+          textHtml = `<div class="zy-chat-text"><i class="fas fa-ban"></i> This message was deleted</div>`;
+        }
+      } else if (hasCaption) {
+        textHtml = `<div class="zy-chat-text">${esc(m.body).replace(/\n/g, '<br>')}</div>`;
+      }
 
       const autoBadgeHtml = m.is_auto_schedule && !m.deleted
         ? `<div class="zy-chat-auto-tag ${m.auto_type === 'night_close' ? 'is-night' : 'is-morning'}">
@@ -1648,10 +1794,17 @@
            </div>`
         : '';
 
+      const selectCheckboxHtml = state.selectMode && !m._optimistic
+        ? `<label class="zy-chat-sel-chk-wrap" title="Select message">
+             <input type="checkbox" class="zy-chat-sel-chk" data-sel-mid="${m.id}" ${isSelected ? 'checked' : ''}>
+           </label>`
+        : '';
+
       return `
         ${divider}
-        <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'}" data-msg-id="${m.id}">
-          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
+        <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'} ${state.selectMode ? 'is-selectable' : ''} ${isSelected ? 'is-selected' : ''}" data-msg-id="${m.id}">
+          ${selectCheckboxHtml}
+          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${canPreviewDeleted ? 'has-del-preview' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
             ${actionsHtml}
             ${autoBadgeHtml}
             ${senderLabel}
@@ -1670,10 +1823,60 @@
 
     feed.innerHTML = html;
 
+    // Bind selection mode toggling
+    if (state.selectMode) {
+      feed.querySelectorAll('.zy-chat-msg-row[data-msg-id]').forEach(row => {
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('[data-toggle-del-preview]')) return;
+          const mid = Number(row.dataset.msgId);
+          if (!mid) return;
+          const chk = row.querySelector('.zy-chat-sel-chk');
+          if (e.target !== chk) {
+            if (state.selectedMsgIds.has(mid)) state.selectedMsgIds.delete(mid);
+            else state.selectedMsgIds.add(mid);
+            if (chk) chk.checked = state.selectedMsgIds.has(mid);
+          } else {
+            if (chk.checked) state.selectedMsgIds.add(mid);
+            else state.selectedMsgIds.delete(mid);
+          }
+          row.classList.toggle('is-selected', state.selectedMsgIds.has(mid));
+          updateSelectBarUi();
+        });
+      });
+    }
+
+    // Bind upline deleted-message preview toggles
+    feed.querySelectorAll('[data-toggle-del-preview]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const mid = Number(btn.dataset.toggleDelPreview);
+        if (state.expandedDeletedIds.has(mid)) state.expandedDeletedIds.delete(mid);
+        else state.expandedDeletedIds.add(mid);
+        const prevScroll = feed.scrollTop;
+        renderMessagesPane(false);
+        feed.scrollTop = prevScroll;
+      });
+    });
+
+    // Bind deleted-preview photo lightbox zoom
+    feed.querySelectorAll('[data-open-del-img]').forEach(wrap => {
+      wrap.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const mid = Number(wrap.dataset.imgMid);
+        const target = msgs.find(x => Number(x.id) === mid);
+        openImageLightbox(
+          wrap.dataset.openDelImg,
+          target ? (target.deleted_preview_body || 'Deleted photo') : 'Deleted photo',
+          target ? `${target.sender_name || ''} (Deleted)` : 'Deleted',
+          target ? `${formatDayLabel(target.created_at)} · ${formatTime(target.created_at)}` : ''
+        );
+      });
+    });
+
     // Bind photo lightbox zoom
     feed.querySelectorAll('[data-open-img]').forEach(wrap => {
       wrap.addEventListener('click', (e) => {
-        if (wrap.classList.contains('is-uploading')) return;
+        if (state.selectMode || wrap.classList.contains('is-uploading')) return;
         e.stopPropagation();
         const mid = Number(wrap.dataset.imgMid);
         const target = msgs.find(x => Number(x.id) === mid);
@@ -1688,7 +1891,10 @@
 
     // Bind quote jump
     feed.querySelectorAll('[data-jump-msg]').forEach(el => {
-      el.addEventListener('click', () => jumpToMessage(Number(el.dataset.jumpMsg)));
+      el.addEventListener('click', () => {
+        if (state.selectMode) return;
+        jumpToMessage(Number(el.dataset.jumpMsg));
+      });
     });
     // Bind actions
     feed.querySelectorAll('.zy-chat-act-btn').forEach(btn => {
@@ -1983,6 +2189,14 @@
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
           <div class="zy-chat-thread-actions">
+            <button type="button" class="zy-chat-head-btn ${state.selectMode ? 'is-active' : ''}" id="zy-chat-select-btn" title="${state.selectMode ? 'Exit Selection' : 'Select Messages to Delete'}">
+              <i class="fas ${state.selectMode ? 'fa-times' : 'fa-check-double'}"></i>
+              <span>${state.selectMode ? 'Cancel' : 'Select'}</span>
+            </button>
+            <button type="button" class="zy-chat-head-btn is-danger" id="zy-chat-clear-btn" title="Clear Chat History">
+              <i class="fas fa-eraser"></i>
+              <span>Clear</span>
+            </button>
             ${isGroup ? `
               <button type="button" class="zy-chat-head-btn" id="zy-chat-group-info-btn" title="${conv.can_manage ? 'Group Admin Settings' : 'Group Info'}">
                 <i class="fas ${conv.can_manage ? 'fa-sliders' : 'fa-circle-info'}"></i>
@@ -2029,6 +2243,19 @@
                 Reopens automatically at <strong>${esc(formatTime12h(conv.schedule_state.open_time))} PKT</strong>
                 ${conv.can_manage ? ' · Clients are muted (Admin can still post or edit schedule in Manage)' : ''}
               </div>
+            </div>
+          </div>
+        ` : ''}
+
+        ${state.selectMode ? `
+          <div class="zy-chat-select-bar" id="zy-chat-select-bar">
+            <span class="zy-chat-sel-count" id="zy-chat-sel-count">${state.selectedMsgIds.size} selected</span>
+            <div class="zy-chat-sel-actions">
+              <button type="button" class="zy-chat-sel-btn" id="zy-chat-sel-all">Select All</button>
+              <button type="button" class="zy-chat-sel-btn is-danger" id="zy-chat-sel-del" ${state.selectedMsgIds.size === 0 ? 'disabled' : ''}>
+                <i class="fas fa-trash-can"></i> Delete Selected
+              </button>
+              <button type="button" class="zy-chat-sel-btn" id="zy-chat-sel-cancel">Cancel</button>
             </div>
           </div>
         ` : ''}
@@ -2087,6 +2314,43 @@
     };
     if (infoBtn) infoBtn.addEventListener('click', toggleDrawer);
     if (headMeta && isGroup) headMeta.addEventListener('click', toggleDrawer);
+
+    const selectBtn = document.getElementById('zy-chat-select-btn');
+    if (selectBtn) {
+      selectBtn.addEventListener('click', () => {
+        state.selectMode = !state.selectMode;
+        state.selectedMsgIds.clear();
+        renderThreadArea(false);
+      });
+    }
+    const clearBtn = document.getElementById('zy-chat-clear-btn');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => clearChatHistory(conv.id));
+    }
+    const selAllBtn = document.getElementById('zy-chat-sel-all');
+    if (selAllBtn) {
+      selAllBtn.addEventListener('click', () => {
+        const list = state.messagesByConv.get(Number(conv.id)) || [];
+        const allIds = list.filter(m => !m._optimistic).map(m => Number(m.id));
+        const allSelected = allIds.length > 0 && allIds.every(id => state.selectedMsgIds.has(id));
+        state.selectedMsgIds.clear();
+        if (!allSelected) allIds.forEach(id => state.selectedMsgIds.add(id));
+        renderMessagesPane(false);
+        updateSelectBarUi();
+      });
+    }
+    const selDelBtn = document.getElementById('zy-chat-sel-del');
+    if (selDelBtn) {
+      selDelBtn.addEventListener('click', () => bulkDeleteSelectedMessages(conv.id));
+    }
+    const selCancelBtn = document.getElementById('zy-chat-sel-cancel');
+    if (selCancelBtn) {
+      selCancelBtn.addEventListener('click', () => {
+        state.selectMode = false;
+        state.selectedMsgIds.clear();
+        renderThreadArea(false);
+      });
+    }
 
     const pinJump = rightEl.querySelector('[data-jump-pin]');
     if (pinJump) pinJump.addEventListener('click', () => jumpToMessage(Number(pinJump.dataset.jumpPin)));

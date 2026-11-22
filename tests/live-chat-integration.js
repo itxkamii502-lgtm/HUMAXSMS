@@ -242,7 +242,142 @@ async function main() {
     }, cl1Cookie);
     assert.strictEqual(clGrpTry.status, 403, 'Client must NOT be able to create groups');
 
-    console.log('ALL LIVE CHAT ROLE-ISOLATION, GROUP ADMIN & ALERT PRIORITY TESTS PASSED!');
+    // 8. Soft-Delete + Upline Audit Preview (Owner previews Agent deleted; Agent previews Client deleted; lower/peer NEVER sees deleted text)
+    // 8a. Agent A sends secret message to Owner then deletes it with hide_self=1
+    const agSecret = await req(`/api/chat/conversations/${oaConvId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: 'Agent confidential draft to delete' })
+    }, agACookie);
+    assert.strictEqual(agSecret.status, 201);
+    const agSecretId = agSecret.json.message.id;
+
+    const agDelOwn = await req(`/api/chat/conversations/${oaConvId}/messages/${agSecretId}?hide_self=1`, { method: 'DELETE' }, agACookie);
+    assert.strictEqual(agDelOwn.status, 200);
+    const ownerDelWs = await waitForEvent(ownerWs.events, e => e.type === 'chat:message_deleted' && e.message_id === agSecretId);
+    assert(ownerDelWs && ownerDelWs.can_preview_deleted === true && ownerDelWs.deleted_preview_body === 'Agent confidential draft to delete',
+      'Owner MUST receive upline deleted preview over WS when Agent deletes message');
+
+    // Agent A no longer sees it in their own history
+    const agMsgsAfterDel = await req(`/api/chat/conversations/${oaConvId}/messages`, {}, agACookie);
+    assert(!agMsgsAfterDel.json.messages.some(m => m.id === agSecretId), 'Deleted message with hide_self=1 must be removed from sender view');
+
+    // Owner sees it marked deleted WITH preview capability
+    const ownerMsgsAfterDel = await req(`/api/chat/conversations/${oaConvId}/messages`, {}, ownerCookie);
+    const ownerSawDel = ownerMsgsAfterDel.json.messages.find(m => m.id === agSecretId);
+    assert(ownerSawDel && ownerSawDel.deleted === true && ownerSawDel.can_preview_deleted === true && ownerSawDel.deleted_preview_body === 'Agent confidential draft to delete',
+      'Owner must see Agent deleted message with original preview');
+
+    // 8b. Owner deletes own message -> Agent A MUST NOT receive deleted_preview_body
+    const ownerSecret = await req(`/api/chat/conversations/${oaConvId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: 'Owner private text to retract' })
+    }, ownerCookie);
+    assert.strictEqual(ownerSecret.status, 201);
+    const ownerSecretId = ownerSecret.json.message.id;
+    assert.strictEqual((await req(`/api/chat/conversations/${oaConvId}/messages/${ownerSecretId}?hide_self=1`, { method: 'DELETE' }, ownerCookie)).status, 200);
+    const agSawOwnerDelWs = await waitForEvent(agAWs.events, e => e.type === 'chat:message_deleted' && e.message_id === ownerSecretId);
+    assert(agSawOwnerDelWs && !agSawOwnerDelWs.can_preview_deleted && !agSawOwnerDelWs.deleted_preview_body,
+      'Agent MUST NEVER receive deleted_preview_body for Owner deleted message over WS');
+    const agMsgsAfterOwnerDel = await req(`/api/chat/conversations/${oaConvId}/messages`, {}, agACookie);
+    const agSawOwnerDel = agMsgsAfterOwnerDel.json.messages.find(m => m.id === ownerSecretId);
+    assert(agSawOwnerDel && agSawOwnerDel.deleted === true && !agSawOwnerDel.can_preview_deleted && !agSawOwnerDel.deleted_preview_body,
+      'Agent MUST NOT preview Owner deleted message via REST');
+
+    // 8c. Client 1 multi-select bulk delete in Agent A <-> Client 1 chat
+    const clMsgA = await req(`/api/chat/conversations/${acConvId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: 'Client bulk delete secret 1' })
+    }, cl1Cookie);
+    const agMsgB = await req(`/api/chat/conversations/${acConvId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: 'Agent message kept for Agent' })
+    }, agACookie);
+    assert.strictEqual(clMsgA.status, 201);
+    assert.strictEqual(agMsgB.status, 201);
+
+    const bulkDel = await req(`/api/chat/conversations/${acConvId}/messages/bulk-delete`, {
+      method: 'POST',
+      body: JSON.stringify({ message_ids: [clMsgA.json.message.id, agMsgB.json.message.id] })
+    }, cl1Cookie);
+    assert.strictEqual(bulkDel.status, 200);
+    assert.strictEqual(bulkDel.json.deleted_count, 2);
+
+    // Client 1 sees neither selected message; Agent A still sees their own message untouched + preview of Client 1's deleted message!
+    const clAfterBulk = await req(`/api/chat/conversations/${acConvId}/messages`, {}, cl1Cookie);
+    assert(!clAfterBulk.json.messages.some(m => m.id === clMsgA.json.message.id || m.id === agMsgB.json.message.id),
+      'Bulk-deleted messages must be removed from Client view');
+    const agAfterBulk = await req(`/api/chat/conversations/${acConvId}/messages`, {}, agACookie);
+    const agSeesOwn = agAfterBulk.json.messages.find(m => m.id === agMsgB.json.message.id);
+    const agSeesClDel = agAfterBulk.json.messages.find(m => m.id === clMsgA.json.message.id);
+    assert(agSeesOwn && !agSeesOwn.deleted && agSeesOwn.body === 'Agent message kept for Agent',
+      'Agent message hidden by Client bulk-delete must remain untouched for Agent');
+    assert(agSeesClDel && agSeesClDel.deleted === true && agSeesClDel.can_preview_deleted === true && agSeesClDel.deleted_preview_body === 'Client bulk delete secret 1',
+      'Agent MUST be able to preview Client bulk-deleted message');
+
+    // 8d. Clear Chat History clears ONLY caller's view, preserving upline history completely
+    const clrRes = await req(`/api/chat/conversations/${acConvId}/clear-history`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    }, cl1Cookie);
+    assert.strictEqual(clrRes.status, 200);
+    const clAfterClear = await req(`/api/chat/conversations/${acConvId}/messages`, {}, cl1Cookie);
+    assert.strictEqual(clAfterClear.json.messages.length, 0, 'Client view must be empty after clear-history');
+    const agAfterClear = await req(`/api/chat/conversations/${acConvId}/messages`, {}, agACookie);
+    assert(agAfterClear.json.messages.length >= 2, 'Agent history must remain fully intact after Client clears history');
+
+    // 8e. Group peer isolation on deleted preview: Client 1 deletes in group with Client 2 (client_two id=2 under agent_one)
+    const clPeerLogin = await srv.login('client_two', 'clientpass2');
+    assert(clPeerLogin.ok, 'Client 2 (agent_one peer) login failed');
+    const clPeerCookie = clPeerLogin.cookie;
+    const grp2 = await req('/api/chat/groups', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Audit Group', member_client_ids: [1, 2], admin_only: false })
+    }, agACookie);
+    assert.strictEqual(grp2.status, 201);
+    const grp2Id = grp2.json.conversation.id;
+    const cl1GrpMsg = await req(`/api/chat/conversations/${grp2Id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: 'Peer-hidden deleted group msg' })
+    }, cl1Cookie);
+    assert.strictEqual(cl1GrpMsg.status, 201);
+    assert.strictEqual((await req(`/api/chat/conversations/${grp2Id}/messages/${cl1GrpMsg.json.message.id}?hide_self=1`, { method: 'DELETE' }, cl1Cookie)).status, 200);
+    const peerGrpMsgs = await req(`/api/chat/conversations/${grp2Id}/messages`, {}, clPeerCookie);
+    const peerSaw = peerGrpMsgs.json.messages.find(m => m.id === cl1GrpMsg.json.message.id);
+    assert(peerSaw && peerSaw.deleted === true && !peerSaw.can_preview_deleted && !peerSaw.deleted_preview_body,
+      'Group peer Client MUST NOT preview another Client deleted message');
+    const agGrpMsgs = await req(`/api/chat/conversations/${grp2Id}/messages`, {}, agACookie);
+    const agSaw = agGrpMsgs.json.messages.find(m => m.id === cl1GrpMsg.json.message.id);
+    assert(agSaw && agSaw.deleted === true && agSaw.can_preview_deleted === true && agSaw.deleted_preview_body === 'Peer-hidden deleted group msg',
+      'Owning Agent MUST preview Client deleted message inside group');
+
+    // 9. Silent 72-Hour Auto-Removal (no frontend disclosure)
+    const msgDbPath = `${dir}/chat_messages.json`;
+    const diskMsgs = JSON.parse(fs.readFileSync(msgDbPath, 'utf8'));
+    const expiredId = 999901;
+    diskMsgs.push({
+      id: expiredId,
+      conversation_id: oaConvId,
+      sender_key: 'owner:1',
+      sender_role: 'owner',
+      sender_name: 'Owner',
+      body: 'Expired 73h message',
+      reply_to: null,
+      deleted: false,
+      created_at: new Date(Date.now() - (73 * 60 * 60 * 1000)).toISOString()
+    });
+    fs.writeFileSync(msgDbPath, JSON.stringify(diskMsgs, null, 2));
+    const afterPruneRes = await req(`/api/chat/conversations/${oaConvId}/messages`, {}, ownerCookie);
+    assert.strictEqual(afterPruneRes.status, 200);
+    assert(!afterPruneRes.json.messages.some(m => m.id === expiredId), 'Message older than 72 hours must be silently purged');
+    const diskAfterPrune = JSON.parse(fs.readFileSync(msgDbPath, 'utf8'));
+    assert(!diskAfterPrune.some(m => m.id === expiredId), 'Expired 72h message must be permanently removed from disk');
+
+    // Ensure zero UI disclosure of 72-hour auto-removal in live chat client script
+    const chatUiSrc = fs.readFileSync('humex-sms/static/js/shared-live-chat.js', 'utf8');
+    assert(!/72\s*h|72\s*hour|3\s*day|auto.?remov|retention/i.test(chatUiSrc),
+      'Silent 72h auto-removal must NOT be disclosed in Live Chat UI');
+
+    console.log('ALL LIVE CHAT ROLE-ISOLATION, DELETE/CLEAR, UPLINE PREVIEW, 72H RETENTION & ALERT TESTS PASSED!');
   } finally {
     sockets.forEach(ws => { try { ws.close(); } catch (_) {} });
     await srv.stop();

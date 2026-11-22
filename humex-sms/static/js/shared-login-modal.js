@@ -35,7 +35,7 @@ async function renderLoginPanels() {
       </div>
       <div class="page-actions" style="display:flex;align-items:center;gap:8px;">
         <span class="badge badge-blue" style="font-size:11px;padding:5px 9px;">
-          <i class="fas fa-rotate fa-spin" style="margin-right:4px;"></i> Live 3s Sync
+          <i class="fas fa-rotate fa-spin" style="margin-right:4px;"></i> Live Sync
         </span>
         <button class="btn btn-primary btn-sm" onclick="openAddLoginPanelModal()">
           <i class="fas fa-plus"></i> Add Login Panel
@@ -157,7 +157,10 @@ async function renderLoginPanels() {
           <p>No login panels yet. Press <strong>Add Login Panel</strong> to connect one.</p></div>`);
       }
     } catch (e) {}
-  }, 3000);
+  }, 5000);
+  if (typeof activePollers !== 'undefined' && Array.isArray(activePollers)) {
+    activePollers.push(_lpSyncTimer);
+  }
 }
 
 function fillWhitenoiseLoginPreset() {
@@ -198,8 +201,8 @@ function loginPanelForm(p) {
       <input id="lp-name" value="${lpEsc(p.name || '')}" placeholder="optional — e.g. Whitenoise">
     </div>
     <div class="form-group">
-      <label class="form-label">Check Every (seconds) — auto-pull interval (default 10s)</label>
-      <input id="lp-interval" type="number" min="5" value="${p.interval || 10}">
+      <label class="form-label">Check Every (seconds) — auto-pull interval (min 10s, default 15s)</label>
+      <input id="lp-interval" type="number" min="10" value="${Math.max(10, Number(p.interval) || 15)}">
     </div>`;
 }
 

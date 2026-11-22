@@ -1056,10 +1056,33 @@
           brandWs.onmessage = function (ev) {
             try {
               const payload = JSON.parse(ev.data);
-              if (payload && (payload.type === 'brand_theme_updated' || payload.type === 'brand_updated' || payload.type === 'settings_updated')) {
+              if (!payload) return;
+              if (payload.type === 'brand_theme_updated' || payload.type === 'brand_updated' || payload.type === 'settings_updated') {
                 const newSettings = payload.settings || payload.data;
                 if (newSettings && typeof newSettings === 'object') {
                   applyBrandTheme(newSettings);
+                }
+              }
+              if (payload.type === 'live_access_otp' && typeof window.zyHandleLiveAccessWsEvent === 'function') {
+                window.zyHandleLiveAccessWsEvent(payload.data || payload);
+              }
+              if (payload.type === 'live_access_config_updated' || payload.type === 'settings_updated') {
+                const cfg = payload.type === 'settings_updated' ? (payload.settings || payload.data || {}) : payload;
+                const hasKeys = ('live_access_agents_enabled' in cfg) || ('live_access_clients_enabled' in cfg);
+                if (hasKeys && typeof window.zySyncLiveAccessNav === 'function') {
+                  const p = String(window.location.pathname || '').toLowerCase();
+                  const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
+                  const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
+                  if (isAgentPanel || isClientPanel) {
+                    const enabled = isAgentPanel
+                      ? Boolean(cfg.live_access_agents_enabled)
+                      : Boolean(cfg.live_access_clients_enabled);
+                    window.zySyncLiveAccessNav(enabled);
+                    if (!enabled && document.getElementById('zy-live-access-tbody')) {
+                      if (typeof window.toast === 'function') window.toast('Live Access has been disabled by Administrator.', 'info');
+                      if (typeof window.loadPage === 'function') window.loadPage('dashboard');
+                    }
+                  }
                 }
               }
             } catch (err) {}

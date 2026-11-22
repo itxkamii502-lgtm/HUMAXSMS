@@ -100,8 +100,10 @@ async function pgSmsRanges() {
         ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`
         : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} left)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`;
 
+      const isWn = ptInfo.isWn;
       let actionBtnHtml = '';
-      if (isSelfAlloc) {
+      // Whitenoise / Monthly Route numbers are ALWAYS Request-Only for Clients
+      if (isSelfAlloc && !isWn) {
         if (reqBlocked) {
           actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas fa-lock"></i> ${zyEsc(lockLabel)}</button>`;
         } else if (roomCount <= 0) {
@@ -117,21 +119,24 @@ async function pgSmsRanges() {
       }
 
       const returnBtnHtml = heldCount > 0
-        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+        ? (isWn
+            ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyShowWhitenoiseContactAgentNotice()" title="Contact your Agent to return Monthly Route numbers"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+            : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`)
         : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
-      const isWn = ptInfo.isWn;
       const paytermHtml = isWn
         ? `<span class="zy-payterm-badge zy-pt-monthly"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>`
         : (typeof zyPaytermBadge === 'function'
             ? zyPaytermBadge('Weekly')
             : `<span class="badge badge-purple" style="font-size:10.5px;">Weekly (7/3)</span>`);
-      const routeHighlightTag = isWn
-        ? ` <span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly Route</span>`
-        : '';
+      const routeColHtml = isWn
+        ? `<span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly Route</span>`
+        : `<span class="badge" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;font-size:10.5px;font-weight:700;">Standard Route</span>`;
 
       return [
-        { v: rName, h: `<div class="${isWn ? 'zy-wn-cell-accent' : ''}" style="min-width:140px;"><strong style="color:#0f172a;">${i + 1}. ${zyEsc(rName)}</strong>${routeHighlightTag}<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:2px;font-size:11px;"><span class="monospace" style="font-weight:600;color:#2563eb;">${zyEsc(countryPrefix)}</span><span style="color:#94a3b8;">·</span><span style="font-weight:700;color:#059669;">PKR</span><span style="color:#94a3b8;">·</span>${r.active !== false ? '<span style="color:#10b981;font-weight:700;">Active</span>' : '<span style="color:#ef4444;font-weight:700;">Inactive</span>'}</div></div>` },
+        { v: rName, h: `<div class="${isWn ? 'zy-wn-cell-accent' : ''}" style="min-width:120px;"><strong class="${isWn ? 'zy-wn-range-name' : ''}"${isWn ? '' : ' style="color:#0f172a;"'}>${i + 1}. ${zyEsc(rName)}</strong><div style="font-size:10.5px;margin-top:2px;"><span style="font-weight:700;color:#059669;">PKR</span> <span style="color:#94a3b8;">·</span> ${r.active !== false ? '<span style="color:#10b981;font-weight:700;">Active</span>' : '<span style="color:#dc2626;font-weight:700;">Blocked</span>'}</div></div>` },
+        { v: isWn ? '{W} Monthly Route' : 'Standard Route', h: routeColHtml },
+        { v: countryPrefix, h: `<span class="monospace" style="font-weight:600;color:#2563eb;">${zyEsc(countryPrefix)}</span>` },
         paytermHtml,
         weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
         monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
@@ -147,7 +152,7 @@ async function pgSmsRanges() {
     });
 
     host.innerHTML = zyDT2('dt-cl-ranges', {
-      cols: ['Range & Country', 'Payterm', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
+      cols: ['Range', 'Route', 'Country / Prefix', 'Payterm', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
       rows
     });
     zy2Render('dt-cl-ranges');
@@ -345,7 +350,7 @@ function zyViewClientRange(i) {
           <i class="fas fa-tower-broadcast" style="color:#0284c7;margin-right:4px;"></i> General Info
         </h5>
         <div style="font-size:12px;line-height:22px;">
-          <div><span style="color:#64748b;">Range Name:</span> <b>${zyEsc(rName)}</b> ${ptInfo.isWn ? '<span class="zy-wn-route-tag">{W} Monthly Route</span>' : ''}</div>
+          <div><span style="color:#64748b;">Range Name:</span> <b class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</b> ${ptInfo.isWn ? '<span class="zy-wn-route-tag">{W} Monthly Route</span>' : ''}</div>
           <div><span style="color:#64748b;">Country:</span> <b>${zyEsc(r.country || '—')}</b></div>
           <div><span style="color:#64748b;">Prefix:</span> <b class="monospace" style="color:#2563eb;">${zyEsc(r.prefix || '—')}</b></div>
           <div><span style="color:#64748b;">Currency:</span> <b style="color:#059669;">PKR</b></div>
@@ -522,9 +527,13 @@ function zyRenderClientNumbers(list) {
     const rangeName = n.range_name || n.range || `${n.country || ''} ${n.provider || ''}`.trim() || '—';
     const cleanPrefix = String(n.prefix || '').trim().replace(/^\++/, '');
     const cleanNumber = String(n.number || '').trim().replace(/^\++/, '');
-    const numHtml = typeof zyRenderNumberCopyBox === 'function'
+    const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
+    const rawNumHtml = typeof zyRenderNumberCopyBox === 'function'
       ? zyRenderNumberCopyBox(cleanNumber)
       : (cleanNumber ? `<span style="font-family:monospace;font-weight:600;color:var(--sp-primary,#166534);">${zyEsc(cleanNumber)}</span>` : '—');
+    const numHtml = isBlockedNum
+      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${zyEsc(cleanNumber)}</span>`
+      : rawNumHtml;
     const ratePkr = n.client_rate_pkr != null
       ? Number(n.client_rate_pkr)
       : (n.payout != null ? Number(n.payout) * fx : null);
@@ -535,13 +544,15 @@ function zyRenderClientNumbers(list) {
       : (typeof zyPaytermBadge === 'function'
         ? zyPaytermBadge(rawTerm)
         : `<span class="badge" style="background:var(--sp-bg-subtle);">${zyEsc(rawTerm)}</span>`);
-    const actionHtml = isWn
-      ? `<button type="button" class="apx-btn apx-btn-small" style="color:#4338ca;border-color:#c7d2fe;background:#eef2ff;font-weight:700;" onclick="zyClientFetchWhitenoiseOtp(${Number(n.id)}, this)" title="Fetch Live OTP"><i class="fas fa-bolt"></i> Fetch OTP</button>`
-      : `<span style="color:#94a3b8;font-size:11px;">—</span>`;
+    const actionHtml = isBlockedNum
+      ? `<span style="color:#dc2626;font-weight:700;font-size:11.5px;background:#fef2f2;border:1px solid #fecaca;padding:2px 8px;border-radius:6px;"><i class="fas fa-ban"></i> Blocked</span>`
+      : (isWn
+          ? `<button type="button" class="apx-btn apx-btn-small" style="color:#4338ca;border-color:#c7d2fe;background:#eef2ff;font-weight:700;" onclick="zyClientFetchWhitenoiseOtp(${Number(n.id)}, this)" title="Fetch Live OTP"><i class="fas fa-bolt"></i> Fetch OTP</button>`
+          : `<span style="color:#94a3b8;font-size:11px;">—</span>`);
 
     const rangeCellHtml = isWn
-      ? `<div class="zy-wn-cell-accent"><span style="font-weight:600;">${zyEsc(rangeName)}</span> <span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly</span></div>`
-      : `<span style="font-weight:600;">${zyEsc(rangeName)}</span>`;
+      ? `<div class="zy-wn-cell-accent"><span class="${isBlockedNum ? '' : 'zy-wn-range-name'}" style="font-weight:600;${isBlockedNum ? 'color:#dc2626;' : ''}">${zyEsc(rangeName)}</span> <span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly</span></div>`
+      : `<span style="font-weight:600;${isBlockedNum ? 'color:#dc2626;' : ''}">${zyEsc(rangeName)}</span>`;
 
     const r = [
       dateCell,
@@ -551,7 +562,7 @@ function zyRenderClientNumbers(list) {
       { v: isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)', h: termBadge },
       { v: ratePkr ?? '', h: ratePkr != null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(Number(ratePkr), 4)}</span>` : '—' },
       { v: (n.sms_daily || 0) + (n.sms_weekly || 0), h: `SD: <b>${n.sms_daily || 0}</b> | SW: <b>${n.sms_weekly || 0}</b>` },
-      { v: isWn ? 'fetch' : '', h: actionHtml }
+      { v: isBlockedNum ? 'blocked' : (isWn ? 'fetch' : ''), h: actionHtml }
     ];
     r.__id = n.id;
     return r;
@@ -610,19 +621,41 @@ function zyResetClientNumFilter() {
   zyRenderClientNumbers(window._zyClientRawNums || []);
 }
 
+window.zyShowWhitenoiseContactAgentNotice = function() {
+  zyModal('Contact Your Agent', `
+    <div style="padding:18px 14px;text-align:center;">
+      <i class="fas fa-user-tie" style="font-size:28px;color:#2563eb;margin-bottom:10px;display:block;"></i>
+      <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:6px;">Monthly Route Return Restricted</div>
+      <div style="font-size:13px;color:#475569;line-height:1.5;">Monthly Route numbers cannot be returned directly. Please contact your Agent to return these numbers.</div>
+    </div>
+  `, `<button type="button" class="zy-btn-blue" onclick="closeModal()">OK</button>`);
+};
+
 window.zyClientReturnSelected = async function() {
   const ids = zy2Checked('dt-numbers');
   if (!ids.length) { toast('Please select at least one number to return', 'error'); return; }
-  if (!confirm(`Return ${ids.length} selected number(s) back to agent pool?`)) return;
+  const idSet = new Set(ids.map(String));
+  const rawNums = window._zyClientRawNums || [];
+  const hasWn = rawNums.some(n => idSet.has(String(n.id)) && zyClientIsWhitenoiseObj(n));
+  if (hasWn) {
+    window.zyShowWhitenoiseContactAgentNotice();
+    return;
+  }
+  if (!(await zyConfirm(`Return ${ids.length} selected number(s) back to agent pool?`, { title: 'Return Numbers', confirmLabel: 'Return' }))) return;
 
   try {
     for (const id of ids) {
-      await apiFetch(`/api/numbers/${id}/return`, { method: 'POST' });
+      const r = await apiFetch(`/api/numbers/${id}/return`, { method: 'POST' });
+      if (r && r.error) throw new Error(r.error);
     }
     toast(`Successfully returned ${ids.length} number(s) to agent pool`, 'success');
     pgMyNumbers();
   } catch (err) {
-    toast(err.message || 'Failed to return numbers', 'error');
+    if (String(err?.message || '').toLowerCase().includes('contact your agent')) {
+      window.zyShowWhitenoiseContactAgentNotice();
+    } else {
+      toast(err.message || 'Failed to return numbers', 'error');
+    }
   }
 };
 
@@ -1163,7 +1196,9 @@ async function pgClientCdr2Load(page = 1) {
       const rows = data.map(g => {
         const gPkr = g.client_payout_pkr != null ? Number(g.client_payout_pkr) : (Number(g.client_payout || g.payout || 0) * fx);
         return [
-          ...checkedBoxes.map(k => g[k] || '—'),
+          ...checkedBoxes.map(k => k === 'range'
+            ? { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` }
+            : (g[k] || '—')),
           { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
           'Monthly (30/5) {W}',
           { v: gPkr, h: `<span class="monospace" style="color:#059669;font-weight:700;">Rs. ${zyFmtMoney(gPkr, 2)}</span>` }
@@ -1207,9 +1242,10 @@ async function pgClientCdr2Load(page = 1) {
         const numStr = String(s.number || '').trim();
         const clearLabel = s.clears_at ? `Clears ${String(s.clears_at).slice(0, 10)}` : 'Monthly (30/5) {W}';
 
+        const rngLbl = s.range_name || s.range_label || s.range || s.country || '—';
         return [
           { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
-          zyEsc(s.range_name || s.range_label || s.range || s.country || '—'),
+          { v: rngLbl, h: `<span class="zy-wn-range-name">${zyEsc(rngLbl)}</span>` },
           { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
           { v: maskedCli, h: `<span class="monospace">${zyEsc(maskedCli)}</span>` },
           { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },
@@ -1329,7 +1365,7 @@ async function pgClientPaymentRequests() {
       apiFetch('/api/settings').catch(() => ({})),
       apiFetch('/api/payments', { silent: true }).catch(() => null)
     ]);
-    payInfo = pRes;
+    payInfo = pRes || balRes;
     fxRate = Number(settings?.usd_to_pkr_rate || balRes?.usd_to_pkr_rate || earn?.usd_to_pkr_rate || 280);
     window._zyClientFx = fxRate;
     mainBalPkr = Number(
@@ -1350,19 +1386,29 @@ async function pgClientPaymentRequests() {
     mainBalPkr = availBalPkr;
   }
 
+  const ww = payInfo?.weekly_wallet || null;
+  const mw = payInfo?.monthly_wallet || null;
+  const weeklyAvailPkr = ww ? Number(ww.available_pkr || 0) : availBalPkr;
+  const weeklyPendingPkr = ww ? Number(ww.pending_pkr || 0) : pendingHoldPkr;
+  const monthlyAvailPkr = mw ? Number(mw.available_pkr || 0) : 0;
+  const monthlyHeldPkr = mw ? Number(mw.held_pkr || 0) : 0;
+  const monthlyPendingPkr = mw ? Number(mw.pending_pkr || 0) : 0;
+
   const hs = payInfo && payInfo.hold_summary ? payInfo.hold_summary : null;
   const m305 = payInfo && payInfo.monthly30_5 ? payInfo.monthly30_5 : null;
   const mc = (payInfo && payInfo.monthly_cycle) ? payInfo.monthly_cycle : {};
   const holdNoticeHtml = hs
     ? `<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#1e293b;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
          <span><i class="fas fa-hourglass-half" style="color:#d97706;margin-right:6px;"></i> <b>Payterm Hold Summary (PKR):</b> Cleared: <b style="color:#059669;">Rs. ${zyFmtMoney(Number(hs.cleared_pkr || 0), 4)}</b> · On Hold: <b style="color:#d97706;">Rs. ${zyFmtMoney(Number(hs.held_pkr || 0), 4)}</b> (Next release: <b>${zyEsc(hs.next_release_date || '—')}</b>)</span>
-         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (3d) · Monthly 30/5 {W} (5d)</span>
+         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (API) · Monthly 30/5 {W}</span>
        </div>`
     : '';
   const m305Start = m305?.cycle_start || mc.start_date || '—';
   const m305End = m305?.cycle_end || mc.end_date || '—';
-  const m305Clear = m305?.clear_date || mc.clear_date || m305?.next_release_date || '—';
-  const wnNoticeHtml = holdNoticeHtml + ((payInfo && (payInfo.whitenoise_access || window.ZY_WHITENOISE_ACCESS) && m305)
+  const m305Clear = mw?.clear_date || m305?.clear_date || mc.clear_date || m305?.next_release_date || 'End of cycle';
+  const showMonthlyCard = Boolean(payInfo?.whitenoise_access || window.ZY_WHITENOISE_ACCESS || (mw && (Number(mw.earned_pkr || 0) > 0 || monthlyAvailPkr > 0 || monthlyHeldPkr > 0)));
+
+  const wnNoticeHtml = holdNoticeHtml + (showMonthlyCard && m305
     ? `<div style="background:linear-gradient(135deg,#eef2ff,#f8fafc);border:1.5px solid #c7d2fe;border-radius:10px;padding:12px 14px;margin-bottom:14px;color:#1e1b4b;">
          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
            <span style="font-size:13px;font-weight:800;color:#312e81;">
@@ -1388,37 +1434,37 @@ async function pgClientPaymentRequests() {
              <div style="font-size:15px;font-weight:800;color:#0f172a;margin-top:2px;">${Number(m305.sms_count || 0).toLocaleString()}</div>
            </div>
          </div>
-         <div style="font-size:11px;color:#4338ca;margin-top:8px;">All Monthly (30/5) {W} earnings from <b>${zyEsc(m305Start)}</b> to <b>${zyEsc(m305End)}</b> settle together on <b>${zyEsc(m305Clear)}</b>.</div>
+         <div style="font-size:11px;color:#4338ca;margin-top:8px;">Monthly (30/5) {W} earnings are tracked separately from Weekly (API) earnings and unlock for payout request on <b>${zyEsc(m305Clear)}</b> once the cycle completes.</div>
        </div>`
     : '');
 
-  c.innerHTML = `
-    <div class="page-header">
-      <div>
-        <div class="page-title"><i class="fas fa-wallet" style="color:#2563eb;"></i> Payment Requests (PKR)</div>
-        <div class="page-subtitle">View your PKR account balance and submit local payout requests to your Agent.</div>
-      </div>
-    </div>
-
-    <!-- HUMEX SMS 2-Card Metric Row (PKR Only) -->
-    <div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:12px;margin-bottom:16px;">
-      <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1px solid #cbd5e1;background:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.04);display:flex;flex-direction:column;justify-content:space-between;min-height:115px;">
+  const monthlyCardHtml = showMonthlyCard ? `
+      <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1.5px solid #c7d2fe;background:#ffffff;box-shadow:0 1px 3px rgba(79,70,229,0.06);display:flex;flex-direction:column;justify-content:space-between;min-height:132px;">
         <div>
-          <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.3px;">Available Balance (PKR)</div>
-          <div style="font-size:24px;font-weight:800;color:#0f172a;margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-bal-val">${availBalPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="font-size:11.5px;font-weight:700;color:#4338ca;text-transform:uppercase;letter-spacing:0.3px;">Monthly {W} Balance (PKR)</div>
+            <span class="badge" style="background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;">MONTHLY (30/5) {W}</span>
+          </div>
+          <div style="font-size:24px;font-weight:800;color:${monthlyAvailPkr > 0 ? '#059669' : '#0f172a'};margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-monthly-bal-val">${monthlyAvailPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span> <span style="font-size:11.5px;font-weight:600;color:#64748b;">matured</span></div>
           <div style="font-size:11.5px;color:#64748b;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-            <span><i class="fas fa-info-circle" style="color:#0ea5e9;"></i> Min payout: <strong>Rs. ${zyFmtMoney(minPayoutPkr, 2)} PKR</strong></span>
-            ${pendingHoldPkr > 0 ? `<span style="color:#d97706;">· Pending Hold: <b>Rs. ${zyFmtMoney(pendingHoldPkr, 4)}</b></span>` : ''}
+            <span><i class="fas fa-lock" style="color:#d97706;"></i> Held in Cycle: <strong>Rs. ${zyFmtMoney(monthlyHeldPkr, 2)}</strong></span>
+            ${monthlyPendingPkr > 0 ? `<span style="color:#7c3aed;">· Pending: <b>Rs. ${zyFmtMoney(monthlyPendingPkr, 2)}</b></span>` : ''}
+            <span>· Unlocks: <strong>${zyEsc(m305Clear)}</strong></span>
           </div>
         </div>
         <div style="margin-top:12px;">
-          <button type="button" class="sp-btn-primary" style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#10b981;border:none;color:#fff;cursor:pointer;" onclick="zyClientRequestPayoutModal(${availBalPkr}, ${minPayoutPkr})">
-            <i class="fas fa-paper-plane"></i> Request PKR Payout
-          </button>
+          ${monthlyAvailPkr > 0 ? `
+            <button type="button" class="sp-btn-primary" style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#4f46e5;border:none;color:#fff;cursor:pointer;" onclick="zyClientRequestPayoutModal(${monthlyAvailPkr}, ${minPayoutPkr}, 'monthly')">
+              <i class="fas fa-calendar-check"></i> Request Monthly {W} Payout
+            </button>
+          ` : `
+            <button type="button" disabled style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#e2e8f0;border:none;color:#64748b;cursor:not-allowed;" title="Monthly (30/5) {W} payout unlocks once the monthly cycle completes on ${zyEsc(m305Clear)}">
+              <i class="fas fa-lock"></i> Unlocks on ${zyEsc(m305Clear)}
+            </button>
+          `}
         </div>
-      </div>
-
-      <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1px solid #cbd5e1;background:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.04);display:flex;flex-direction:column;justify-content:space-between;min-height:115px;">
+      </div>` : `
+      <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1px solid #cbd5e1;background:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.04);display:flex;flex-direction:column;justify-content:space-between;min-height:132px;">
         <div>
           <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.3px;">This Week Mon-Sun (PKR)</div>
           <div style="font-size:24px;font-weight:800;color:#2563eb;margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-week-val">${thisWeekPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>
@@ -1429,7 +1475,39 @@ async function pgClientPaymentRequests() {
         <div style="margin-top:12px;font-size:11.5px;color:#059669;font-weight:600;display:flex;align-items:center;gap:5px;">
           <i class="fas fa-check-circle"></i> Settled directly in PKR by your Agent
         </div>
+      </div>`;
+
+  c.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title"><i class="fas fa-wallet" style="color:#2563eb;"></i> Payment Requests (PKR)</div>
+        <div class="page-subtitle">Submit separate Weekly (API) and Monthly {W} PKR payout requests to your Agent.</div>
       </div>
+    </div>
+
+    <!-- Separated Weekly (API) & Monthly {W} PKR Request Cards -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:12px;margin-bottom:16px;">
+      <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1.5px solid #bfdbfe;background:#ffffff;box-shadow:0 1px 3px rgba(37,99,235,0.05);display:flex;flex-direction:column;justify-content:space-between;min-height:132px;">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="font-size:11.5px;font-weight:700;color:#1d4ed8;text-transform:uppercase;letter-spacing:0.3px;">Weekly (API) Balance (PKR)</div>
+            <span class="badge badge-blue" style="font-size:10px;font-weight:700;">WEEKLY (7/3) · API</span>
+          </div>
+          <div style="font-size:24px;font-weight:800;color:#0f172a;margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-bal-val">${weeklyAvailPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>
+          <div style="font-size:11.5px;color:#64748b;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span><i class="fas fa-info-circle" style="color:#0ea5e9;"></i> Min payout: <strong>Rs. ${zyFmtMoney(minPayoutPkr, 2)} PKR</strong></span>
+            <span>· This Week: <b>Rs. ${thisWeekPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></span>
+            ${weeklyPendingPkr > 0 ? `<span style="color:#d97706;">· Pending: <b>Rs. ${zyFmtMoney(weeklyPendingPkr, 2)}</b></span>` : ''}
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="button" class="sp-btn-primary" style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#10b981;border:none;color:#fff;cursor:pointer;" onclick="zyClientRequestPayoutModal(${weeklyAvailPkr}, ${minPayoutPkr}, 'weekly')">
+            <i class="fas fa-paper-plane"></i> Request Weekly (API) Payout
+          </button>
+        </div>
+      </div>
+
+      ${monthlyCardHtml}
     </div>
     ${wnNoticeHtml}
 
@@ -1454,7 +1532,14 @@ window.zyUpdateClientMethodHint = function() {
   }
 };
 
-window.zyClientRequestPayoutModal = async function(currentBalPkr = 0, passedMinPkr = null) {
+window.zyClientRequestPayoutModal = async function(currentBalPkr = 0, passedMinPkr = null, payoutType = 'weekly') {
+  const isMonthly = String(payoutType || 'weekly').toLowerCase() === 'monthly';
+  const typeKey = isMonthly ? 'monthly' : 'weekly';
+  const modalTitle = isMonthly ? 'Request Monthly {W} PKR Payout' : 'Request Weekly (API) PKR Payout';
+  const typeBadge = isMonthly
+    ? '<span class="badge" style="background:#ede9fe;color:#5b21b6;font-weight:700;">Monthly (30/5) {W} Pool</span>'
+    : '<span class="badge badge-blue" style="font-weight:700;">Weekly (7/3) API Pool</span>';
+
   let minPayoutPkr = passedMinPkr != null ? Number(passedMinPkr) : 100;
   try {
     const settings = await apiFetch('/api/settings');
@@ -1465,10 +1550,14 @@ window.zyClientRequestPayoutModal = async function(currentBalPkr = 0, passedMinP
   const savedDetails = (window.CLIENT_USER && (CLIENT_USER.iban || CLIENT_USER.wallet || CLIENT_USER.account_number)) || '';
   const defaultAmt = currentBalPkr >= minPayoutPkr ? zyFmtMoney(currentBalPkr, 2) : zyFmtMoney(minPayoutPkr, 2);
 
-  zyModal('Request PKR Payout', `
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px;">
+  zyModal(modalTitle, `
+    <div style="background:${isMonthly ? '#f5f3ff' : '#f8fafc'};border:1px solid ${isMonthly ? '#c7d2fe' : '#e2e8f0'};border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="color:#64748b;">Payout Cycle:</span>
+        ${typeBadge}
+      </div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span style="color:#64748b;">Available Balance (PKR):</span>
+        <span style="color:#64748b;">Available ${isMonthly ? 'Matured Monthly {W}' : 'Weekly (API)'} Balance (PKR):</span>
         <strong style="color:#10b981;font-size:15px;">Rs. ${Number(currentBalPkr).toLocaleString('en-US', { maximumFractionDigits: 2 })} PKR</strong>
       </div>
       <div style="display:flex;justify-content:space-between;">
@@ -1495,15 +1584,17 @@ window.zyClientRequestPayoutModal = async function(currentBalPkr = 0, passedMinP
     </div>
     <div class="form-group" style="margin-bottom:8px;">
       <label class="zy-lbl" style="font-weight:600;">Notes (Optional)</label>
-      <input type="text" id="cpr-notes" class="zy-input" style="width:100%;height:38px;" placeholder="Weekly PKR payout request">
+      <input type="text" id="cpr-notes" class="zy-input" style="width:100%;height:38px;" placeholder="${isMonthly ? 'Monthly {W} PKR payout request' : 'Weekly API PKR payout request'}">
     </div>
   `, `
     <button class="zy-btn-grey" onclick="closeModal()">Cancel</button>
-    <button class="sp-btn-primary" id="btn-submit-cpr" onclick="zySubmitClientPayout(${minPayoutPkr}, ${currentBalPkr})"><i class="fas fa-paper-plane"></i> Submit PKR Request</button>
+    <button class="sp-btn-primary" id="btn-submit-cpr" onclick="zySubmitClientPayout(${minPayoutPkr}, ${currentBalPkr}, '${typeKey}')"><i class="fas fa-paper-plane"></i> Submit ${isMonthly ? 'Monthly {W}' : 'Weekly (API)'} Request</button>
   `);
 };
 
-window.zySubmitClientPayout = async function(minPayoutPkr, currentBalPkr) {
+window.zySubmitClientPayout = async function(minPayoutPkr, currentBalPkr, payoutType = 'weekly') {
+  const isMonthly = String(payoutType || 'weekly').toLowerCase() === 'monthly';
+  const typeKey = isMonthly ? 'monthly' : 'weekly';
   const amt = parseFloat(document.getElementById('cpr-amount')?.value);
   const method = document.getElementById('cpr-method')?.value;
   const wallet = document.getElementById('cpr-wallet')?.value.trim();
@@ -1511,7 +1602,7 @@ window.zySubmitClientPayout = async function(minPayoutPkr, currentBalPkr) {
 
   if (isNaN(amt) || amt <= 0) { toast('Please enter a valid PKR payout amount', 'error'); return; }
   if (amt < minPayoutPkr) { toast(`Payment low. Minimum payout is Rs. ${zyFmtMoney(minPayoutPkr, 2)} PKR`, 'error'); return; }
-  if (amt > currentBalPkr) { toast(`Amount cannot exceed available balance of Rs. ${zyFmtMoney(currentBalPkr, 2)} PKR`, 'error'); return; }
+  if (amt > currentBalPkr) { toast(`Amount cannot exceed available ${isMonthly ? 'Monthly {W}' : 'Weekly (API)'} balance of Rs. ${zyFmtMoney(currentBalPkr, 2)} PKR`, 'error'); return; }
   if (!wallet) { toast('Please provide your IBAN / JazzCash / Easypaisa account details', 'error'); return; }
 
   const btn = document.getElementById('btn-submit-cpr');
@@ -1523,6 +1614,7 @@ window.zySubmitClientPayout = async function(minPayoutPkr, currentBalPkr) {
       body: JSON.stringify({
         amount: amt,
         currency: 'PKR',
+        payout_type: typeKey,
         method,
         wallet,
         notes,
@@ -1532,7 +1624,7 @@ window.zySubmitClientPayout = async function(minPayoutPkr, currentBalPkr) {
     });
     if (res && (res.id || res.success)) {
       closeModal();
-      toast('PKR payout request submitted to your Agent', 'success');
+      toast(`${isMonthly ? 'Monthly {W}' : 'Weekly (API)'} PKR payout request submitted to your Agent`, 'success');
       pgClientPaymentRequests();
     } else {
       toast(res?.error || 'Failed to submit payout request', 'error');
@@ -1556,12 +1648,17 @@ async function pgClientPaymentRequestsLoad() {
     const isRejected = (r.status || '').toLowerCase() === 'rejected';
     const statusClass = isPaid ? 'status-active' : (isRejected ? 'status-inactive' : 'status-pending');
     const statusLabel = (r.status || 'Pending').toUpperCase();
+    const isMonthlyReq = String(r.payout_type || '').toLowerCase() === 'monthly' || String(r.schedule || r.payterm || '').toLowerCase().includes('monthly');
+    const cycleHtml = isMonthlyReq
+      ? `<span class="badge" style="background:#ede9fe;color:#5b21b6;font-weight:700;">Monthly {W}</span>`
+      : `<span class="badge badge-blue" style="font-weight:700;">Weekly (API)</span>`;
     const isPkr = String(r.currency || '').toUpperCase() === 'PKR';
     const amtPkr = isPkr ? Number(r.amount || 0) : (Number(r.amount || 0) * (Number(r.fx_usd_to_pkr) || fx));
     const paidPkr = isPkr ? Number(r.paid_amount || r.amount || 0) : (Number(r.paid_amount || r.amount || 0) * (Number(r.fx_usd_to_pkr) || fx));
 
     return [
       (ts || '').replace('T', ' ').slice(0, 19),
+      { v: isMonthlyReq ? 'Monthly {W}' : 'Weekly (API)', h: cycleHtml },
       zyEsc(r.method || r.mode || 'Bank Transfer (IBAN)'),
       `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(amtPkr, 2)}</span>`,
       { v: r.status || 'Pending', h: `<span class="badge ${statusClass}">${statusLabel}</span>` },
@@ -1573,7 +1670,7 @@ async function pgClientPaymentRequestsLoad() {
     ];
   });
   body.innerHTML = zyDT2('dt-cpr', {
-    cols: ['Date', 'Method', 'Amount (PKR)', 'Status', 'Account / Wallet', 'Paid (PKR)', 'Transaction', 'Remarks', 'Updated On'],
+    cols: ['Date', 'Cycle', 'Method', 'Amount (PKR)', 'Status', 'Account / Wallet', 'Paid (PKR)', 'Transaction', 'Remarks', 'Updated On'],
     rows,
     sort: 0,
     dir: -1
@@ -1605,6 +1702,91 @@ window.zyClientWipeNotifications = async function() {
   if (window.HumexNotifications) return window.HumexNotifications.clearAll();
 };
 
+/* ── Apps Links Directory (Client View) ─────────────────────── */
+let _clientAppLinksData = [];
+let _clientAppLinksQuery = '';
+
+function _clientSafeUrl(raw) {
+  const s = String(raw || '').trim();
+  return /^https?:\/\//i.test(s) ? s : '#';
+}
+
+async function pgAppLinks() {
+  const c = document.getElementById('page-content');
+  if (!c) return;
+  const me = await apiFetch('/api/auth/me', { silent: true }).catch(() => null);
+  if (me && typeof window.zyRefreshWhitenoiseNav === 'function') window.zyRefreshWhitenoiseNav(me);
+  if (!me || !me.app_links_access) {
+    c.innerHTML = `<div class="zy-card"><div class="zy-empty" style="padding:36px 18px;">
+      <i class="fas fa-lock" style="font-size:28px;color:#94a3b8;margin-bottom:10px;"></i>
+      <div style="font-weight:700;font-size:15px;margin-bottom:6px;">Apps Links Access Not Enabled</div>
+      <div style="color:#64748b;font-size:13px;">Ask your Agent to enable Apps Links for your account.</div>
+    </div></div>`;
+    return;
+  }
+
+  const res = await apiFetch('/api/app-links', { silent: true }).catch(() => ({ data: [] }));
+  _clientAppLinksData = Array.isArray(res?.data) ? res.data : [];
+
+  c.innerHTML = `
+    <div class="zy-card" style="padding:16px 18px;">
+      <div class="zy-applinks-tabbar">
+        <div style="font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-link" style="color:#0284c7;"></i>
+          <span>Apps Links (${_clientAppLinksData.length})</span>
+        </div>
+        <div style="margin-left:auto;min-width:210px;">
+          <input type="search" class="zy-input" placeholder="Search apps…" value="${zyEsc(_clientAppLinksQuery)}" oninput="zyClientFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
+        </div>
+      </div>
+      <div id="client-applinks-body"></div>
+    </div>
+  `;
+  zyRenderClientAppLinksBody();
+}
+window.pgAppLinks = pgAppLinks;
+
+window.zyClientFilterAppLinks = function(q) {
+  _clientAppLinksQuery = String(q || '');
+  zyRenderClientAppLinksBody();
+};
+
+function zyRenderClientAppLinksBody() {
+  const host = document.getElementById('client-applinks-body');
+  if (!host) return;
+  const q = _clientAppLinksQuery.trim().toLowerCase();
+  const items = _clientAppLinksData.filter(it => !q || String(it.name || '').toLowerCase().includes(q) || String(it.category || '').toLowerCase().includes(q));
+  if (!items.length) {
+    host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now.</div>`;
+    return;
+  }
+  host.innerHTML = `
+    <div class="zy-applinks-user-grid">
+      ${items.map(it => {
+        const href = _clientSafeUrl(it.url);
+        let domain = '';
+        try { domain = new URL(href).hostname.replace(/^www\./, ''); } catch (_) {}
+        return `
+          <a class="zy-applink-user-card" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer">
+            <div class="zy-applink-card-ic"><i class="fas fa-mobile-screen-button"></i></div>
+            <div class="zy-applink-card-info">
+              <div class="zy-applink-card-name">
+                <span>${zyEsc(it.name)}</span>
+                ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+              </div>
+              <div class="zy-applink-card-meta">
+                ${it.category ? `<span>${zyEsc(it.category)}</span> · ` : ''}<span>${zyEsc(domain || 'Open Link')}</span>
+              </div>
+              ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
+            </div>
+            <span class="zy-applink-card-open"><i class="fas fa-arrow-up-right-from-square"></i></span>
+          </a>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 /* ── router ─────────────────────────────────────────────────── */
 (function zyHookClientPages() {
   const map = {
@@ -1621,6 +1803,8 @@ window.zyClientWipeNotifications = async function() {
     'news': pgClientNotifications,
     'notifications': pgClientNotifications,
     'live-chat': () => { if (window.HumexLiveChat) window.HumexLiveChat.renderPage('page-content'); },
+    'live-access': () => { if (window.zyRenderLiveAccessPage) window.zyRenderLiveAccessPage({ role: 'client' }); },
+    'app-links': pgAppLinks,
     'my-profile': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'details'); },
     'profile': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'details'); },
     'profile-security': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'security'); },

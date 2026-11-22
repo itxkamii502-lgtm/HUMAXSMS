@@ -1345,19 +1345,21 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   assertCheck('F4: server.js CLIENT_ALLOW includes period-stats', serverJs.includes('period-stats|client-stats'));
   assertCheck('F4: server.js removed TEST_ALLOW', !serverJs.includes('TEST_ALLOW'));
 
-  // 2. Check unified volume stats order (Today SMS, Yesterday SMS, SMS Last 7 Days, SMS Last 30 Days) & moneyCards across all 3 active panels
+  // 2. Check unified volume stats order (Today SMS (API), Today SMS Total, Yesterday SMS, SMS Last 7 Days, SMS Last 30 Days, Yearly SMS) across all 3 active panels
   function checkUnifiedDashConfig(code) {
-    const idxHero = code.indexOf("label: 'Today SMS'");
+    const idxHero = code.indexOf("label: 'Today SMS (API)'");
+    const idxTotal = code.indexOf("label: 'Today SMS Total'");
     const idxYest = code.indexOf("label: 'Yesterday SMS'");
     const idx7 = code.indexOf("label: 'SMS Last 7 Days'");
     const idx30 = code.indexOf("label: 'SMS Last 30 Days'");
-    return idxHero !== -1 && idxYest !== -1 && idx7 !== -1 && idx30 !== -1 &&
-      idxHero < idxYest && idxYest < idx7 && idx7 < idx30;
+    const idxYear = code.indexOf("label: 'Yearly SMS'");
+    return idxHero !== -1 && idxTotal !== -1 && idxYest !== -1 && idx7 !== -1 && idx30 !== -1 && idxYear !== -1 &&
+      idxHero < idxTotal && idxTotal < idxYest && idxYest < idx7 && idx7 < idx30 && idx30 < idxYear;
   }
 
-  assertCheck('F4: owner-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAdminJs) && speedAdminJs.includes('Profit Today'));
-  assertCheck('F4: agent-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAgentJs) && speedAgentJs.includes('Profit Today'));
-  assertCheck('F4: client-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedClientJs) && speedClientJs.includes('My Earnings Today'));
+  assertCheck('F4: owner-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAdminJs) && speedAdminJs.includes("label: 'Whitenoise SMS'"));
+  assertCheck('F4: agent-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAgentJs) && speedAgentJs.includes("label: 'Monthly {W} SMS'"));
+  assertCheck('F4: client-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedClientJs) && speedClientJs.includes("label: 'Monthly {W} SMS'"));
 
   // 3. Shared unified dashboard renders weekly chart & recent tables consistently
   const speedKitDash = fs.readFileSync(path.resolve('humex-sms/static/js/shared-ui-kit.js'), 'utf8');

@@ -2,7 +2,13 @@ import { check, makeFixture, startServer, sleep, readJson } from './lib.js';
 
 export async function stageB() {
   console.log('\n=== STAGE B: 3-tier hierarchy, holder pool & move ===');
-  const dir = makeFixture();
+  const nowIso = new Date().toISOString();
+  const dir = makeFixture({
+    agents: [
+      { id: 1, username: 'agent_one', password: 'agentpass1', role: 'Agent', status: 'active', created: nowIso },
+      { id: 2, username: 'agent_direct', password: 'agentpass2', role: 'Agent', status: 'active', created: nowIso }
+    ]
+  });
   const srv = await startServer(dir, 3921);
   const { api, login } = srv;
 
@@ -29,6 +35,9 @@ export async function stageB() {
 
     const ownerCreateAgent = await ow('POST', '/api/agents', { username: 'agent_by_owner', password: 'password123' });
     check('B0 Owner can create Agent directly', ownerCreateAgent.status === 200 && ownerCreateAgent.data.username === 'agent_by_owner');
+
+    const ownerCreate4thAgent = await ow('POST', '/api/agents', { username: 'agent_fourth_blocked', password: 'password123' });
+    check('B0 Owner cannot create more than 3 Agents (400)', ownerCreate4thAgent.status === 400);
 
     // Agent creates ONLY Clients
     const agentCreateClient = await ag('POST', '/api/clients', { username: 'client_by_agent', password: 'password123' });

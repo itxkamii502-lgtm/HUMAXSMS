@@ -15,9 +15,17 @@ const ZY_ADMIN_MENU = [
   { t: null, c: '#059669', items: [
       ['Live Chat', 'live-chat', 'fa-comments'],
   ] },
+  { t: null, c: '#0284c7', items: [
+      ['Apps Links', 'app-links', 'fa-link'],
+  ] },
+  { t: null, c: '#10b981', items: [
+      ['Live Access', 'live-access', 'fa-tower-broadcast'],
+  ] },
   { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['Numbers Pool Hub', 'my-numbers', 'fa-mobile-screen'],
+      ['Blocked Numbers', 'blocked-numbers', 'fa-ban'],
       ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
+      ['Smart Excel Import', 'smart-sheet-import', 'fa-file-excel'],
       ['Upload & Blacklist', 'upload-numbers', 'fa-cloud-arrow-up'],
       ['Allocation & Transfer Log', 'allocation-history', 'fa-file-lines'],
   ] },
@@ -160,7 +168,9 @@ if (typeof window.Chart === 'undefined') {
       el.textContent = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }
   }
-  tick(); setInterval(tick, 1000);
+  tick();
+  if (window._zyOwnerClockTimer) clearInterval(window._zyOwnerClockTimer);
+  window._zyOwnerClockTimer = setInterval(tick, 1000);
 
   let u = 'Owner';
   try {
@@ -187,6 +197,7 @@ if (typeof window.Chart === 'undefined') {
 const OWNER_ROUTE_PARENT = {
   'bulk-allocation': 'my-numbers',
   'revoke-numbers': 'my-numbers',
+  'blocked-numbers': 'my-numbers',
   'sms-rate-card': 'sms-ranges',
   'bulk-range-import': 'upload-numbers',
   'blacklist-management': 'upload-numbers',
@@ -219,8 +230,12 @@ window.OWNER_ROUTE_PARENT = OWNER_ROUTE_PARENT;
 
 const ZY_ADMIN_LABELS = {
   'live-chat': 'Live Chat',
+  'app-links': 'Apps Links',
+  'live-access': 'Live Access',
+  'smart-sheet-import': 'Smart Excel Import',
   'bulk-allocation': 'Bulk Allocation',
-  'revoke-numbers': 'Revoke Numbers',
+  'revoke-numbers': 'Blocked Numbers',
+  'blocked-numbers': 'Blocked Numbers',
   'sms-rate-card': 'Rate Card',
   'bulk-range-import': 'Bulk Range Import',
   'blacklist-management': 'Blacklist Management',
@@ -321,13 +336,15 @@ renderDashboard = async function () {
           return `${days[dt.getUTCDay()]} ${dt.getUTCDate()}`;
         });
 
-    const todaySmsVal = Number(p.today != null ? p.today : (d.today != null ? d.today : (s.total_sms_today || 0)));
+    const apiTodaySms = Number(p.api_today != null ? p.api_today : (s.api_today_sms != null ? s.api_today_sms : (d.today != null ? d.today : 0)));
+    const apiYestSms = Number(p.api_yesterday != null ? p.api_yesterday : (s.api_yesterday_sms != null ? s.api_yesterday_sms : (d.yesterday || 0)));
+    const wnTodaySms = Number(p.whitenoise_today != null ? p.whitenoise_today : (s.whitenoise_today_sms || 0));
+    const wnLast30Val = Number(p.whitenoise_last_30_days != null ? p.whitenoise_last_30_days : (s.whitenoise_month_sms || 0));
+    const totalTodaySms = Number(p.today != null ? p.today : (apiTodaySms + wnTodaySms));
     const yestSmsVal = Number(p.yesterday != null ? p.yesterday : (d.yesterday || s.yesterday || 0));
     const last7Val = Number(p.last_7_days != null ? p.last_7_days : weeklyTraffic.reduce((a, b) => a + (Number(b) || 0), 0));
     const last30Val = Number(p.last_30_days != null ? p.last_30_days : (d.this_month || s.this_month || 0));
-
-    const profitToday = Number(p.profit_today != null ? p.profit_today : (s.revenue_today || 0));
-    const profitWeek = Number(p.profit_week != null ? p.profit_week : 0);
+    const yearSmsVal = Number(p.year != null ? p.year : (s.this_year || 0));
 
     const agentList = Array.isArray(agents) ? agents : ((agents && agents.data) || []);
     const activeAgents = agentList.filter(a => String(a.status || 'active').toLowerCase() === 'active').length || agentList.length;
@@ -340,10 +357,17 @@ renderDashboard = async function () {
       const curr = r.currency === 'EUR' ? '€' : (r.currency === 'GBP' ? '£' : '$');
       const rawDate = r.created_at || r.created || r.date_added || r.date || '';
       const dateAdded = rawDate ? String(rawDate).replace('T', ' ').slice(0, 10) : 'Active';
+      const isWn = Boolean(
+        r.is_whitenoise ||
+        String(r.provider || '').toLowerCase().includes('whitenoise') ||
+        String(r.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
+        String(r.range_name || r.name || '').toLowerCase().includes('whitenoise')
+      );
       return {
         name: r.range_name || r.name || r.country || '—',
         rateFormatted: `${curr}${typeof zyFmtMoney === 'function' ? zyFmtMoney(wkRate, 4) : Number(wkRate).toFixed(4)}`,
-        dateAdded
+        dateAdded,
+        isWn
       };
     });
 
@@ -355,8 +379,6 @@ renderDashboard = async function () {
 
     const alertHtml = '';
 
-    const fmtM = typeof window.zyDashMoney === 'function' ? window.zyDashMoney : (v => `$${Number(v || 0).toFixed(2)}`);
-
     if (typeof window.zyRenderUnifiedDashboard === 'function') {
       window.zyRenderUnifiedDashboard({
         containerId: 'page-content',
@@ -366,19 +388,20 @@ renderDashboard = async function () {
         reportsRoute: 'my-sms',
         notificationsRoute: 'notifications',
         chartId: 'zy-owner-week-chart',
+        chartTodayTotal: totalTodaySms,
         weeklyLabels,
         weeklyTraffic,
         hero: {
-          label: 'Today SMS',
-          value: todaySmsVal,
-          yesterday: yestSmsVal,
-          subtitle: 'System traffic today',
+          label: 'Today SMS (API)',
+          value: apiTodaySms,
+          yesterday: apiYestSms,
+          subtitle: 'API SMS traffic today',
           icon: 'fa-check',
           page: 'my-sms'
         },
         moneyCards: [
-          { label: 'Profit Today', value: fmtM(profitToday, '$'), sub: 'Net system margin today', icon: 'fa-sack-dollar', page: 'profit-stats' },
-          { label: 'Profit Week', value: fmtM(profitWeek, '$'), sub: 'Current week (Mon–Sun)', icon: 'fa-chart-line', page: 'my-sms' }
+          { label: 'Whitenoise SMS', value: wnTodaySms.toLocaleString(), sub: 'Whitenoise {W} SMS today', icon: 'fa-tower-cell', page: 'cdr2' },
+          { label: 'Today SMS Total', value: totalTodaySms.toLocaleString(), sub: 'API + Whitenoise combined today', icon: 'fa-layer-group', page: 'my-sms' }
         ],
         shortcuts: [
           { label: 'CDR Reports', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
@@ -389,16 +412,16 @@ renderDashboard = async function () {
           { label: 'Payout Requests', page: 'payout-requests', icon: 'fa-hand-holding-dollar', tone: 'green' }
         ],
         volumes: [
-          { label: 'Today SMS', value: todaySmsVal, page: 'my-sms' },
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },
           { label: 'SMS Last 7 Days', value: last7Val, page: 'my-sms' },
-          { label: 'SMS Last 30 Days', value: last30Val, page: 'my-sms' }
+          { label: 'SMS Last 30 Days', value: last30Val, page: 'my-sms' },
+          { label: 'Yearly SMS', value: yearSmsVal, page: 'my-sms' }
         ],
         summaryTitle: 'System Snapshot',
         summaryRows: [
           { label: 'Active Agents', value: activeAgents.toLocaleString(), icon: 'fa-user-tie', page: 'agents' },
           { label: 'Total Numbers', value: Number(s.total_numbers ?? s.active_numbers ?? 0).toLocaleString(), icon: 'fa-mobile-screen', page: 'my-numbers' },
-          { label: 'Profit Today', value: fmtM(profitToday, '$'), icon: 'fa-dollar-sign', page: 'profit-stats' },
+          { label: 'Whitenoise (30d)', value: wnLast30Val.toLocaleString(), icon: 'fa-tower-cell', page: 'cdr2' },
           { label: 'SMS Last 7 Days', value: last7Val.toLocaleString(), icon: 'fa-comment-sms', page: 'my-sms' }
         ],
         latestRanges,
@@ -1408,7 +1431,9 @@ async function renderOwnerCdr2Load(targetPage = 1) {
       const keyLabels = { date: 'Date', month: 'Month', range: 'Range', agent: 'Agent', client: 'Client', number: 'Number', cli: 'Service / CLI' };
       const cols = [...checkedBoxes.map(k => keyLabels[k] || k), 'SMS Count', 'Cycle', 'Owner Rev (USD)', 'Agent Pay (USD)', 'Owner Profit (USD)'];
       const rows = data.map(g => [
-        ...checkedBoxes.map(k => (k === 'agent' || k === 'client') ? (g[k] || '—') : (g[k] || '—')),
+        ...checkedBoxes.map(k => k === 'range'
+          ? { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` }
+          : (g[k] || '—')),
         { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
         'Monthly (30/5) {W}',
         { v: Number(g.payout || 0), h: `<span class="monospace">$${zyFmtMoney(Number(g.payout || 0), 4)}</span>` },
@@ -1465,9 +1490,10 @@ async function renderOwnerCdr2Load(targetPage = 1) {
         const agentVal = String(s.agent || s.agent_username || s.agent_name || '').trim();
         const clearLabel = s.clears_at ? `Clears ${String(s.clears_at).slice(0, 10)}` : 'Monthly (30/5) {W}';
 
+        const rngLbl = s.range_name || s.range_label || s.range || s.country || '—';
         return [
           { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
-          zyEsc(s.range_name || s.range_label || s.range || s.country || '—'),
+          { v: rngLbl, h: `<span class="zy-wn-range-name">${zyEsc(rngLbl)}</span>` },
           { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
           { v: cliStr, h: `<span class="monospace">${zyEsc(cliStr)}</span>` },
           agentVal ? zyEsc(agentVal) : '<span style="color:#94a3b8;">Unassigned</span>',
@@ -1940,7 +1966,7 @@ window.zyLoadWhitenoiseBatches = async function (targetContainerId = 'cdr2-batch
 window.zyWnRollbackBatch = async function (id, batchCode, containerId) {
   const ok = typeof confirmAction === 'function'
     ? await confirmAction(`Rollback Batch ${batchCode}?`, 'This will remove rows inserted by this batch and restore exact pre-batch counts & balances.')
-    : window.confirm(`Rollback batch ${batchCode}? This will revert its changes cleanly.`);
+    : await zyConfirm(`Rollback batch ${batchCode}? This will revert its changes cleanly.`, { title: 'Rollback Batch' });
   if (!ok) return;
   try {
     const res = await apiFetch(`/api/whitenoise-excel/batches/${id}/rollback`, { method: 'POST', body: JSON.stringify({}) });

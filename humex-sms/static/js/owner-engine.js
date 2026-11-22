@@ -54,13 +54,20 @@ function getAuthToken() {
 // ── API Helpers ──────────────────────────────────────────────────
 async function apiFetch(path, opts = {}, retries = 2) {
   try {
+    const isFormData = typeof FormData !== 'undefined' && opts && opts.body instanceof FormData;
+    const headers = {
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(opts.headers || {})
+    };
+    if (isFormData) {
+      delete headers['Content-Type'];
+      delete headers['content-type'];
+    }
+    const { headers: _h, ...restOpts } = opts || {};
     const response = await fetch(API + path, {
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(opts.headers || {})
-      },
-      ...opts
+      ...restOpts,
+      headers
     });
 
     if (response.status === 401) {
@@ -315,9 +322,10 @@ function renderOwnerHubTabs(hub, activePage) {
     numbers: [
       ['my-numbers', 'fa-mobile-screen', 'My Numbers'],
       ['bulk-allocation', 'fa-diagram-project', 'Bulk Allocation'],
-      ['revoke-numbers', 'fa-rotate-left', 'Revoke Numbers']
+      ['blocked-numbers', 'fa-ban', 'Blocked Numbers']
     ],
     upload: [
+      ['smart-sheet-import', 'fa-file-excel', 'Smart Excel Import'],
       ['upload-numbers', 'fa-cloud-arrow-up', 'Import to Range'],
       ['bulk-range-import', 'fa-layer-group', 'Bulk Range Import'],
       ['blacklist-management', 'fa-ban', 'Blacklist']
@@ -617,11 +625,13 @@ function loadPage(page) {
     'allocation-history': renderAllocationHistory,
     'sms-ranges': renderSmsRanges,
     'sms-rate-card': renderSmsRanges,
-    'live-access': renderLiveOtpFeed,
+    'live-access': () => { if (typeof window.zyRenderLiveAccessPage === 'function') window.zyRenderLiveAccessPage({ role: 'owner' }); },
     'upload-numbers': () => renderUploadNumbers('existing'),
+    'smart-sheet-import': renderSmartSheetImport,
     'bulk-range-import': renderBulkRangeImport,
     'blacklist-management': renderBlacklist,
-    'revoke-numbers': renderRevokeNumbers,
+    'revoke-numbers': renderBlockedNumbers,
+    'blocked-numbers': renderBlockedNumbers,
     'my-sms': renderMySms,
     'cdr2': () => renderOwnerCdr2(),
     'profit-stats': renderProfitStats,
@@ -655,6 +665,7 @@ function loadPage(page) {
     'announcements': renderAnnouncements,
     'notifications': () => window.HumexNotifications && window.HumexNotifications.renderPage('page-content'),
     'live-chat': () => window.HumexLiveChat && window.HumexLiveChat.renderPage('page-content'),
+    'app-links': renderOwnerAppLinks,
     'support-tickets': renderSupportTickets,
     'my-profile': () => renderMyProfile('details'),
     'profile': () => renderMyProfile('details'),
@@ -699,6 +710,28 @@ function loadPage(page) {
 //  PROVIDERS — CR API, WEB SCRAPING PANELS & WHITENOISE EXCEL REPORTS
 // ════════════════════════════════════════════════════════════════════
 
+function buildCrApiTableHtml(connections) {
+  return connections.length ? buildTable(
+    ['#', 'Panel Name', 'Panel URL', 'Token', 'Auto-Pull', 'Last Pull', 'Status', 'Total Pulled', 'Active', 'Actions'],
+    connections.map(cn => [
+      cn.id,
+      `<strong>${escapeHtml(cn.panel_name || '—')}</strong>`,
+      `<span class="fs-12 text-muted">${escapeHtml((cn.panel_url || '').length > 40 ? cn.panel_url.slice(0, 40) + '…' : (cn.panel_url || ''))}</span>`,
+      `<span class="monospace">${escapeHtml(cn.token_masked || '—')}</span>`,
+      `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${Number(cn.interval) || 10}s</span>`,
+      cn.last_pulled_at ? fmtShort(cn.last_pulled_at) : '<span class="text-muted">Not polled yet</span>',
+      `<span class="fs-12 ${String(cn.last_status || '').startsWith('Error') ? 'text-danger' : 'text-success'}">${escapeHtml(cn.last_status || '—')}</span>`,
+      Number(cn.total_pulled) || 0,
+      statusBadge(cn.active ? 'active' : 'paused'),
+      `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
+        <button class="btn btn-${cn.active ? 'warning' : 'success'} btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Stop / Pause connection' : 'Start / Resume connection'}"><i class="fas fa-${cn.active ? 'stop' : 'play'}"></i> ${cn.active ? 'Stop' : 'Resume'}</button>
+        ${cn.active ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteCrApiConn(${cn.id}, '${escapeHtml(String(cn.panel_name || 'CR API Connection')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
+      </div>`
+    ])
+  ) : `<div class="empty-state"><i class="fas fa-link"></i><p>No CR API connections yet — click "Add Connection" to pull OTPs in from another panel.</p></div>`;
+}
+
 async function renderCrApiPanels() {
   try {
     const raw = await apiFetch('/api/cr-api-connections');
@@ -709,34 +742,37 @@ async function renderCrApiPanels() {
       <div class="page-header">
         <div>
           <div class="page-title">CR API Connected Panel</div>
-          <div class="page-subtitle">Auto-pulling OTPs every 5s from provider panels in real-time</div>
+          <div class="page-subtitle">Auto-pulling OTPs from provider panels with deduplication &amp; backoff protection</div>
         </div>
-        <div class="page-actions">
+        <div class="page-actions" style="display:flex;align-items:center;gap:8px;">
+          <span class="badge badge-blue" style="font-size:11px;padding:5px 9px;">
+            <i class="fas fa-rotate fa-spin" style="margin-right:4px;"></i> Live Sync
+          </span>
           <button class="btn btn-primary btn-sm" onclick="openAddCrApiModal()"><i class="fas fa-plus"></i> Add Connection</button>
         </div>
       </div>
-      <div class="card">
-        ${connections.length ? buildTable(
-          ['#', 'Panel Name', 'Panel URL', 'Token', 'Auto-Pull', 'Last Pull', 'Status', 'Total Pulled', 'Active', 'Actions'],
-          connections.map(cn => [
-            cn.id,
-            `<strong>${cn.panel_name}</strong>`,
-            `<span class="fs-12 text-muted">${cn.panel_url.length > 40 ? cn.panel_url.slice(0,40)+'…' : cn.panel_url}</span>`,
-            `<span class="monospace">${cn.token_masked}</span>`,
-            `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${cn.interval || 5}s</span>`,
-            cn.last_pulled_at ? fmtShort(cn.last_pulled_at) : '<span class="text-muted">Not polled yet</span>',
-            `<span class="fs-12 ${cn.last_status?.startsWith('Error') ? 'text-danger' : 'text-success'}">${cn.last_status || '—'}</span>`,
-            cn.total_pulled || 0,
-            statusBadge(cn.active ? 'active' : 'paused'),
-            `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
-              <button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
-              <button class="btn btn-${cn.active ? 'warning' : 'success'} btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Stop / Pause connection' : 'Start / Resume connection'}"><i class="fas fa-${cn.active ? 'stop' : 'play'}"></i> ${cn.active ? 'Stop' : 'Resume'}</button>
-              ${cn.active ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteCrApiConn(${cn.id}, '${escapeHtml(String(cn.panel_name || 'CR API Connection')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
-            </div>`
-          ])
-        ) : `<div class="empty-state"><i class="fas fa-link"></i><p>No CR API connections yet — click "Add Connection" to pull OTPs in from another panel.</p></div>`}
+      <div class="card" id="cr-api-table-card">
+        ${buildCrApiTableHtml(connections)}
       </div>
     `;
+
+    // Safe live status refresh every 5s (automatically cleaned up on page switch via activePollers)
+    const crPoller = setInterval(async () => {
+      const card = document.getElementById('cr-api-table-card');
+      if (!card || currentPage !== 'cr-api-panels') {
+        clearInterval(crPoller);
+        return;
+      }
+      try {
+        const liveRaw = await apiFetch('/api/cr-api-connections');
+        const liveConns = Array.isArray(liveRaw) ? liveRaw : (liveRaw?.data || []);
+        const target = document.getElementById('cr-api-table-card');
+        if (target && currentPage === 'cr-api-panels') {
+          target.innerHTML = buildCrApiTableHtml(liveConns);
+        }
+      } catch (_) {}
+    }, 5000);
+    activePollers.push(crPoller);
   } catch (err) {
     console.error('CR API panels error:', err);
     toast('Failed to load CR API connections', 'error');
@@ -746,7 +782,7 @@ async function renderCrApiPanels() {
 function openAddCrApiModal() {
   openModal('Add CR API Connection', `
     <form id="cr-api-form" onsubmit="submitAddCrApi(event)">
-      <p class="fs-12 text-muted" style="margin-bottom:14px;">Connect external panel's CR API — incoming OTPs are auto-pulled into your panel every 5 seconds so they appear at the same time.</p>
+      <p class="fs-12 text-muted" style="margin-bottom:14px;">Connect external panel's CR API — incoming OTPs are auto-pulled into your panel cleanly without duplicates.</p>
       <div class="form-group">
         <label class="form-label">Panel Name *</label>
         <input id="cr-panel-name" placeholder="e.g. HUMAX SMS / Remote Panel" required>
@@ -760,8 +796,8 @@ function openAddCrApiModal() {
         <input id="cr-token" placeholder="token key" required>
       </div>
       <div class="form-group">
-        <label class="form-label">Auto-Pull Every (seconds)</label>
-        <input id="cr-interval" type="number" min="3" value="5" placeholder="5">
+        <label class="form-label">Auto-Pull Every (seconds, min 5s)</label>
+        <input id="cr-interval" type="number" min="5" value="10" placeholder="10">
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -776,7 +812,7 @@ async function submitAddCrApi(event) {
   const panel_name = document.getElementById('cr-panel-name')?.value.trim();
   const panel_url = document.getElementById('cr-panel-url')?.value.trim();
   const token = document.getElementById('cr-token')?.value.trim();
-  const interval = parseInt(document.getElementById('cr-interval')?.value) || 5;
+  const interval = Math.max(5, parseInt(document.getElementById('cr-interval')?.value) || 10);
   if (!panel_name || !panel_url || !token) { toast('Fill in all required fields', 'error'); return; }
   try {
     await apiFetch('/api/cr-api-connections', {
@@ -787,7 +823,7 @@ async function submitAddCrApi(event) {
     await renderCrApiPanels();
   } catch (err) {
     console.error('Add CR API error:', err);
-    toast('Failed to add connection', 'error');
+    toast(err?.message || 'Failed to add connection', 'error');
   }
 }
 
@@ -1387,12 +1423,6 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
               </select>
             </div>
             <div>
-              <label class="zy-filter-label" for="num-client-filter" style="font-size:11.5px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:5px;">Client</label>
-              <select id="num-client-filter" class="apx-select" style="width:100%;height:38px;max-height:38px;border:1.5px solid #cbd5e1;border-radius:6px;background:#ffffff;padding:0 10px;font-size:13px;color:#1e293b;box-sizing:border-box;" onchange="zyOwnerNumFilter()">
-                <option value="">All Clients</option>
-              </select>
-            </div>
-            <div>
               <label class="zy-filter-label" for="num-status" style="font-size:11.5px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:5px;">Status</label>
               <select id="num-status" class="apx-select" style="width:100%;height:38px;max-height:38px;border:1.5px solid #cbd5e1;border-radius:6px;background:#ffffff;padding:0 10px;font-size:13px;color:#1e293b;box-sizing:border-box;" onchange="zyOwnerNumFilter()">
                 <option value="">All Statuses</option>
@@ -1432,27 +1462,25 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
       ${typeof zyRenderFab === 'function' ? zyRenderFab('Need numbers? Tap here', 'zyOwnerAllocateAll()') : ''}
     `;
 
-    const [rangesData, rateCardData, clientsData, agentsData] = await Promise.all([
+    const [rangesData, rateCardData, agentsData] = await Promise.all([
       apiFetch('/api/numbers/sms-ranges'),
       apiFetch('/api/numbers/rate-card'),
-      apiFetch('/api/clients?limit=5000'),
       apiFetch('/api/agents?limit=5000')
     ]);
 
     const ranges = (rangesData && rangesData.data) || (Array.isArray(rangesData) ? rangesData : []);
     const rateCard = (rateCardData && rateCardData.data) || (Array.isArray(rateCardData) ? rateCardData : []);
-    const clients = (clientsData && clientsData.data) || (Array.isArray(clientsData) ? clientsData : []);
     const agents = (agentsData && agentsData.data) || (Array.isArray(agentsData) ? agentsData : []);
 
     ZY_OWNER_RANGES = ranges;
     ZY_OWNER_AGENTS = agents;
-    ZY_OWNER_CLIENTS = clients;
+    ZY_OWNER_CLIENTS = [];
 
     ZY_OWNER_RANGE_BY_ID = {}; ranges.forEach(r => { ZY_OWNER_RANGE_BY_ID[r.id] = r; });
     ZY_OWNER_RANGE_LOOKUP = {}; ranges.forEach(r => { ZY_OWNER_RANGE_LOOKUP[`${r.country}|${r.provider}`] = r; });
     ZY_OWNER_RATE_LOOKUP = {}; rateCard.forEach(r => { ZY_OWNER_RATE_LOOKUP[`${r.country}|${r.provider}`] = r; });
     ZY_OWNER_AG_BY_ID = {}; agents.forEach(a => { ZY_OWNER_AG_BY_ID[a.id] = a.username; });
-    ZY_OWNER_CL_BY_ID = {}; clients.forEach(cl => { ZY_OWNER_CL_BY_ID[cl.id] = cl.username; });
+    ZY_OWNER_CL_BY_ID = {};
 
     // Populate Range Filter
     const rangeSel = document.getElementById('num-range-filter');
@@ -1468,12 +1496,6 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
     const agSel = document.getElementById('num-agent-filter');
     if (agSel) {
       agSel.innerHTML = '<option value="">All Agents</option>' + agents.map(a => `<option value="${escapeHtml(String(a.id))}">${escapeHtml(a.username || '')}</option>`).join('');
-    }
-
-    // Populate Client Filter
-    const clSel = document.getElementById('num-client-filter');
-    if (clSel) {
-      clSel.innerHTML = '<option value="">All Clients</option>' + clients.map(cl => `<option value="${escapeHtml(String(cl.id))}">${escapeHtml(cl.username || '')}</option>`).join('');
     }
 
     if (search) {
@@ -1504,7 +1526,6 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
 
   const rangeVal = document.getElementById('num-range-filter')?.value || '';
   const agVal = document.getElementById('num-agent-filter')?.value || '';
-  const clVal = document.getElementById('num-client-filter')?.value || '';
   const statusVal = document.getElementById('num-status')?.value || '';
   const searchVal = (document.getElementById('num-filter')?.value || '').trim();
   const perPage = Number(window._zyOwnerNumLimit) || 25;
@@ -1514,7 +1535,6 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
   params.set('limit', String(perPage));
   if (rangeVal) params.set('range', rangeVal);
   if (agVal) params.set('agent_id', agVal);
-  if (clVal) params.set('client_id', clVal);
   if (statusVal) params.set('status', statusVal);
   if (searchVal) params.set('search', searchVal);
 
@@ -1566,23 +1586,39 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
       const agentPayout = (rInfo?.payout ?? rateInfo?.sell_rate ?? n.agent_rate ?? n.payout) ?? 0;
       const isAssigned = !!(n.client_id || n.agent_id);
 
-      const numBox = typeof zyRenderNumberCopyBox === 'function'
+      const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
+      const rawNumBox = typeof zyRenderNumberCopyBox === 'function'
         ? zyRenderNumberCopyBox(cleanNumber)
         : `<span class="monospace fw-600">${escapeHtml(cleanNumber || '—')}</span>`;
+      const numBox = isBlockedNum
+        ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${escapeHtml(cleanNumber || '—')}</span>`
+        : rawNumBox;
+      const statusCell = isBlockedNum
+        ? `<span class="badge badge-red" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-weight:700;"><i class="fas fa-ban"></i> Blocked${n.inactivity_days_limit ? ` (${n.inactivity_days_limit}d)` : ''}</span>`
+        : statusBadge(n.status || 'active');
+      const isWnNum = Boolean(
+        n.is_whitenoise ||
+        (rInfo && rInfo.is_whitenoise) ||
+        String(n.provider || (rInfo && rInfo.provider) || '').toLowerCase().includes('whitenoise') ||
+        String(n.payout_schedule || (rInfo && rInfo.payout_schedule) || '').toLowerCase() === 'monthly30_5'
+      );
+      const rangeCellHtml = isBlockedNum
+        ? `<span style="color:#dc2626;font-weight:700;">${escapeHtml(rangeDisplayName)}</span>`
+        : (isWnNum ? `<span class="zy-wn-range-name">${escapeHtml(rangeDisplayName)}</span>` : escapeHtml(rangeDisplayName));
       const r = [
         dateCell,
-        escapeHtml(rangeDisplayName),
+        { v: rangeDisplayName, h: rangeCellHtml },
         escapeHtml(prefixDisplay),
         { v: cleanNumber, h: numBox },
         { v: agentVal || '—', h: agentHtml },
         `$ ${carrierCost}`,
         `$ ${agentPayout}`,
         { v: '', h: `<span style="font-size:11px;color:var(--text-muted);">SD: <b>${n.sd_limit ?? 0}</b> | OTP: <b>${n.otp_limit ?? 0}</b></span>` },
-        statusBadge(n.status || 'active'),
+        statusCell,
         { v: '', h: `<div style="display:inline-flex;gap:4px;align-items:center;justify-content:center;">` +
           (isAssigned
             ? `<button class="zy-rowbtn" onclick="zyOwnerUnassignOne(${n.id})" title="Unallocate back to Master Pool">${typeof zyImg === 'function' ? zyImg('btn_row_x') : '<i class="fas fa-rotate-left"></i>'}</button>`
-            : `<button class="zy-rowbtn" onclick="zyOwnerAllocateOne(${n.id})" title="Allocate to Agent / Client">${typeof zyImg === 'function' ? zyImg('btn_alloc') : '<i class="fas fa-user-plus"></i>'}</button>`) +
+            : `<button class="zy-rowbtn" onclick="zyOwnerAllocateOne(${n.id})" title="Allocate to Agent">${typeof zyImg === 'function' ? zyImg('btn_alloc') : '<i class="fas fa-user-plus"></i>'}</button>`) +
           `<button class="zy-rowbtn" onclick="zyOwnerDeleteOne(${n.id},'${cleanNumber.replace(/'/g, "\\'")}')" title="Delete Number">${typeof zyImg === 'function' ? zyImg('btn_unassign') : '<i class="fas fa-trash"></i>'}</button>` +
           `</div>` }
       ];
@@ -1658,25 +1694,13 @@ function zyOwnerAllocateAll() {
         ${picked.length ? picked.join(', ') : 'No numbers selected'}
       </div>
 
-      <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Allocate Target Type</label>
-      <select id="al-owner-type" class="zy-input" style="height:34px;margin-bottom:12px;" onchange="zyToggleOwnerTargetType()">
-        <option value="agent" selected>Agent</option>
-        <option value="client">Client</option>
-      </select>
+      <input type="hidden" id="al-owner-type" value="agent">
 
       <div id="al-owner-ag-wrap">
         <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Select Agent *</label>
         <select id="al-owner-agent" class="zy-input" style="height:34px;margin-bottom:12px;">
           <option value="">— Select Agent —</option>
-          ${(ZY_OWNER_AGENTS || []).filter(a => a.status !== 'inactive').map(a => `<option value="${a.id}">${mUsername(a)}</option>`).join('')}
-        </select>
-      </div>
-
-      <div id="al-owner-cl-wrap" style="display:none;">
-        <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Select Client *</label>
-        <select id="al-owner-client" class="zy-input" style="height:34px;margin-bottom:12px;">
-          <option value="">— Select Client —</option>
-          ${(ZY_OWNER_CLIENTS || []).filter(cl => cl.status !== 'inactive').map(cl => `<option value="${cl.id}">${cl.username}</option>`).join('')}
+          ${(ZY_OWNER_AGENTS || []).filter(a => a.status !== 'inactive').map(a => `<option value="${a.id}">${escapeHtml(mUsername(a))}</option>`).join('')}
         </select>
       </div>
 
@@ -1760,25 +1784,13 @@ function zyOwnerAllocateOne(numberId) {
         Number: <span class="monospace" style="color:var(--brand-primary,#166534);">${numStr}</span>
       </div>
 
-      <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Target Type</label>
-      <select id="al-single-type" class="zy-input" style="height:34px;margin-bottom:12px;" onchange="zyToggleSingleTargetType()">
-        <option value="agent" selected>Agent</option>
-        <option value="client">Client</option>
-      </select>
+      <input type="hidden" id="al-single-type" value="agent">
 
       <div id="al-single-ag-wrap">
         <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Select Agent *</label>
         <select id="al-single-ag" class="zy-input" style="height:34px;margin-bottom:12px;">
           <option value="">— Select Agent —</option>
-          ${(ZY_OWNER_AGENTS || []).filter(a => a.status !== 'inactive').map(a => `<option value="${a.id}">${a.username}</option>`).join('')}
-        </select>
-      </div>
-
-      <div id="al-single-cl-wrap" style="display:none;">
-        <label class="zy-lbl" style="font-weight:700;margin-bottom:4px;display:block;">Select Client *</label>
-        <select id="al-single-cl" class="zy-input" style="height:34px;margin-bottom:12px;">
-          <option value="">— Select Client —</option>
-          ${(ZY_OWNER_CLIENTS || []).filter(cl => cl.status !== 'inactive').map(cl => `<option value="${cl.id}">${cl.username}</option>`).join('')}
+          ${(ZY_OWNER_AGENTS || []).filter(a => a.status !== 'inactive').map(a => `<option value="${a.id}">${escapeHtml(a.username)}</option>`).join('')}
         </select>
       </div>
 
@@ -1849,7 +1861,7 @@ async function zyOwnerUnassignSelected() {
     toast('Please select numbers from the table first', 'warning');
     return;
   }
-  if (!confirm(`Unallocate ${ids.length} selected number(s) back to the Master Pool?`)) return;
+  if (!(await zyConfirm(`Unallocate ${ids.length} selected number(s) back to the Master Pool?`, { title: 'Unallocate Numbers', confirmLabel: 'Unallocate' }))) return;
 
   try {
     const res = await apiFetch('/api/numbers/bulk-unassign-many', {
@@ -1865,7 +1877,7 @@ async function zyOwnerUnassignSelected() {
 }
 
 async function zyOwnerUnassignOne(numberId) {
-  if (!confirm('Unallocate this number back to Master Pool?')) return;
+  if (!(await zyConfirm('Unallocate this number back to Master Pool?', { title: 'Unallocate Number', confirmLabel: 'Unallocate' }))) return;
   try {
     const res = await apiFetch(`/api/numbers/${numberId}/unassign`, { method: 'POST' });
     if (res && (res.success || res.id)) {
@@ -1886,7 +1898,7 @@ async function zyOwnerDeleteSelected() {
     toast('Please select numbers from the table first', 'warning');
     return;
   }
-  if (!confirm(`Permanently delete ${ids.length} selected number(s)? This cannot be undone.`)) return;
+  if (!(await zyConfirm(`Permanently delete ${ids.length} selected number(s)? This cannot be undone.`, { title: 'Delete Numbers', confirmLabel: 'Delete', danger: true }))) return;
 
   try {
     const res = await apiFetch('/api/numbers/bulk-delete-many', {
@@ -1903,7 +1915,7 @@ async function zyOwnerDeleteSelected() {
 
 async function zyOwnerDeleteOne(numberId, numStr) {
   const displayNum = numStr || numberId;
-  if (!confirm(`Permanently delete number ${displayNum}? This cannot be undone.`)) return;
+  if (!(await zyConfirm(`Permanently delete number ${displayNum}? This cannot be undone.`, { title: 'Delete Number', confirmLabel: 'Delete', danger: true }))) return;
 
   try {
     const res = await apiFetch(`/api/numbers/${encodeURIComponent(numberId)}`, { method: 'DELETE' });
@@ -2178,50 +2190,32 @@ function exportAdminNumbersPdf() {
 // ─── BULK ALLOCATION ──────────────────────────────────────────────
 async function renderBulkAllocation() {
   try {
-    const [agentsData, clientsData, ranges] = await Promise.all([
+    const [agentsData, ranges] = await Promise.all([
       apiFetch('/api/agents?limit=1000'),
-      apiFetch('/api/clients?limit=1000'),
       apiFetch('/api/numbers/sms-ranges')
     ]);
     const agents = (agentsData?.data || []).filter(a => a && a.status !== 'inactive' && a.status !== 'suspended' && a.status !== 'blocked');
-    const clients = (clientsData?.data || []).filter(c => c && c.status !== 'inactive' && c.status !== 'suspended' && c.status !== 'blocked');
     const rangeList = Array.isArray(ranges) ? ranges.filter(r => r.active !== false) : [];
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
       <div class="page-header">
-        <div><div class="page-title">Bulk Allocation</div><div class="page-subtitle">Transfer numbers to Agents or Clients in bulk</div></div>
+        <div><div class="page-title">Bulk Allocation</div><div class="page-subtitle">Transfer numbers to Agents in bulk</div></div>
       </div>
       ${renderOwnerHubTabs('numbers', 'bulk-allocation')}
       <div class="two-col">
         <div class="card">
           <div class="card-header"><div class="card-title">Allocate Numbers</div></div>
           <form id="bulk-alloc-form" onsubmit="doBulkAllocate(event)">
-            <div class="form-group">
-              <label class="form-label">Allocate To</label>
-              <select id="alloc-target-type" onchange="toggleAllocTargetOptions()">
-                <option value="agent" selected>Agent</option>
-                <option value="client">Client</option>
-              </select>
-              <small style="display:block;margin-top:4px;color:var(--text-muted);">Allocating to a Client automatically stamps their Agent on every number — keeping the 3-tier chain accurate.</small>
-            </div>
+            <input type="hidden" id="alloc-target-type" value="agent">
             <div class="form-group" id="alloc-agent-wrap">
               <label class="form-label">Select Agent *</label>
               ${zySelectSearch('alloc-agent', 'Search agents…')}
               <select id="alloc-agent">
                 <option value="">— Select Agent —</option>
-                ${agents.map(a => `<option value="${a.id}">${a.username}</option>`).join('')}
+                ${agents.map(a => `<option value="${a.id}">${escapeHtml(a.username)}</option>`).join('')}
               </select>
               ${!agents.length ? '<small class="text-danger">No active agents found.</small>' : ''}
-            </div>
-            <div class="form-group" id="alloc-client-wrap" style="display:none;">
-              <label class="form-label">Select Client *</label>
-              ${zySelectSearch('alloc-client', 'Search clients…')}
-              <select id="alloc-client">
-                <option value="">— Select Client —</option>
-                ${clients.map(cl => `<option value="${cl.id}">${cl.username}</option>`).join('')}
-              </select>
-              ${!clients.length ? '<small class="text-danger">No active clients found.</small>' : ''}
             </div>
             <div class="form-group">
               <label class="form-label">Select Range (Block / Location)</label>
@@ -2337,7 +2331,7 @@ async function loadRecentAllocHistory() {
 }
 
 async function undoAllocation(id, count) {
-  if (!confirm(`Are you sure you want to revert allocation #${id} (${count} numbers)? These numbers will be returned to the unassigned pool.`)) return;
+  if (!(await zyConfirm(`Are you sure you want to revert allocation #${id} (${count} numbers)? These numbers will be returned to the unassigned pool.`, { title: 'Revert Allocation', confirmLabel: 'Revert', danger: true }))) return;
   try {
     toast('Reverting allocation...', 'info');
     const res = await apiFetch(`/api/numbers/allocation-history/${id}/undo`, { method: 'POST' });
@@ -2587,15 +2581,25 @@ async function renderSmsRanges() {
       const currencyCode = String(r.currency || 'USD').trim().toUpperCase();
       const currSym = escapeHtml(currencyCode === 'EUR' ? '€' : (currencyCode === 'GBP' ? '£' : '$'));
       const paytermDisplay = resolved.activeKeys.map(zyFormatRangePaytermText).join(', ');
-      const isActive = r.active !== false;
+      const isBlockedRng = String(r.range_status || r.status || '').toLowerCase() === 'blocked' || r.active === false;
+      const inactDays = Math.max(0, parseInt(r.inactivity_days, 10) || 0);
       const safeDelName = (r.range_name || r.country || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
       const fmtRateCell = (val) => val !== null
         ? { v: val, h: `<span class="monospace fw-600">${currSym} ${zyFmtMoney(Number(val), 4)}</span>` }
         : { v: 'N/A', h: `<span>N/A</span>` };
 
+      const statusCellHtml = isBlockedRng
+        ? `<span class="badge badge-red" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-weight:700;"><i class="fas fa-ban"></i> Blocked</span>`
+        : `<span class="badge badge-green" style="font-weight:700;">Active</span>${inactDays > 0 ? `<div style="font-size:10.5px;color:#b45309;font-weight:700;margin-top:2px;"><i class="fas fa-clock"></i> ${inactDays}d Auto-Block</div>` : ''}`;
+
       return [
-        { v: rangeName, h: `<span class="fw-600">${escapeHtml(rangeName)}</span>` },
+        {
+          v: rangeName,
+          h: resolved.isWn
+            ? `<div class="zy-wn-cell-accent"><span class="zy-wn-range-name">${escapeHtml(rangeName)}</span></div>`
+            : `<span class="fw-600">${escapeHtml(rangeName)}</span>`
+        },
         { v: providerName, h: `<span>${escapeHtml(providerName)}</span>` },
         { v: cleanPrefix, h: `<span class="monospace fw-600">${escapeHtml(cleanPrefix)}</span>` },
         { v: currencyCode, h: `<span>${escapeHtml(currencyCode)}</span>` },
@@ -2606,7 +2610,7 @@ async function renderSmsRanges() {
         { v: qty, h: `<span class="monospace fw-600">${qty.toLocaleString()}</span>` },
         { v: free, h: `<span class="monospace fw-600" style="color:${free > 0 ? '#059669' : '#dc2626'};">${free.toLocaleString()}</span>` },
         { v: held, h: `<span class="monospace fw-600" style="color:#2563eb;">${held.toLocaleString()}</span>` },
-        { v: isActive ? 'Active' : 'Inactive', h: `<span>${isActive ? 'Active' : 'Inactive'}</span>` },
+        { v: isBlockedRng ? 'Blocked' : 'Active', h: statusCellHtml },
         {
           v: '',
           h: `<div style="display:inline-flex;gap:4px;align-items:center;justify-content:center;">
@@ -2729,9 +2733,14 @@ function openAddRangeModal() {
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Status</label>
             <select id="range-active" class="form-control" style="width:100%;height:30px;font-size:12px;">
-              <option value="1" selected>Active</option>
-              <option value="0">Inactive</option>
+              <option value="active" selected>Active</option>
+              <option value="blocked">Blocked</option>
             </select>
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label" style="font-size:11px;font-weight:700;color:#b45309;"><i class="fas fa-clock"></i> Auto-Block Inactive Numbers (Days, 0 = Off)</label>
+            <input type="number" id="range-inactivity-days" class="form-control" min="0" max="365" value="0" placeholder="e.g. 2, 3, 4, 5" style="width:100%;height:30px;font-size:12px;">
+            <div style="font-size:10px;color:#64748b;margin-top:2px;">Numbers with 0 SMS for N days auto-move to Blocked Numbers (Red). Active numbers stay untouched.</div>
           </div>
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Memo Text / Instructions</label>
@@ -2833,7 +2842,9 @@ async function submitAddRange(event) {
       payterms,
       active_payterms,
       otp_limit: parseInt(document.getElementById('range-otplimit')?.value) || 0,
-      active: document.getElementById('range-active')?.value === '1'
+      inactivity_days: Math.max(0, parseInt(document.getElementById('range-inactivity-days')?.value, 10) || 0),
+      range_status: (document.getElementById('range-active')?.value === 'blocked' || document.getElementById('range-active')?.value === '0') ? 'blocked' : 'active',
+      active: !(document.getElementById('range-active')?.value === 'blocked' || document.getElementById('range-active')?.value === '0')
     };
 
     const result = await apiFetch('/api/numbers/sms-ranges', {
@@ -2964,9 +2975,14 @@ function openEditRangeModal(r) {
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Status</label>
             <select id="er-active" class="form-control" style="width:100%;height:30px;font-size:12px;">
-              <option value="1" ${r.active !== false ? 'selected' : ''}>Active</option>
-              <option value="0" ${r.active === false ? 'selected' : ''}>Inactive</option>
+              <option value="active" ${(r.active !== false && String(r.range_status || r.status || '').toLowerCase() !== 'blocked') ? 'selected' : ''}>Active</option>
+              <option value="blocked" ${(r.active === false || String(r.range_status || r.status || '').toLowerCase() === 'blocked') ? 'selected' : ''}>Blocked</option>
             </select>
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label" style="font-size:11px;font-weight:700;color:#b45309;"><i class="fas fa-clock"></i> Auto-Block Inactive Numbers (Days, 0 = Off)</label>
+            <input type="number" id="er-inactivity-days" class="form-control" min="0" max="365" value="${Math.max(0, parseInt(r.inactivity_days, 10) || 0)}" placeholder="e.g. 2, 3, 4, 5" style="width:100%;height:30px;font-size:12px;">
+            <div style="font-size:10px;color:#64748b;margin-top:2px;">Numbers with 0 SMS after N days auto-flag as Blocked (Red). Active numbers remain untouched.</div>
           </div>
         </div>
 
@@ -3048,7 +3064,9 @@ async function submitEditRange(event, rangeId) {
       payterms,
       active_payterms,
       otp_limit: parseInt(document.getElementById('er-otplimit').value) || 0,
-      active: document.getElementById('er-active').value === '1'
+      inactivity_days: Math.max(0, parseInt(document.getElementById('er-inactivity-days')?.value, 10) || 0),
+      range_status: (document.getElementById('er-active')?.value === 'blocked' || document.getElementById('er-active')?.value === '0') ? 'blocked' : 'active',
+      active: !(document.getElementById('er-active')?.value === 'blocked' || document.getElementById('er-active')?.value === '0')
     };
 
     const result = await apiFetch(`/api/numbers/sms-ranges/${rangeId}`, {
@@ -3309,7 +3327,7 @@ async function submitBulkRangeImportFile(file) {
     return;
   }
 
-  if (res) res.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Processing ${file.name}…</div>`;
+  if (res) res.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Processing ${escapeHtml(file.name)}…</div>`;
 
   const form = new FormData();
   form.append('file', file);
@@ -3349,7 +3367,7 @@ async function submitBulkRangeImportFile(file) {
     toast('Bulk import complete', 'success');
   } catch (err) {
     console.error('Bulk import error:', err);
-    if (res) res.innerHTML = `<div class="alert alert-danger">Failed: ${err.message}</div>`;
+    if (res) res.innerHTML = `<div class="alert alert-danger">Failed: ${escapeHtml(err.message)}</div>`;
     toast('Bulk import failed', 'error');
   }
 }
@@ -3362,7 +3380,7 @@ async function uploadFile(file) {
   const res = document.getElementById('upload-result');
   if (!res) return;
 
-  res.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Uploading ${file.name}…</div>`;
+  res.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Uploading ${escapeHtml(file.name)}…</div>`;
 
   try {
     const form = new FormData();
@@ -3500,7 +3518,7 @@ async function submitBlacklist(event) {
 }
 
 async function deleteBlacklist(id) {
-  if (!confirm('Delete this blacklist rule?')) return;
+  if (!(await zyConfirm('Delete this blacklist rule?', { title: 'Delete Rule', confirmLabel: 'Delete', danger: true }))) return;
 
   try {
     await apiFetch(`/api/numbers/blacklist/${id}`, { method: 'DELETE' });
@@ -3512,70 +3530,141 @@ async function deleteBlacklist(id) {
   }
 }
 
-// ─── REVOKE NUMBERS ───────────────────────────────────────────────
-async function renderRevokeNumbers() {
-  try {
-    const [agents, clients] = await Promise.all([
-      apiFetch('/api/agents?limit=500'),
-      apiFetch('/api/clients?limit=500')
-    ]);
-    const allList = [
-      ...(agents?.data || []).map(a => ({ id: a.id, username: a.username, role: 'Agent' })),
-      ...(clients?.data || []).map(c => ({ id: c.id, username: c.username, role: 'Client' }))
-    ];
-    const userOptions = allList.map(u =>
-      `<option value="${u.id}">${u.username} (${u.role})</option>`
-    ).join('');
+// ─── BLOCKED / INACTIVE NUMBERS (Replaces Revoke Numbers) ─────────
+window._zyOwnerBlockedList = [];
 
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">Revoke Numbers</div><div class="page-subtitle">Take back numbers from Agents or Clients</div></div>
+async function renderBlockedNumbers() {
+  const c = document.getElementById('page-content');
+  if (!c) return;
+  c.innerHTML = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div class="page-title" style="color:#dc2626;"><i class="fas fa-ban"></i> Blocked Numbers</div>
+        <div class="page-subtitle">Numbers automatically flagged after exceeding their Range inactivity days limit (0 SMS). Red numbers cannot be allocated and can be permanently removed from the entire system pool.</div>
       </div>
-      ${renderOwnerHubTabs('numbers', 'revoke-numbers')}
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header"><div class="card-title">Revoke from User</div></div>
-          <form id="revoke-form" onsubmit="doRevokeNumbers(event)">
-            <div class="form-group">
-              <label class="form-label">Select User *</label>
-              <select id="revoke-user" required>
-                <option value="">— Select User —</option>
-                ${userOptions}
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Number or Range</label>
-              <input id="revoke-number" placeholder="+12025551234 or +1202555* for range">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Revoke Count</label>
-              <input type="number" id="revoke-count" placeholder="All">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Reason</label>
-              <textarea id="revoke-reason" rows="2" placeholder="Reason for revocation…"></textarea>
-            </div>
-            <div class="form-actions">
-              <button type="submit" class="btn btn-warning" id="revoke-submit-btn">
-                <i class="fas fa-rotate-right"></i> Revoke Numbers
-              </button>
-            </div>
-          </form>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">Recent Revocations</div></div>
-          <div id="revoke-history">
-            <div class="empty-state"><i class="fas fa-clock"></i><p>No recent revocations</p></div>
-          </div>
-        </div>
+      <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerScanInactiveNumbers()"><i class="fas fa-radar"></i> Scan Inactive Now</button>
+        <button type="button" class="btn btn-success btn-sm" onclick="zyOwnerUnblockSelectedNumbers()"><i class="fas fa-rotate-left"></i> Unblock Selected</button>
+        <button type="button" class="btn btn-danger btn-sm" onclick="zyOwnerDeleteBlockedNumbers()"><i class="fas fa-trash"></i> Delete Selected from System</button>
       </div>
-    `;
+    </div>
+    ${renderOwnerHubTabs('numbers', 'blocked-numbers')}
+    <div class="apx-card zy-panel">
+      <div class="apx-card-header zy-panel-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="apx-card-title" style="color:#dc2626;">
+          <i class="fas fa-triangle-exclamation"></i> Blocked / Inactive Numbers (<span id="owner-blocked-count">0</span>)
+        </div>
+        <input type="text" id="owner-blocked-search" class="form-control" placeholder="Search number, range, agent…" oninput="zyOwnerRenderBlockedTable()" style="max-width:260px;height:32px;font-size:12.5px;">
+      </div>
+      <div class="apx-card-body zy-panel-body" id="owner-blocked-body" style="padding:14px;">
+        <div style="text-align:center;padding:30px;color:#64748b;"><i class="fas fa-spinner fa-spin"></i> Scanning &amp; loading blocked numbers…</div>
+      </div>
+    </div>`;
+
+  try {
+    const res = await apiFetch('/api/numbers/blocked');
+    window._zyOwnerBlockedList = Array.isArray(res?.data) ? res.data : [];
+    zyOwnerRenderBlockedTable();
   } catch (err) {
-    console.error('Revoke numbers error:', err);
-    toast('Failed to load users', 'error');
+    console.error('Blocked numbers error:', err);
+    const body = document.getElementById('owner-blocked-body');
+    if (body) body.innerHTML = `<div style="text-align:center;padding:24px;color:#dc2626;">${escapeHtml(err?.message || 'Failed to load blocked numbers')}</div>`;
   }
 }
+const renderRevokeNumbers = renderBlockedNumbers;
+
+window.zyOwnerRenderBlockedTable = function () {
+  const body = document.getElementById('owner-blocked-body');
+  if (!body) return;
+  const q = (document.getElementById('owner-blocked-search')?.value || '').trim().toLowerCase();
+  const list = (window._zyOwnerBlockedList || []).filter(n => {
+    if (!q) return true;
+    return `${n.number || ''} ${n.range_name || ''} ${n.agent_username || ''} ${n.blocked_reason || ''}`.toLowerCase().includes(q);
+  });
+  const cnt = document.getElementById('owner-blocked-count');
+  if (cnt) cnt.textContent = list.length.toLocaleString();
+
+  if (!list.length) {
+    body.innerHTML = `<div style="text-align:center;padding:36px;color:#64748b;">
+      <i class="fas fa-shield-check" style="font-size:26px;color:#10b981;display:block;margin-bottom:8px;"></i>
+      <b>No Blocked or Inactive Numbers</b>
+      <div style="font-size:12px;margin-top:4px;">Configure an Inactivity Limit (Days) on any Range in SMS Ranges to auto-flag inactive numbers here.</div>
+    </div>`;
+    return;
+  }
+
+  const rows = list.map(n => {
+    const cleanNum = String(n.number || '').replace(/^\++/, '');
+    const r = [
+      { v: cleanNum, h: `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;"><i class="fas fa-ban" style="margin-right:4px;font-size:10.5px;"></i>${escapeHtml(cleanNum)}</span>` },
+      { v: n.range_name || '—', h: `<span style="font-weight:700;color:#dc2626;">${escapeHtml(n.range_name || '—')}</span>` },
+      { v: n.agent_username || 'Unassigned', h: n.agent_username && n.agent_username !== 'Unassigned' ? `<span class="fw-600">${escapeHtml(n.agent_username)}</span>` : '<span style="color:#94a3b8;">Master Pool</span>' },
+      { v: n.inactivity_days_limit || 0, h: n.inactivity_days_limit ? `<span class="badge badge-red">${n.inactivity_days_limit}d Auto-Block</span>` : '<span class="badge badge-red">Manual</span>' },
+      { v: n.last_sms_at || '', h: `<span style="font-size:11.5px;color:#64748b;">${n.last_sms_at ? escapeHtml(String(n.last_sms_at).slice(0, 16).replace('T', ' ')) : 'No SMS received'}</span>` },
+      { v: n.blocked_reason || 'Blocked', h: `<span style="color:#dc2626;font-weight:700;font-size:12px;">${escapeHtml(n.blocked_reason || 'Blocked')}</span>` }
+    ];
+    r.__id = n.id;
+    return r;
+  });
+
+  body.innerHTML = zyDT2('dt-owner-blocked', {
+    cols: ['Number', 'Range', 'Agent', 'Limit Rule', 'Last SMS', 'Reason'],
+    rows,
+    check: true,
+    perPage: 25
+  });
+  if (typeof zy2Render === 'function') zy2Render('dt-owner-blocked');
+};
+
+window.zyOwnerScanInactiveNumbers = async function () {
+  try {
+    const res = await apiFetch('/api/numbers/blocked/scan', { method: 'POST', body: JSON.stringify({}) });
+    if (res && res.success) {
+      toast(`Scan complete: ${res.newly_flagged || 0} newly flagged, ${res.total_flagged || 0} total blocked.`, 'success');
+      renderBlockedNumbers();
+    } else {
+      toast(res?.error || 'Scan failed', 'error');
+    }
+  } catch (err) {
+    toast(err?.message || 'Scan failed', 'error');
+  }
+};
+
+window.zyOwnerUnblockSelectedNumbers = async function () {
+  const ids = (typeof zy2Checked === 'function' ? zy2Checked('dt-owner-blocked') : []).map(Number).filter(Number.isFinite);
+  if (!ids.length) { toast('Select at least one blocked number to unblock', 'warning'); return; }
+  try {
+    const res = await apiFetch('/api/numbers/blocked/unblock', { method: 'POST', body: JSON.stringify({ number_ids: ids }) });
+    if (res && res.success) {
+      toast(`Unblocked ${res.unblocked || ids.length} number(s) and reset inactivity timer`, 'success');
+      renderBlockedNumbers();
+    } else {
+      toast(res?.error || 'Failed to unblock numbers', 'error');
+    }
+  } catch (err) {
+    toast(err?.message || 'Failed to unblock numbers', 'error');
+  }
+};
+
+window.zyOwnerDeleteBlockedNumbers = async function () {
+  const ids = (typeof zy2Checked === 'function' ? zy2Checked('dt-owner-blocked') : []).map(Number).filter(Number.isFinite);
+  if (!ids.length) { toast('Select at least one blocked number to delete', 'warning'); return; }
+  const ok = typeof zyConfirm === 'function'
+    ? await zyConfirm(`Permanently delete ${ids.length} blocked number(s) from the entire system (Owner, Agent & Client)? This cannot be undone.`, { title: 'Delete Blocked Numbers', confirmLabel: 'Delete Permanently', danger: true })
+    : true;
+  if (!ok) return;
+  try {
+    const res = await apiFetch('/api/numbers/blocked/delete', { method: 'POST', body: JSON.stringify({ number_ids: ids }) });
+    if (res && res.success) {
+      toast(`Permanently deleted ${res.deleted || 0} blocked number(s) from system pool`, 'success');
+      renderBlockedNumbers();
+    } else {
+      toast(res?.error || 'Failed to delete blocked numbers', 'error');
+    }
+  } catch (err) {
+    toast(err?.message || 'Failed to delete blocked numbers', 'error');
+  }
+};
 
 async function doRevokeNumbers(event) {
   event.preventDefault();
@@ -3747,104 +3836,93 @@ function toggleFeedPause() {
 }
 
 function startOtpFeed() {
-  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-otp`);
-  activeWS.push(ws);
-
-  ws.onmessage = e => {
-    if (otpPaused) return;
-    try {
-      const raw = JSON.parse(e.data);
-      if (raw.type !== 'otp') return;  // ignore heartbeat/keep-alive pings
-      const d = raw.data || raw;
-      const feed = document.getElementById('otp-feed');
-      if (!feed) { ws.close(); return; }
-
-      const emptyState = feed.querySelector('.empty-state');
-      if (emptyState) emptyState.remove();
-
-      otpCounts.total++;
-      if (otpCounts[d.app] !== undefined) otpCounts[d.app]++;
-
-      const el = document.getElementById('otp-total');
-      if (el) el.textContent = otpCounts.total;
-
-      ['WhatsApp', 'Telegram', 'Google'].forEach(a => {
-        const e2 = document.getElementById('otp-' + a.toLowerCase());
-        if (e2) e2.textContent = otpCounts[a] || 0;
-      });
-
-      const item = document.createElement('div');
-      item.className = 'feed-item';
-      item.innerHTML = `
-        <div class="feed-app-icon" style="background:${appColor(d.app)};min-width:36px">${d.app ? d.app[0] : '?'}</div>
-        <div class="feed-info">
-          <div class="feed-number"><strong>${escapeHtml(d.app || '—')}</strong> &nbsp;<span class="monospace">${escapeHtml(d.number || '—')}</span></div>
-          <div class="feed-msg">${escapeHtml(d.message || '—')}</div>
-        </div>
-        <div class="feed-meta">
-          <div class="feed-time">${new Date(d.timestamp || Date.now()).toLocaleTimeString()}</div>
-          <div class="feed-country">${d.country || '—'} · ${d.provider || '—'}</div>
-        </div>
-      `;
-      feed.prepend(item);
-      if (feed.children.length > 50) feed.lastChild.remove();
-    } catch (err) {
-      console.warn('WebSocket message error:', err);
-    }
-  };
-
-  ws.onerror = () => {
-    const feed = document.getElementById('otp-feed');
-    if (feed && !feed.querySelector('.feed-item')) {
-      feed.innerHTML = `<div class="empty-state"><i class="fas fa-wifi" style="color:var(--yellow-light);"></i><p>Reconnecting...</p></div>`;
-    }
-  };
-
-  // Live 3-second syncing fallback
+  otpPaused = false;
+  otpCounts = { total: 0, WhatsApp: 0, Telegram: 0, Google: 0 };
   const seenOtpIds = new Set();
-  const otpPoller = setInterval(async () => {
+
+  const appendOtpItem = (d) => {
     const feed = document.getElementById('otp-feed');
-    if (!feed) { clearInterval(otpPoller); return; }
-    if (otpPaused) return;
+    if (!feed) return false;
+    const dedupKey = d.id != null ? `id:${d.id}` : `m:${d.number || ''}|${d.timestamp || ''}|${d.message || ''}`;
+    if (seenOtpIds.has(dedupKey)) return true;
+    seenOtpIds.add(dedupKey);
+
+    const emptyState = feed.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    otpCounts.total++;
+    if (otpCounts[d.app] !== undefined) otpCounts[d.app]++;
+
+    const el = document.getElementById('otp-total');
+    if (el) el.textContent = otpCounts.total;
+
+    ['WhatsApp', 'Telegram', 'Google'].forEach(a => {
+      const e2 = document.getElementById('otp-' + a.toLowerCase());
+      if (e2) e2.textContent = otpCounts[a] || 0;
+    });
+
+    const item = document.createElement('div');
+    item.className = 'feed-item';
+    const timeLabel = d.timestamp
+      ? String(d.timestamp).replace('T', ' ').replace(/Z$/i, '').slice(0, 19)
+      : (d.date || new Date().toLocaleTimeString());
+    item.innerHTML = `
+      <div class="feed-app-icon" style="background:${appColor(d.app)};min-width:36px">${escapeHtml(d.app ? d.app[0] : '?')}</div>
+      <div class="feed-info">
+        <div class="feed-number"><strong>${escapeHtml(d.app || '—')}</strong> &nbsp;<span class="monospace">${escapeHtml(d.number || '—')}</span> ${d.otp ? `<span class="badge badge-green" style="margin-left:6px;font-size:12px;font-weight:700;"><i class="fas fa-key" style="margin-right:3px;"></i>OTP: ${escapeHtml(d.otp)}</span>` : ''}</div>
+        <div class="feed-msg">${escapeHtml(d.message || '—')}</div>
+      </div>
+      <div class="feed-meta">
+        <div class="feed-time">${escapeHtml(timeLabel)}</div>
+        <div class="feed-country">${escapeHtml(d.country || '—')} · ${escapeHtml(d.provider || '—')}</div>
+      </div>
+    `;
+    feed.prepend(item);
+    if (feed.children.length > 50) feed.lastChild.remove();
+    return true;
+  };
+
+  const syncLatestOtps = async () => {
+    const feed = document.getElementById('otp-feed');
+    if (!feed) return false;
+    if (otpPaused) return true;
     try {
       const logs = await apiFetch('/api/sms/logs?limit=30');
       const data = (logs && logs.data) || [];
-      const newItems = data.filter(d => !seenOtpIds.has(d.id)).reverse();
-      for (const d of newItems) {
-        seenOtpIds.add(d.id);
-        const emptyState = feed.querySelector('.empty-state');
-        if (emptyState) emptyState.remove();
-
-        otpCounts.total++;
-        if (otpCounts[d.app] !== undefined) otpCounts[d.app]++;
-
-        const el = document.getElementById('otp-total');
-        if (el) el.textContent = otpCounts.total;
-
-        ['WhatsApp', 'Telegram', 'Google'].forEach(a => {
-          const e2 = document.getElementById('otp-' + a.toLowerCase());
-          if (e2) e2.textContent = otpCounts[a] || 0;
-        });
-
-        const item = document.createElement('div');
-        item.className = 'feed-item';
-        item.innerHTML = `
-          <div class="feed-app-icon" style="background:${appColor(d.app)};min-width:36px">${d.app ? d.app[0] : '?'}</div>
-          <div class="feed-info">
-            <div class="feed-number"><strong>${escapeHtml(d.app || '—')}</strong> &nbsp;<span class="monospace">${escapeHtml(d.number || '—')}</span> ${d.otp ? `<span class="badge badge-green" style="margin-left:6px;font-size:12px;font-weight:700;"><i class="fas fa-key" style="margin-right:3px;"></i>OTP: ${escapeHtml(d.otp)}</span>` : ''}</div>
-            <div class="feed-msg">${escapeHtml(d.message || '—')}</div>
-          </div>
-          <div class="feed-meta">
-            <div class="feed-time">${d.date || d.timestamp ? (String(d.date || d.timestamp).replace('T', ' ').slice(0, 19)) : new Date().toLocaleTimeString()}</div>
-            <div class="feed-country">${d.country || '—'} · ${d.provider || '—'}</div>
-          </div>
-        `;
-        feed.prepend(item);
-        if (feed.children.length > 50) feed.lastChild.remove();
+      const ordered = [...data].reverse();
+      for (const d of ordered) {
+        appendOtpItem(d);
       }
-    } catch (e) {}
-  }, 3000);
+    } catch (_) {}
+    return true;
+  };
+
+  // Load recent OTPs immediately when page opens
+  syncLatestOtps();
+
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  try {
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-otp`);
+    activeWS.push(ws);
+
+    ws.onmessage = e => {
+      if (otpPaused) return;
+      try {
+        const raw = JSON.parse(e.data);
+        if (raw.type !== 'otp') return; // ignore heartbeat/keep-alive pings
+        const d = raw.data || raw;
+        if (!appendOtpItem(d)) ws.close();
+      } catch (err) {
+        console.warn('WebSocket message error:', err);
+      }
+    };
+  } catch (_) {}
+
+  // Live 4-second syncing fallback (shared dedup with WebSocket)
+  const otpPoller = setInterval(async () => {
+    const alive = await syncLatestOtps();
+    if (!alive) clearInterval(otpPoller);
+  }, 4000);
   activePollers.push(otpPoller);
 }
 
@@ -4194,13 +4272,18 @@ async function renderPayoutRequests(activeTab = 'all') {
         </div>
         <div class="zy-panel-body" style="padding:16px;">
           ${buildTable(
-            ['#', 'Requester', 'Amount', 'Method', 'Wallet / IBAN', 'Status', 'Requested At', 'Actions'],
+            ['#', 'Requester', 'Cycle', 'Amount', 'Method', 'Wallet / IBAN', 'Status', 'Requested At', 'Actions'],
             filtered.map(r => {
               const stLow = String(r.status || 'pending').toLowerCase();
               const isPaid = stLow === 'paid' || stLow === 'completed';
+              const isMonthlyReq = String(r.payout_type || '').toLowerCase() === 'monthly' || String(r.schedule || r.payterm || '').toLowerCase().includes('monthly');
+              const cycleBadge = isMonthlyReq
+                ? `<span class="badge" style="background:#ede9fe;color:#5b21b6;font-weight:700;">Monthly {W} (Whitenoise)</span>`
+                : `<span class="badge badge-blue" style="font-weight:700;">Weekly (API)</span>`;
               return [
                 `<span class="monospace fw-600">#${r.id || '—'}</span>`,
                 `<div><strong>${escapeHtml(r.user || r.username || '—')}</strong><div style="font-size:11px;color:var(--sp-text-muted);">${escapeHtml(r.role || 'Agent')}</div></div>`,
+                cycleBadge,
                 `<strong style="color:#10b981;font-size:15px;">$${zyFmtMoney((Number(r.amount) || 0), 2)}</strong>`,
                 `<span class="badge badge-blue">${escapeHtml(r.method || 'Transfer')}</span>`,
                 `<span class="monospace text-muted" style="font-size:11px;">${escapeHtml(r.wallet || r.account || '—')}</span>`,
@@ -4235,6 +4318,8 @@ function downloadPayoutInvoice(r) {
   const prefix = siteName.replace(/[^A-Za-z0-9]/g, '').slice(0, 5).toUpperCase() || 'HUMAX';
   const invoiceNo = `${prefix}-INV-${String(r.id).padStart(5, '0')}`;
   const dateStr = fmtShort(r.paid_at || r.timestamp);
+  const isMonthlyReq = String(r.payout_type || '').toLowerCase() === 'monthly' || String(r.schedule || r.payterm || '').toLowerCase().includes('monthly');
+  const cycleLabel = isMonthlyReq ? 'Monthly (30/5) {W} — Whitenoise' : 'Weekly (7/3) — API';
   const invoiceHtml = `
     <html><head><title>${invoiceNo}</title>
     <style>
@@ -4260,13 +4345,15 @@ function downloadPayoutInvoice(r) {
         </div>
         <div class="inv-meta">
           <div><strong>${invoiceNo}</strong></div>
+          <div>Cycle: ${escapeHtml(cycleLabel)}</div>
           <div>Date: ${dateStr}</div>
         </div>
       </div>
       <table>
-        <tr><th>Paid To</th><th>Method</th><th>Wallet / Account</th><th>Request #</th></tr>
+        <tr><th>Paid To</th><th>Cycle</th><th>Method</th><th>Wallet / Account</th><th>Request #</th></tr>
         <tr>
           <td>${escapeHtml(r.user || '—')}</td>
+          <td>${escapeHtml(cycleLabel)}</td>
           <td>${escapeHtml(r.method || '—')}</td>
           <td style="font-family:monospace;font-size:12px;">${escapeHtml(r.wallet || '—')}</td>
           <td>#${escapeHtml(r.id)}</td>
@@ -4644,6 +4731,10 @@ async function printCreditNotePdf(id) {
 }
 
 async function openAdminAddAgentModal() {
+  if (Number(window._zyAdminAgentTotal || 0) >= 3) {
+    toast('Maximum limit of 3 Agents reached. No more agents can be created.', 'warning');
+    return;
+  }
   openModal('Add New Agent', `
     <form id="admin-add-agent-form" onsubmit="submitAdminAddAgent(event)">
       <div class="form-row">
@@ -4658,10 +4749,17 @@ async function openAdminAddAgentModal() {
         <div class="form-group"><label class="form-label">Full Name</label><input id="aa-fullname" placeholder="Agent's full name"></div>
         <div class="form-group"><label class="form-label">Commission Rate (%)</label><input type="number" id="aa-commission" value="5" step="0.1"></div>
       </div>
-      <div class="form-group"><label class="form-label">Initial Balance ($)</label><input type="number" id="aa-bal" value="0" step="0.01"></div>
+      <div style="font-size:12px;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin-bottom:12px;">
+        <i class="fas fa-coins" style="color:#059669;margin-right:6px;"></i> Agent balance starts at <b>$0.00</b> and accumulates automatically from live SMS traffic (manual balance editing is disabled).
+      </div>
       <div class="form-group" style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:10px 12px;">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:#312e81;margin:0;">
           <input type="checkbox" id="aa-wn-access"> Whitenoise Access (Numbers, Ranges &amp; CDR 2 · Monthly 30/5 {W})
+        </label>
+      </div>
+      <div class="form-group" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:#075985;margin:0;">
+          <input type="checkbox" id="aa-applinks-access"> Apps Links Access (Show Apps Links Directory &amp; Allow Sharing with Clients)
         </label>
       </div>
       <div class="form-actions">
@@ -4687,8 +4785,8 @@ async function submitAdminAddAgent(event) {
       username, password,
       full_name: document.getElementById('aa-fullname').value,
       commission_rate: parseFloat(document.getElementById('aa-commission').value) || 5,
-      balance: parseFloat(document.getElementById('aa-bal').value) || 0,
       whitenoise_access: Boolean(document.getElementById('aa-wn-access')?.checked),
+      app_links_access: Boolean(document.getElementById('aa-applinks-access')?.checked),
       status: 'active'
     };
 
@@ -4714,13 +4812,21 @@ async function submitAdminAddAgent(event) {
 async function renderAdminAgents(page = 1) {
   try {
     const data = await apiFetch(`/api/agents?page=${page}&limit=25`);
+    const totalAgents = Number(data?.total || 0);
+    window._zyAdminAgentTotal = totalAgents;
+    const limitReached = totalAgents >= 3;
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
       <div class="page-header">
-        <div><div class="page-title">All Agents</div><div class="page-subtitle">${data?.total || 0} direct agents under Owner</div></div>
+        <div>
+          <div class="page-title">All Agents</div>
+          <div class="page-subtitle">${totalAgents} / 3 direct agents under Owner (Max 3 Agents allowed)</div>
+        </div>
         <div class="page-actions">
-          <button class="btn btn-primary btn-sm" onclick="openAdminAddAgentModal()"><i class="fas fa-user-plus"></i> Add Agent</button>
+          ${limitReached
+            ? `<button class="btn btn-outline btn-sm" disabled style="opacity:0.7;cursor:not-allowed;" title="Maximum limit of 3 Agents reached"><i class="fas fa-lock"></i> Max 3 Agents Reached</button>`
+            : `<button class="btn btn-primary btn-sm" onclick="openAdminAddAgentModal()"><i class="fas fa-user-plus"></i> Add Agent (${totalAgents}/3)</button>`}
         </div>
       </div>
       <div class="card">
@@ -4729,26 +4835,24 @@ async function renderAdminAgents(page = 1) {
           ['#', 'Username', 'Full Name', 'Balance', 'Clients', 'Numbers', 'Today OTP', 'Commission', 'Status', 'Actions'],
           (data?.data || []).map((a, idx) => [
             `<strong class="monospace">#${(page - 1) * 25 + idx + 1}</strong>`,
-            `<strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}`,
+            `<strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.app_links_access ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-size:10px;" title="Apps Links Enabled">APPS</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}`,
             escapeHtml(a.full_name || '—'),
-            `<span class="text-success fw-600">$${zyFmtMoney((a.balance || 0), 2)}</span>`,
-            a.clients_count || 0,
-            a.numbers_assigned || 0,
-            `<span class="badge badge-green">${a.today_otp || 0}</span>`,
+            `<span class="text-success fw-600" title="Auto-earned from SMS traffic">$${zyFmtMoney((a.balance || 0), 4)}</span>`,
+            `<span class="monospace fw-600">${Number(a.clients_count || 0).toLocaleString()}</span>`,
+            `<span class="monospace fw-600">${Number(a.numbers_assigned || 0).toLocaleString()}</span>`,
+            `<span class="badge badge-green">${Number(a.today_otp || 0).toLocaleString()}</span>`,
             (a.commission_rate || 0) + '%',
             statusBadge(a.status),
             `<div style="display:inline-flex;gap:4px;align-items:center;">
               <button class="btn btn-outline btn-sm" onclick="openViewUserModal(${Number(a.id)},'agent')" title="View Agent Details"><i class="fas fa-eye"></i></button>
               <button class="btn btn-outline btn-sm" onclick="openEditAgentModal(${Number(a.id)})" title="Edit Agent"><i class="fas fa-pen"></i></button>
               <button class="btn btn-outline btn-sm" onclick="openResetPasswordModal(${Number(a.id)},'${escapeHtml(a.username)}','agents',${Boolean(a.two_fa)})" title="${a.two_fa ? 'Reset Password (Requires Agent 2FA OTP)' : 'Reset Password'}"><i class="fas fa-key"></i></button>
-              <button class="btn btn-outline btn-sm" onclick="openAgentBalanceModal(${Number(a.id)},'${escapeHtml(a.username)}',${Number(a.balance) || 0})" title="Adjust Balance"><i class="fas fa-dollar-sign"></i></button>
               <button class="btn btn-${a.status === 'active' ? 'warning' : 'success'} btn-sm" onclick="toggleAgentAdmin(${Number(a.id)},'${escapeHtml(a.status)}')" title="${a.status === 'active' ? 'Suspend' : 'Activate'}"><i class="fas fa-${a.status === 'active' ? 'pause' : 'play'}"></i></button>
-              <button class="btn btn-danger btn-sm" onclick="deleteAgentAdmin(${Number(a.id)})" title="Delete"><i class="fas fa-trash"></i></button>
             </div>`
           ]),
           { id: 'tbl-agents', title: 'Agents List', toolbar: true }
         )}
-        ${pagination(page, data?.total || 0, 25, renderAdminAgents)}
+        ${pagination(page, totalAgents, 25, renderAdminAgents)}
       </div>
     `;
   } catch (err) {
@@ -4816,7 +4920,7 @@ async function toggleAgentAdmin(id, status) {
 }
 
 async function deleteAgentAdmin(id) {
-  if (!confirm('Delete agent?')) return;
+  if (!(await zyConfirm('Delete this agent?', { title: 'Delete Agent', confirmLabel: 'Delete', danger: true }))) return;
 
   try {
     await apiFetch(`/api/agents/${id}`, { method: 'DELETE' });
@@ -4874,10 +4978,16 @@ async function openEditAgentModal(id) {
             <input type="number" id="edit-ag-alloc-total" min="0" value="${agent.alloc_total_limit ?? ''}" placeholder="Inherit">
           </div>
         </div>
-        <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
+        <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:10px 14px;margin-bottom:10px;">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:700;color:#312e81;margin:0;">
             <input type="checkbox" id="edit-ag-wn-access" ${agent.whitenoise_access ? 'checked' : ''}>
             Whitenoise Access (Numbers, Ranges &amp; CDR 2 · Monthly 30/5 {W})
+          </label>
+        </div>
+        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:700;color:#075985;margin:0;">
+            <input type="checkbox" id="edit-ag-applinks-access" ${agent.app_links_access ? 'checked' : ''}>
+            Apps Links Access (Show Apps Links Directory &amp; Allow Sharing with Clients)
           </label>
         </div>
         <div class="form-actions">
@@ -4905,6 +5015,7 @@ async function submitEditAgent(event, id) {
     email: document.getElementById('edit-ag-email').value.trim(),
     commission_rate: parseFloat(document.getElementById('edit-ag-comm').value) || 0,
     whitenoise_access: Boolean(document.getElementById('edit-ag-wn-access')?.checked),
+    app_links_access: Boolean(document.getElementById('edit-ag-applinks-access')?.checked),
     alloc_mode: agMode || null,
     alloc_daily_limit: agDailyRaw !== '' && agDailyRaw !== undefined ? Math.max(0, parseInt(agDailyRaw, 10) || 0) : null,
     alloc_total_limit: agTotalRaw !== '' && agTotalRaw !== undefined ? Math.max(0, parseInt(agTotalRaw, 10) || 0) : null
@@ -4941,183 +5052,31 @@ async function submitEditAgent(event, id) {
   }
 }
 
-// ─── CLIENTS ─────────────────────────────────────────────────────────
-async function renderAdminClients(page = 1) {
-  try {
-    const data = await apiFetch(`/api/clients?page=${page}&limit=25`);
-
-    const c = document.getElementById('page-content');
-    c.innerHTML = `
-      <div class="page-header">
-        <div>
-          <div class="page-title">All Clients</div>
-          <div class="page-subtitle">${data?.total || 0} clients across Agents · Basic directory only (PKR balances, bank/wallet &amp; contact details are private and managed by their Agent)</div>
-        </div>
-      </div>
-      <div class="card">
-        ${renderManagementTabs('clients')}
-        ${buildTable(
-          ['#', 'Username', 'Assigned Agent', 'Financial Scope', 'Numbers', 'Status', 'Created / Active', 'Actions'],
-          (data?.data || []).map((c, idx) => {
-            const isPrivate = c.privacy_redacted === true || c.balance === undefined;
-            const privacyHtml = isPrivate
-              ? '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;"><i class="fas fa-lock" style="margin-right:4px;"></i>Private · Agent PKR</span>'
-              : `<span class="text-success">$${zyFmtMoney(Number(c.balance || 0), 2)}</span>`;
-            return [
-              `<strong class="monospace">#${(page - 1) * 25 + idx + 1}</strong>`,
-              `<strong>${escapeHtml(c.username || '—')}</strong>${c.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}`,
-              badge(c.agent_username ? `Agent: ${escapeHtml(c.agent_username)}` : (escapeHtml(c.agent_name) || (c.agent_id ? `Agent #${c.agent_id}` : '—')), 'blue'),
-              privacyHtml,
-              c.numbers_assigned ?? c.numbers ?? 0,
-              statusBadge(c.status),
-              fmtShort(c.created_at || c.created || c.last_active),
-              `<div style="display:inline-flex;gap:4px;align-items:center;">
-                <button class="btn btn-outline btn-sm" onclick="openViewUserModal(${Number(c.id)},'client')" title="View Client Directory Details"><i class="fas fa-eye"></i></button>
-                <button class="btn btn-outline btn-sm" onclick="openEditClientModal(${Number(c.id)})" title="Edit Client Settings"><i class="fas fa-pen"></i></button>
-                <button class="btn btn-outline btn-sm" onclick="openResetPasswordModal(${Number(c.id)},'${escapeHtml(c.username)}','clients')" title="Reset Password"><i class="fas fa-key"></i></button>
-                <button class="btn btn-${c.status === 'active' ? 'warning' : 'success'} btn-sm" onclick="toggleClientAdmin(${Number(c.id)},'${escapeHtml(c.status)}')" title="${c.status === 'active' ? 'Suspend' : 'Activate'}"><i class="fas fa-${c.status === 'active' ? 'pause' : 'play'}"></i></button>
-                <button class="btn btn-danger btn-sm" onclick="deleteClientAdmin(${Number(c.id)})" title="Delete"><i class="fas fa-trash"></i></button>
-              </div>`
-            ];
-          }),
-          { id: 'tbl-clients', title: 'Clients Directory (Privacy Protected)', toolbar: true }
-        )}
-        ${pagination(page, data?.total || 0, 25, renderAdminClients)}
-      </div>
-    `;
-  } catch (err) {
-    console.error('Admin clients error:', err);
-    toast('Failed to load clients', 'error');
-  }
+// ─── CLIENTS (Owner visibility stops at Agent tier) ──────────────────
+function formatOwnerClientPrivacyBadge(c) {
+  const isPrivate = !c || c.privacy_redacted === true || c.balance === undefined;
+  return isPrivate
+    ? '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;"><i class="fas fa-lock" style="margin-right:4px;"></i>Private · Agent PKR</span>'
+    : `<span class="text-success">$${zyFmtMoney(Number(c.balance || 0), 2)}</span>`;
 }
-
-async function toggleClientAdmin(id, status) {
-  try {
-    const newS = status === 'active' ? 'suspended' : 'active';
-    await apiFetch(`/api/clients/${id}`, { method: 'PATCH', body: JSON.stringify({ status: newS }) });
-    toast(`Client marked as ${newS}`, 'info');
-    renderAdminClients();
-  } catch (err) {
-    toast('Failed to toggle client', 'error');
-  }
+async function renderAdminClients() {
+  return renderAdminAgents();
 }
-
-async function deleteClientAdmin(id) {
-  if (!confirm('Are you sure you want to delete this client?')) return;
-  try {
-    const res = await apiFetch(`/api/clients/${id}`, { method: 'DELETE' });
-    if (res && res.error) {
-      toast(res.error, 'error');
-    } else {
-      toast('Client deleted', 'warning');
-      renderAdminClients();
-    }
-  } catch (err) {
-    toast('Failed to delete client: ' + err.message, 'error');
-  }
+async function toggleClientAdmin() {
+  toast('Clients are managed exclusively by their assigned Agent.', 'info');
 }
-
+async function deleteClientAdmin() {
+  toast('Clients are managed exclusively by their assigned Agent.', 'info');
+}
 function openClientBalanceModal() {
   toast('Client PKR balances are private and managed exclusively by their assigned Agent.', 'info');
 }
-
-async function openEditClientModal(id) {
-  try {
-    const client = await apiFetch(`/api/clients/${id}`);
-    if (!client) return;
-    const isRedacted = client.privacy_redacted === true;
-    openModal(`Edit Client — ${escapeHtml(client.username)}`, `
-      <form id="edit-client-form" onsubmit="submitEditClient(event, ${Number(id)})" autocomplete="off">
-        ${isRedacted ? `
-          <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#475569;">
-            <i class="fas fa-lock" style="color:#0284c7;margin-right:6px;"></i>
-            <strong>Privacy Protected:</strong> Client email, phone, bank/wallet details, and PKR balance are managed exclusively by their Agent (${escapeHtml(client.agent_username || (client.agent_id ? 'Agent #' + client.agent_id : 'Assigned Agent'))}).
-          </div>
-        ` : ''}
-        <div class="${isRedacted ? 'form-group' : 'form-row'}">
-          <div class="form-group"><label class="form-label">Username</label><input value="${escapeHtml(client.username || '')}" id="edit-cl-user" required autocomplete="off"></div>
-          ${!isRedacted ? `<div class="form-group"><label class="form-label">Full Name</label><input value="${escapeHtml(client.full_name || '')}" id="edit-cl-fullname" autocomplete="off"></div>` : ''}
-        </div>
-        ${!isRedacted ? `<div class="form-group"><label class="form-label">Email</label><input type="email" value="${escapeHtml(client.email || '')}" id="edit-cl-email" autocomplete="off"></div>` : ''}
-        <div class="form-group"><label class="form-label">New Password (optional)</label><input type="password" id="edit-cl-pass" autocomplete="new-password" placeholder="Leave blank to keep current"></div>
-        <div style="background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
-          <div style="font-weight:700;font-size:12px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Number Acquisition Override (Optional)</div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Acquisition Mode</label>
-              <select id="edit-cl-alloc-mode">
-                <option value="" ${!client.alloc_mode ? 'selected' : ''}>Inherit Default</option>
-                <option value="request" ${client.alloc_mode === 'request' ? 'selected' : ''}>Request Only</option>
-                <option value="self_allocate" ${client.alloc_mode === 'self_allocate' ? 'selected' : ''}>Self-Allocate Only</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Daily Limit (blank = inherit, 0 = unlimited)</label>
-              <input type="number" id="edit-cl-alloc-daily" min="0" value="${client.alloc_daily_limit ?? ''}" placeholder="Inherit">
-            </div>
-          </div>
-          <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">Total Holding Limit (blank = inherit, 0 = unlimited)</label>
-            <input type="number" id="edit-cl-alloc-total" min="0" value="${client.alloc_total_limit ?? ''}" placeholder="Inherit">
-          </div>
-        </div>
-        <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:700;color:#312e81;margin:0;">
-            <input type="checkbox" id="edit-cl-wn-access" ${client.whitenoise_access ? 'checked' : ''}>
-            Whitenoise Access (Numbers, Ranges &amp; CDR 2 · Monthly 30/5 {W})
-          </label>
-          <div style="font-size:11px;color:#4338ca;margin-top:4px;">Note: Assigned Agent must also have Whitenoise Access enabled for Client access to be active.</div>
-        </div>
-        <div class="form-actions">
-          <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary" id="edit-cl-btn"><i class="fas fa-save"></i> Save Changes</button>
-        </div>
-      </form>
-    `);
-  } catch (err) {
-    console.error('Edit client error:', err);
-    toast('Failed to load client', 'error');
-  }
+async function openEditClientModal() {
+  toast('Clients are managed exclusively by their assigned Agent.', 'info');
 }
-
-async function submitEditClient(event, id) {
-  event.preventDefault();
-  const username = document.getElementById('edit-cl-user').value.trim();
-  if (!username) { toast('Username is required', 'error'); return; }
-  const clMode = document.getElementById('edit-cl-alloc-mode')?.value || '';
-  const clDailyRaw = document.getElementById('edit-cl-alloc-daily')?.value;
-  const clTotalRaw = document.getElementById('edit-cl-alloc-total')?.value;
-  const payload = {
-    username,
-    whitenoise_access: Boolean(document.getElementById('edit-cl-wn-access')?.checked),
-    alloc_mode: clMode || null,
-    alloc_daily_limit: clDailyRaw !== '' && clDailyRaw !== undefined ? Math.max(0, parseInt(clDailyRaw, 10) || 0) : null,
-    alloc_total_limit: clTotalRaw !== '' && clTotalRaw !== undefined ? Math.max(0, parseInt(clTotalRaw, 10) || 0) : null
-  };
-  const fnEl = document.getElementById('edit-cl-fullname');
-  const emEl = document.getElementById('edit-cl-email');
-  if (fnEl) payload.full_name = fnEl.value.trim();
-  if (emEl) payload.email = emEl.value.trim();
-  const pass = document.getElementById('edit-cl-pass').value;
-  if (pass) {
-    if (pass.length < 6) { toast('Password must be at least 6 characters', 'error'); return; }
-    payload.password = pass;
-  }
-  const btn = document.getElementById('edit-cl-btn');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Saving...'; }
-  try {
-    const res = await apiFetch(`/api/clients/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    if (res) {
-      closeModal();
-      toast('Client updated successfully', 'success');
-      renderAdminClients();
-    }
-  } catch (err) {
-    console.error('Submit edit client error:', err);
-    toast(err.message || 'Failed to update client', 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
-  }
+async function submitEditClient(event) {
+  if (event) event.preventDefault();
+  toast('Clients are managed exclusively by their assigned Agent.', 'info');
 }
 
 // ─── HIERARCHY VIEW (3-Tier: Owner -> Agent -> Client) ───────────
@@ -5793,9 +5752,7 @@ async function renderAccountBalances() {
             statusBadge(u.status),
             (u.role === 'Owner' || u.username === 'Kamran_Bhatti')
               ? `<span class="badge badge-purple" style="font-size:11px;">Company Reserve</span>`
-              : `<button class="btn btn-outline btn-sm" onclick="openAdjustBalanceModal(${u.id},'${u.username}',${u.balance || 0})">
-                  <i class="fas fa-pen"></i> Adjust
-                </button>`
+              : `<span class="badge badge-blue" style="font-size:11px;" title="Accumulates automatically from live SMS traffic">Auto-Earned (Read-Only)</span>`
           ])
         )}
       </div>
@@ -5917,7 +5874,7 @@ async function renderAuditLogs(page = 1) {
 }
 
 async function clearAuditLogs() {
-  if (!confirm('⚠️ Are you sure you want to clear ALL audit logs? This action cannot be undone.')) return;
+  if (!(await zyConfirm('Are you sure you want to clear ALL audit logs? This action cannot be undone.', { title: 'Clear Audit Logs', confirmLabel: 'Clear All', danger: true }))) return;
   try {
     const res = await apiFetch('/api/audit-logs/clear', { method: 'POST' });
     if (res && res.success) {
@@ -6003,7 +5960,7 @@ async function loadLoginActivity() {
 
 async function quickBlockIp(ip) {
   if (!ip || ip === 'unknown') { toast('No IP address to block', 'error'); return; }
-  if (!confirm(`Block IP ${ip}? Anyone logging in from this address will be denied.`)) return;
+  if (!(await zyConfirm(`Block IP ${ip}? Anyone logging in from this address will be denied.`, { title: 'Block IP Address', confirmLabel: 'Block IP', danger: true }))) return;
   const result = await apiFetch('/api/firewall/block-ip', {
     method: 'POST',
     body: JSON.stringify({ ip, reason: 'Blocked from Login Activity' })
@@ -6014,7 +5971,7 @@ async function quickBlockIp(ip) {
 }
 
 async function clearLoginActivity() {
-  if (!confirm('⚠️ Are you sure you want to clear ALL login activity logs? This action cannot be undone.')) return;
+  if (!(await zyConfirm('Are you sure you want to clear ALL login activity logs? This action cannot be undone.', { title: 'Clear Login Activity', confirmLabel: 'Clear All', danger: true }))) return;
   try {
     const res = await apiFetch('/api/login-activity/clear', { method: 'POST' });
     if (res && res.success) {
@@ -6289,14 +6246,14 @@ async function renderAnnouncements() {
 }
 
 async function deleteAnnouncement(id) {
-  if (!confirm('Delete this announcement?')) return;
+  if (!(await zyConfirm('Delete this announcement?', { title: 'Delete Announcement', confirmLabel: 'Delete', danger: true }))) return;
   await apiFetch(`/api/announcements/${id}`, { method: 'DELETE' });
   toast('Announcement deleted', 'warning');
   renderAnnouncements();
 }
 
 async function clearAllAnnouncements() {
-  if (!confirm('⚠️ Are you sure you want to clear ALL announcements? This will remove all broadcast messages.')) return;
+  if (!(await zyConfirm('Are you sure you want to clear ALL announcements? This will remove all broadcast messages.', { title: 'Clear All Announcements', confirmLabel: 'Clear All', danger: true }))) return;
   try {
     const res = await apiFetch('/api/announcements/clear', { method: 'POST' });
     if (res && res.success) {
@@ -6659,7 +6616,7 @@ async function doBlockIp(event) {
 }
 
 async function unblockIp(id) {
-  if (!confirm('Unblock this IP?')) return;
+  if (!(await zyConfirm('Unblock this IP?', { title: 'Unblock IP', confirmLabel: 'Unblock' }))) return;
 
   try {
     await apiFetch(`/api/firewall/blocked-ips/${id}`, { method: 'DELETE' });
@@ -7504,7 +7461,7 @@ async function gsSaveCustomRoleTheme() {
 }
 
 async function gsDeleteRoleTheme(key, name) {
-  if (!confirm(`Delete custom theme "${name}"? Users on this theme will safely fall back to the active default.`)) {
+  if (!(await zyConfirm(`Delete custom theme "${name}"? Users on this theme will safely fall back to the active default.`, { title: 'Delete Theme', confirmLabel: 'Delete', danger: true }))) {
     return;
   }
   try {
@@ -8245,7 +8202,7 @@ function previewTimezoneChange(tz) {
 }
 
 async function clearAllNotifications() {
-  if (!confirm('⚠️ Are you sure you want to clear ALL user notifications? This cannot be undone.')) return;
+  if (!(await zyConfirm('Are you sure you want to clear ALL user notifications? This cannot be undone.', { title: 'Clear All Notifications', confirmLabel: 'Clear All', danger: true }))) return;
   try {
     const res = await apiFetch('/api/notifications/clear?clear_all=true', {
       method: 'POST',
@@ -8262,7 +8219,7 @@ async function clearAllNotifications() {
 }
 
 async function clearFirewallEvents() {
-  if (!confirm('⚠️ Are you sure you want to clear ALL firewall security event logs?')) return;
+  if (!(await zyConfirm('Are you sure you want to clear ALL firewall security event logs?', { title: 'Clear Firewall Logs', confirmLabel: 'Clear All', danger: true }))) return;
   try {
     const res = await apiFetch('/api/firewall/events/clear', { method: 'POST' });
     if (res && res.success) {
@@ -8418,13 +8375,13 @@ async function doBackup() {
 async function handleRestoreFile(input) {
   const file = input.files?.[0];
   if (!file) return;
-  if (!confirm(`This will overwrite ALL current data with the contents of "${file.name}". Continue?`)) {
+  if (!(await zyConfirm(`This will overwrite ALL current data with the contents of "${file.name}". Continue?`, { title: 'Restore System Backup', confirmLabel: 'Restore', danger: true }))) {
     input.value = '';
     return;
   }
 
   const result = document.getElementById('restore-result');
-  result.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Restoring from ${file.name}...</div>`;
+  result.innerHTML = `<div class="flex-center gap-2"><div class="spinner"></div> Restoring from ${escapeHtml(file.name)}...</div>`;
 
   const form = new FormData();
   form.append('file', file);
@@ -8444,12 +8401,12 @@ async function handleRestoreFile(input) {
     });
     const d = await response.json();
     if (!response.ok) throw new Error(d.error || d.detail || 'Restore failed');
-    result.innerHTML = `<div class="alert alert-success">✅ Restored ${d.restored_files} file(s) successfully. Reloading...</div>`;
+    result.innerHTML = `<div class="alert alert-success">✅ Restored ${Number(d.restored_files) || 0} file(s) successfully. Reloading...</div>`;
     toast('✅ Restore complete', 'success');
     setTimeout(() => window.location.reload(), 1500);
   } catch (err) {
     console.error('Restore error:', err);
-    result.innerHTML = `<div class="alert alert-danger">Failed: ${err.message}</div>`;
+    result.innerHTML = `<div class="alert alert-danger">Failed: ${escapeHtml(err.message)}</div>`;
     toast('Restore failed: ' + err.message, 'error');
   }
   input.value = '';
@@ -8750,7 +8707,7 @@ async function toggleCliRoute(id, currentStatus) {
 }
 
 async function deleteCliRoute(id) {
-  if (!confirm('Delete this CLI number?')) return;
+  if (!(await zyConfirm('Delete this CLI number?', { title: 'Delete CLI', confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await apiFetch(`/api/cli-routes/${id}`, { method: 'DELETE' });
     if (res && !res.error) {
@@ -8832,6 +8789,670 @@ function autoLogoutIdle() {
   document.addEventListener(evt, resetIdleTimer, { passive: true });
 });
 resetIdleTimer();
+
+// ══════════════════════════════════════════════════════════════════
+//  SMART MULTI-COUNTRY / MULTI-RANGE EXCEL NUMBER SHEET IMPORTER
+// ══════════════════════════════════════════════════════════════════
+let _smartImportState = null;
+
+function _safeHttpUrlFrontend(raw) {
+  const s = String(raw || '').trim();
+  if (!/^https?:\/\//i.test(s)) return '#';
+  return s;
+}
+
+async function renderSmartSheetImport() {
+  const c = document.getElementById('page-content');
+  if (!c) return;
+  c.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title"><i class="fas fa-file-excel" style="color:#059669;margin-right:8px;"></i>Smart Excel Sheet Import</div>
+        <div class="page-subtitle">Upload any multi-country / multi-range Excel or CSV sheet — verify duplicates instantly and import each range in 1 click.</div>
+      </div>
+      <div class="page-actions">
+        ${_smartImportState ? `<button type="button" class="btn btn-outline btn-sm" onclick="zyResetSmartSheetImport()"><i class="fas fa-rotate-left"></i> Upload Another Sheet</button>` : ''}
+      </div>
+    </div>
+    ${renderOwnerHubTabs('upload', 'smart-sheet-import')}
+    <div id="smart-import-host"></div>
+  `;
+  renderSmartSheetImportBody();
+}
+
+function zyResetSmartSheetImport() {
+  _smartImportState = null;
+  renderSmartSheetImport();
+}
+
+function renderSmartSheetImportBody() {
+  const host = document.getElementById('smart-import-host');
+  if (!host) return;
+
+  if (!_smartImportState) {
+    host.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">1-Click Multi-Range Number Sheet Analyzer</div>
+            <p class="text-muted fs-12" style="margin:4px 0 0;">
+              Automatically reads multi-sheet workbooks, multi-column range matrices, tabular Range+Number files, and Whitenoise sheets — checks every number against your live pool before importing.
+            </p>
+          </div>
+          <span class="badge badge-green">AUTO DEDUP &amp; MATCH</span>
+        </div>
+        <div class="upload-zone zy-smart-dropzone" id="smart-sheet-dropzone" onclick="document.getElementById('smart-sheet-file').click()">
+          <i class="fas fa-file-excel" style="color:#059669;"></i>
+          <p id="smart-sheet-file-label">Drop Excel / CSV / TXT file here or click to browse</p>
+          <small>Supports .xlsx, .xls, .csv, .txt · Multi-country &amp; Whitenoise sheets · Zero duplicate guarantee</small>
+        </div>
+        <input type="file" id="smart-sheet-file" accept=".xlsx,.xls,.csv,.txt" style="display:none;" onchange="zyHandleSmartSheetSelected(this)">
+        <div id="smart-sheet-loading" style="display:none;margin-top:14px;text-align:center;padding:16px;">
+          <div class="spinner" style="margin:0 auto 8px;"></div>
+          <div class="fs-13 fw-600">Scanning all sheets &amp; verifying numbers against existing inventory…</div>
+        </div>
+      </div>
+    `;
+    const dz = document.getElementById('smart-sheet-dropzone');
+    if (dz) {
+      dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+      dz.addEventListener('drop', e => {
+        e.preventDefault();
+        dz.classList.remove('dragover');
+        const f = e.dataTransfer?.files?.[0];
+        if (f) zyAnalyzeSmartSheetFile(f);
+      });
+    }
+    return;
+  }
+
+  const st = _smartImportState;
+  const s = st.summary || {};
+  const ownerRanges = st.owner_ranges || [];
+  const pendingMatched = (st.groups || []).filter(g => !g.imported && g.new_count > 0 && (g.selected_range_id || g.suggested_range_id));
+  const pendingMatchedNewTotal = pendingMatched.reduce((acc, g) => acc + Number(g.new_count || 0), 0);
+
+  const rangeOptionsHtml = (selectedId) => {
+    const opts = [`<option value="">-- Select Target Range --</option>`];
+    for (const r of ownerRanges) {
+      const wnTag = r.is_whitenoise ? ' [Monthly {W}]' : ` [${r.payterm || 'Weekly'}]`;
+      const prefTag = r.prefix ? ` (+${r.prefix})` : '';
+      const sel = (selectedId != null && Number(selectedId) === Number(r.id)) ? ' selected' : '';
+      opts.push(`<option value="${Number(r.id)}"${sel}>${escapeHtml(r.range_name)}${escapeHtml(prefTag)}${escapeHtml(wnTag)}</option>`);
+    }
+    return opts.join('');
+  };
+
+  const groupsHtml = (st.groups || []).map(g => {
+    const activeTargetId = g.selected_range_id !== undefined ? g.selected_range_id : g.suggested_range_id;
+    const isImported = Boolean(g.imported);
+    const hasNew = Number(g.new_count || 0) > 0;
+    const confBadge = g.match_confidence === 'high'
+      ? `<span class="badge badge-green" title="${escapeHtml(g.match_reason || '')}"><i class="fas fa-wand-magic-sparkles"></i> Auto-Matched</span>`
+      : g.match_confidence === 'medium'
+        ? `<span class="badge badge-blue" title="${escapeHtml(g.match_reason || '')}"><i class="fas fa-wand-magic-sparkles"></i> Suggested Match</span>`
+        : g.match_confidence === 'low'
+          ? `<span class="badge badge-orange" title="${escapeHtml(g.match_reason || '')}">Possible Match</span>`
+          : `<span class="badge" style="background:var(--bg-hover);color:var(--text-muted);">Manual Range Pick</span>`;
+
+    const sampleNewHtml = (g.sample_new || []).length
+      ? `<div class="zy-smart-samples">
+           <span class="zy-smart-samples-lbl">New Numbers Preview:</span>
+           ${(g.sample_new || []).map(n => `<code class="zy-num-chip">${escapeHtml(n)}</code>`).join('')}
+           ${g.new_count > (g.sample_new || []).length ? `<span class="fs-11 text-muted">+${g.new_count - g.sample_new.length} more</span>` : ''}
+         </div>`
+      : '';
+
+    const sampleExistHtml = (g.sample_existing || []).length
+      ? `<div class="zy-smart-samples zy-smart-samples-warn">
+           <span class="zy-smart-samples-lbl">Already in System (Skipped):</span>
+           ${(g.sample_existing || []).map(e => `<code class="zy-num-chip zy-num-chip-skip">${escapeHtml(e.number)} <small>(${escapeHtml(e.existing_range)})</small></code>`).join('')}
+         </div>`
+      : '';
+
+    return `
+      <div class="zy-smart-group-card ${isImported ? 'is-imported' : (!hasNew ? 'is-empty' : '')}" data-group-key="${escapeHtml(g.group_key)}">
+        <div class="zy-smart-group-head">
+          <div class="zy-smart-group-title-wrap">
+            <div class="zy-smart-group-title">
+              <i class="fas ${isImported ? 'fa-circle-check' : 'fa-layer-group'}" style="color:${isImported ? '#059669' : '#1d4ed8'};"></i>
+              <span>${escapeHtml(g.label)}</span>
+              ${g.sheet_name && g.sheet_name !== g.label ? `<span class="zy-smart-sheet-tag">Sheet: ${escapeHtml(g.sheet_name)}</span>` : ''}
+            </div>
+            <div class="zy-smart-group-badges">
+              <span class="badge badge-blue">In Sheet: ${g.total_count}</span>
+              <span class="badge ${hasNew ? 'badge-green' : ''}">Verified New: ${g.new_count}</span>
+              ${g.existing_count ? `<span class="badge badge-orange">Already Exists: ${g.existing_count}</span>` : ''}
+              ${g.duplicate_in_file_count ? `<span class="badge" style="background:var(--bg-hover);color:var(--text-muted);">File Dupes: ${g.duplicate_in_file_count}</span>` : ''}
+              ${confBadge}
+            </div>
+          </div>
+        </div>
+
+        ${sampleNewHtml}
+        ${sampleExistHtml}
+
+        <div class="zy-smart-group-actions">
+          ${isImported ? `
+            <div class="zy-smart-imported-banner">
+              <i class="fas fa-check-circle"></i>
+              <span>Imported <strong>${g.imported_count}</strong> verified new number(s) into <strong>${escapeHtml(g.imported_range_name || 'Range')}</strong></span>
+            </div>
+          ` : !hasNew ? `
+            <div class="zy-smart-all-dup-banner">
+              <i class="fas fa-shield-check"></i>
+              <span>All numbers in this section already exist in your system — nothing to add.</span>
+            </div>
+          ` : `
+            <div class="zy-smart-range-picker">
+              <label class="form-label" style="margin-bottom:4px;font-size:11.5px;">Target Owner Range ${g.match_reason ? `<span class="text-muted">(${escapeHtml(g.match_reason)})</span>` : ''}</label>
+              <select class="zy-smart-range-select" id="smart-sel-${escapeHtml(g.group_key)}" onchange="zySmartSelectGroupRange('${escapeHtml(g.group_key)}', this.value)">
+                ${rangeOptionsHtml(activeTargetId)}
+              </select>
+            </div>
+            <button type="button" class="btn btn-primary zy-smart-commit-btn" id="smart-btn-${escapeHtml(g.group_key)}" onclick="zyCommitSmartGroup('${escapeHtml(g.group_key)}')">
+              <i class="fas fa-plus-circle"></i> Add ${g.new_count} New Numbers
+            </button>
+          `}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  host.innerHTML = `
+    <div class="zy-smart-kpi-grid">
+      <div class="zy-smart-kpi">
+        <div class="zy-smart-kpi-val">${s.total_in_file || 0}</div>
+        <div class="zy-smart-kpi-lbl">Total in File</div>
+      </div>
+      <div class="zy-smart-kpi zy-kpi-green">
+        <div class="zy-smart-kpi-val">${s.verified_new || 0}</div>
+        <div class="zy-smart-kpi-lbl">Verified Brand-New</div>
+      </div>
+      <div class="zy-smart-kpi zy-kpi-amber">
+        <div class="zy-smart-kpi-val">${s.already_exists || 0}</div>
+        <div class="zy-smart-kpi-lbl">Already in System</div>
+      </div>
+      <div class="zy-smart-kpi">
+        <div class="zy-smart-kpi-val">${s.duplicates_in_file || 0}</div>
+        <div class="zy-smart-kpi-lbl">Duplicates in File</div>
+      </div>
+      <div class="zy-smart-kpi zy-kpi-blue">
+        <div class="zy-smart-kpi-val">${s.groups_count || 0}</div>
+        <div class="zy-smart-kpi-lbl">Detected Ranges</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="zy-smart-toolbar">
+        <div>
+          <div class="fw-700 fs-14"><i class="fas fa-file-excel" style="color:#059669;margin-right:6px;"></i>${escapeHtml(st.filename || 'Uploaded Sheet')}</div>
+          <div class="fs-12 text-muted">Click any range below to import its verified new numbers one by one, or import all matched ranges at once.</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          ${pendingMatched.length > 1 ? `
+            <button type="button" class="btn btn-success btn-sm" id="smart-commit-all-btn" onclick="zyCommitAllMatchedSmartGroups()">
+              <i class="fas fa-bolt"></i> Import All ${pendingMatched.length} Matched Ranges (${pendingMatchedNewTotal} New)
+            </button>
+          ` : ''}
+          <button type="button" class="btn btn-outline btn-sm" onclick="zyResetSmartSheetImport()">
+            <i class="fas fa-upload"></i> Upload New File
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="zy-smart-groups-list">
+      ${groupsHtml || '<div class="empty-state">No groups detected.</div>'}
+    </div>
+  `;
+}
+
+function zyHandleSmartSheetSelected(input) {
+  const file = input?.files?.[0];
+  if (file) zyAnalyzeSmartSheetFile(file);
+}
+
+async function zyAnalyzeSmartSheetFile(file) {
+  const lbl = document.getElementById('smart-sheet-file-label');
+  const loader = document.getElementById('smart-sheet-loading');
+  if (lbl) lbl.textContent = `Analyzing: ${file.name}…`;
+  if (loader) loader.style.display = 'block';
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const data = await apiFetch('/api/numbers/smart-sheet-preview', { method: 'POST', body: fd });
+    if (!data || !data.preview_token) {
+      if (loader) loader.style.display = 'none';
+      if (lbl) lbl.textContent = 'Drop Excel / CSV / TXT file here or click to browse';
+      return;
+    }
+    data.groups = (data.groups || []).map(g => ({
+      ...g,
+      selected_range_id: g.suggested_range_id ?? null
+    }));
+    _smartImportState = data;
+    toast(`Verified ${data.summary?.verified_new || 0} new number(s) across ${data.summary?.groups_count || 0} range(s).`, 'success');
+    renderSmartSheetImport();
+  } catch (err) {
+    if (loader) loader.style.display = 'none';
+    if (lbl) lbl.textContent = 'Drop Excel / CSV / TXT file here or click to browse';
+    toast(err.message || 'Failed to analyze file', 'error');
+  }
+}
+
+function zySmartSelectGroupRange(groupKey, val) {
+  if (!_smartImportState) return;
+  const grp = (_smartImportState.groups || []).find(g => g.group_key === groupKey);
+  if (grp) {
+    grp.selected_range_id = val ? Number(val) : null;
+  }
+}
+
+async function zyCommitSmartGroup(groupKey) {
+  if (!_smartImportState) return;
+  const grp = (_smartImportState.groups || []).find(g => g.group_key === groupKey);
+  if (!grp) return;
+  const selEl = document.getElementById(`smart-sel-${groupKey}`);
+  const targetRangeId = selEl ? Number(selEl.value) : Number(grp.selected_range_id || grp.suggested_range_id || 0);
+  if (!targetRangeId) {
+    toast('Please select a target Owner range first.', 'error');
+    if (selEl) selEl.focus();
+    return;
+  }
+  const btn = document.getElementById(`smart-btn-${groupKey}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Importing…'; }
+
+  const res = await apiFetch('/api/numbers/smart-sheet-commit', {
+    method: 'POST',
+    body: JSON.stringify({
+      preview_token: _smartImportState.preview_token,
+      group_key: groupKey,
+      target_range_id: targetRangeId
+    })
+  });
+  if (!res || !res.success) {
+    if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fas fa-plus-circle"></i> Add ${grp.new_count} New Numbers`; }
+    return;
+  }
+  const r0 = (res.results || [])[0] || {};
+  grp.imported = true;
+  grp.imported_count = r0.inserted ?? res.inserted ?? 0;
+  grp.imported_range_name = r0.target_range_name || 'Selected Range';
+  toast(res.message || `Imported ${grp.imported_count} number(s)`, grp.imported_count > 0 ? 'success' : 'warning');
+  renderSmartSheetImportBody();
+}
+
+async function zyCommitAllMatchedSmartGroups() {
+  if (!_smartImportState) return;
+  const items = (_smartImportState.groups || [])
+    .filter(g => !g.imported && g.new_count > 0 && (g.selected_range_id || g.suggested_range_id))
+    .map(g => ({
+      group_key: g.group_key,
+      target_range_id: Number(g.selected_range_id || g.suggested_range_id)
+    }));
+  if (!items.length) {
+    toast('Select target ranges for at least one group first.', 'warning');
+    return;
+  }
+  const btn = document.getElementById('smart-commit-all-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Importing all…'; }
+
+  const res = await apiFetch('/api/numbers/smart-sheet-commit', {
+    method: 'POST',
+    body: JSON.stringify({
+      preview_token: _smartImportState.preview_token,
+      items
+    })
+  });
+  if (!res || !res.success) {
+    if (btn) btn.disabled = false;
+    return;
+  }
+  for (const r of (res.results || [])) {
+    const grp = (_smartImportState.groups || []).find(g => g.group_key === r.group_key);
+    if (grp && !r.error) {
+      grp.imported = true;
+      grp.imported_count = r.inserted || 0;
+      grp.imported_range_name = r.target_range_name || '';
+    }
+  }
+  toast(res.message || `Imported ${res.inserted || 0} number(s)`, (res.inserted || 0) > 0 ? 'success' : 'warning');
+  renderSmartSheetImportBody();
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  OWNER APPS LINKS DIRECTORY (Excel Upload + Manual CRUD + Top/Low + Agent Access)
+// ══════════════════════════════════════════════════════════════════
+let _ownerAppLinksTab = 'links';
+let _ownerAppLinksList = [];
+let _ownerAppLinksAgents = [];
+let _ownerAppLinksQuery = '';
+
+async function renderOwnerAppLinks(tabOverride) {
+  if (tabOverride) _ownerAppLinksTab = tabOverride;
+  const c = document.getElementById('page-content');
+  if (!c) return;
+
+  const [linksRes, agentsRes] = await Promise.all([
+    apiFetch('/api/app-links').catch(() => ({ data: [] })),
+    apiFetch('/api/agents?limit=200').catch(() => ({ data: [] }))
+  ]);
+
+  _ownerAppLinksList = Array.isArray(linksRes?.data) ? linksRes.data : [];
+  _ownerAppLinksAgents = Array.isArray(agentsRes?.data) ? agentsRes.data : (Array.isArray(agentsRes) ? agentsRes : []);
+
+  const totalCount = _ownerAppLinksList.length;
+  const visibleCount = _ownerAppLinksList.filter(x => x.visible !== false).length;
+  const hiddenCount = totalCount - visibleCount;
+  const enabledAgentsCount = _ownerAppLinksAgents.filter(a => a.app_links_access).length;
+
+  c.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title"><i class="fas fa-link" style="color:#0284c7;margin-right:8px;"></i>Apps Links Directory</div>
+        <div class="page-subtitle">Upload Services Excel or add App Store / Play Store links, choose which apps show to users, set Top/Low priority, and control Agent access.</div>
+      </div>
+      <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('owner-applinks-excel').click()">
+          <i class="fas fa-file-excel" style="color:#059669;"></i> Upload Excel
+        </button>
+        <input type="file" id="owner-applinks-excel" accept=".xlsx,.xls,.csv" style="display:none;" onchange="zyOwnerUploadAppLinksExcel(this)">
+        <button type="button" class="btn btn-primary btn-sm" onclick="zyOpenAppLinkModal(null)">
+          <i class="fas fa-plus"></i> Add App Link
+        </button>
+      </div>
+    </div>
+
+    <div class="zy-smart-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px;">
+      <div class="zy-smart-kpi zy-kpi-blue">
+        <div class="zy-smart-kpi-val">${totalCount}</div>
+        <div class="zy-smart-kpi-lbl">Total App Links</div>
+      </div>
+      <div class="zy-smart-kpi zy-kpi-green">
+        <div class="zy-smart-kpi-val">${visibleCount}</div>
+        <div class="zy-smart-kpi-lbl">Visible to Users</div>
+      </div>
+      <div class="zy-smart-kpi zy-kpi-amber">
+        <div class="zy-smart-kpi-val">${hiddenCount}</div>
+        <div class="zy-smart-kpi-lbl">Hidden</div>
+      </div>
+      <div class="zy-smart-kpi">
+        <div class="zy-smart-kpi-val">${enabledAgentsCount} / ${_ownerAppLinksAgents.length}</div>
+        <div class="zy-smart-kpi-lbl">Agents With Access</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="zy-applinks-tabbar">
+        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'links' ? 'active' : ''}" onclick="renderOwnerAppLinks('links')">
+          <i class="fas fa-link"></i> App Links (${totalCount})
+        </button>
+        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'access' ? 'active' : ''}" onclick="renderOwnerAppLinks('access')">
+          <i class="fas fa-user-shield"></i> Agent Access Control (${enabledAgentsCount}/${_ownerAppLinksAgents.length})
+        </button>
+        <div style="margin-left:auto;min-width:210px;">
+          <input type="search" id="owner-applinks-search" placeholder="Search apps or agents…" value="${escapeHtml(_ownerAppLinksQuery)}" oninput="zyOwnerFilterAppLinks(this.value)" style="width:100%;padding:7px 10px;font-size:12.5px;">
+        </div>
+      </div>
+      <div id="owner-applinks-body"></div>
+    </div>
+  `;
+
+  zyRenderOwnerAppLinksBody();
+}
+
+function zyOwnerFilterAppLinks(q) {
+  _ownerAppLinksQuery = String(q || '');
+  zyRenderOwnerAppLinksBody();
+}
+
+function zyRenderOwnerAppLinksBody() {
+  const host = document.getElementById('owner-applinks-body');
+  if (!host) return;
+  const q = _ownerAppLinksQuery.trim().toLowerCase();
+
+  if (_ownerAppLinksTab === 'access') {
+    const filteredAgents = _ownerAppLinksAgents.filter(a => {
+      if (!q) return true;
+      return String(a.username || '').toLowerCase().includes(q) || String(a.full_name || '').toLowerCase().includes(q);
+    });
+    if (!filteredAgents.length) {
+      host.innerHTML = `<div class="empty-state" style="padding:32px;">No matching Agents found.</div>`;
+      return;
+    }
+    host.innerHTML = `
+      <div class="fs-12 text-muted" style="margin-bottom:12px;padding:10px 12px;background:var(--bg-hover);border-radius:8px;">
+        <i class="fas fa-circle-info" style="color:#0284c7;margin-right:6px;"></i>
+        Turn <strong>Apps Links</strong> ON for an Agent to show the <strong>Apps Links</strong> menu in their sidebar. Authorized Agents can then toggle Apps Links ON/OFF for each of their individual Clients.
+      </div>
+      <div class="zy-access-list">
+        ${filteredAgents.map(a => {
+          const on = Boolean(a.app_links_access);
+          return `
+            <div class="zy-access-row">
+              <div>
+                <div class="fw-700 fs-13">${escapeHtml(a.username || '—')} <span class="text-muted fw-400 fs-12">${a.full_name ? `· ${escapeHtml(a.full_name)}` : ''}</span></div>
+                <div class="fs-11 text-muted">Status: ${escapeHtml(a.status || 'active')} · Clients: ${Number(a.clients_count || 0)}</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;">
+                <span class="badge ${on ? 'badge-green' : ''}" style="${on ? '' : 'background:var(--bg-hover);color:var(--text-muted);'}">${on ? 'Visible in Sidebar' : 'Hidden'}</span>
+                <button type="button" class="btn btn-sm ${on ? 'btn-outline' : 'btn-primary'}" onclick="zyOwnerToggleAgentAppLinks(${Number(a.id)}, ${on ? 'false' : 'true'})">
+                  <i class="fas fa-${on ? 'eye-slash' : 'check'}"></i> ${on ? 'Disable' : 'Enable Access'}
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+    return;
+  }
+
+  const filtered = _ownerAppLinksList.filter(item => {
+    if (!q) return true;
+    return String(item.name || '').toLowerCase().includes(q)
+      || String(item.url || '').toLowerCase().includes(q)
+      || String(item.category || '').toLowerCase().includes(q);
+  });
+
+  if (!filtered.length) {
+    host.innerHTML = `
+      <div class="empty-state" style="padding:36px 16px;">
+        <i class="fas fa-link" style="font-size:28px;color:var(--text-muted);margin-bottom:10px;"></i>
+        <div class="fw-700 fs-14" style="margin-bottom:4px;">${_ownerAppLinksList.length ? 'No matching App Links' : 'No App Links Added Yet'}</div>
+        <div class="fs-12 text-muted" style="margin-bottom:14px;">Upload your Services Excel file (.xlsx / .csv) or click "+ Add App Link" to get started.</div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('owner-applinks-excel').click()"><i class="fas fa-file-excel" style="color:#059669;"></i> Upload Excel</button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="zyOpenAppLinkModal(null)"><i class="fas fa-plus"></i> Add App Link</button>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  host.innerHTML = `
+    <div class="zy-applinks-admin-list">
+      ${filtered.map((item, idx) => {
+        const vis = item.visible !== false;
+        const safeHref = _safeHttpUrlFrontend(item.url);
+        let hostLabel = item.url;
+        try { hostLabel = new URL(safeHref).hostname.replace(/^www\./, ''); } catch (_) {}
+        return `
+          <div class="zy-applink-admin-row ${vis ? '' : 'is-hidden'}">
+            <label class="zy-applink-vis-toggle" title="${vis ? 'Visible to authorized Users — click to hide' : 'Hidden from Users — click to show'}">
+              <input type="checkbox" ${vis ? 'checked' : ''} onchange="zyOwnerToggleAppLinkVisible(${Number(item.id)}, this.checked)">
+              <span>${vis ? 'Show' : 'Hide'}</span>
+            </label>
+            <div class="zy-applink-admin-main">
+              <div class="zy-applink-admin-title">
+                <span class="zy-applink-rank">#${idx + 1}</span>
+                <strong>${escapeHtml(item.name)}</strong>
+                ${item.pinned_top ? `<span class="badge badge-green" style="font-size:10px;"><i class="fas fa-thumbtack"></i> TOP</span>` : ''}
+                ${item.category ? `<span class="badge badge-blue" style="font-size:10px;">${escapeHtml(item.category)}</span>` : ''}
+                ${!vis ? `<span class="badge" style="font-size:10px;background:var(--bg-hover);color:var(--text-muted);">Hidden</span>` : ''}
+              </div>
+              <div class="zy-applink-admin-url">
+                <a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">
+                  <i class="fas fa-arrow-up-right-from-square"></i> ${escapeHtml(hostLabel)}
+                </a>
+                ${item.notes ? `<span class="text-muted"> · ${escapeHtml(item.notes)}</span>` : ''}
+              </div>
+            </div>
+            <div class="zy-applink-order-btns">
+              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'top')" title="Move to Top">Top</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'up')" title="Move Up"><i class="fas fa-arrow-up"></i></button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'down')" title="Move Down"><i class="fas fa-arrow-down"></i></button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'low')" title="Move to Bottom (Low)">Low</button>
+            </div>
+            <div class="zy-applink-crud-btns">
+              <a class="btn btn-outline btn-sm" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="Open Link in New Tab"><i class="fas fa-external-link-alt"></i></a>
+              <button type="button" class="btn btn-outline btn-sm" onclick="zyOpenAppLinkModal(${Number(item.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+              <button type="button" class="btn btn-danger btn-sm" onclick="zyConfirmDeleteAppLink(${Number(item.id)})" title="Delete"><i class="fas fa-trash"></i></button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+async function zyOwnerUploadAppLinksExcel(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await apiFetch('/api/app-links/import-excel', { method: 'POST', body: fd });
+    if (res && res.success) {
+      toast(res.message || `Imported ${res.added || 0} app link(s)`, 'success');
+      renderOwnerAppLinks('links');
+    }
+  } finally {
+    if (input) input.value = '';
+  }
+}
+
+function zyOpenAppLinkModal(id) {
+  const existing = id != null ? _ownerAppLinksList.find(x => Number(x.id) === Number(id)) : null;
+  openModal(existing ? `Edit App Link — ${escapeHtml(existing.name)}` : 'Add New App Link', `
+    <form onsubmit="zySaveAppLinkForm(event, ${existing ? Number(existing.id) : 'null'})">
+      <div class="form-group">
+        <label class="form-label">App / Service Name *</label>
+        <input id="al-name" required value="${escapeHtml(existing?.name || '')}" placeholder="e.g. WhatsApp Business, Telegram, Facebook">
+      </div>
+      <div class="form-group">
+        <label class="form-label">App Link (Play Store / App Store / Web URL) *</label>
+        <input id="al-url" type="url" required value="${escapeHtml(existing?.url || '')}" placeholder="https://play.google.com/store/apps/details?id=...">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Category (optional)</label>
+          <input id="al-category" value="${escapeHtml(existing?.category || '')}" placeholder="e.g. Social, Banking, OTP">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Short Note (optional)</label>
+          <input id="al-notes" value="${escapeHtml(existing?.notes || '')}" placeholder="Optional note for users">
+        </div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;background:var(--bg-hover);padding:10px 12px;border-radius:8px;">
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600;margin:0;">
+          <input type="checkbox" id="al-visible" ${existing ? (existing.visible !== false ? 'checked' : '') : 'checked'}> Show to Authorized Users
+        </label>
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600;margin:0;">
+          <input type="checkbox" id="al-pinned" ${existing?.pinned_top ? 'checked' : ''}> Pin to Top
+        </label>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="al-save-btn"><i class="fas fa-save"></i> ${existing ? 'Save Changes' : 'Add App Link'}</button>
+      </div>
+    </form>
+  `);
+}
+
+async function zySaveAppLinkForm(event, id) {
+  event.preventDefault();
+  const name = document.getElementById('al-name')?.value.trim();
+  const url = document.getElementById('al-url')?.value.trim();
+  const category = document.getElementById('al-category')?.value.trim() || '';
+  const notes = document.getElementById('al-notes')?.value.trim() || '';
+  const visible = Boolean(document.getElementById('al-visible')?.checked);
+  const pinned_top = Boolean(document.getElementById('al-pinned')?.checked);
+
+  if (!name || !url) { toast('App name and link are required.', 'error'); return; }
+  const btn = document.getElementById('al-save-btn');
+  if (btn) btn.disabled = true;
+
+  const res = id != null
+    ? await apiFetch(`/api/app-links/${id}`, { method: 'PATCH', body: JSON.stringify({ name, url, category, notes, visible, pinned_top }) })
+    : await apiFetch('/api/app-links', { method: 'POST', body: JSON.stringify({ name, url, category, notes, visible, pinned_top }) });
+
+  if (btn) btn.disabled = false;
+  if (res && res.success) {
+    closeModal();
+    toast(id != null ? 'App link updated.' : 'App link added.', 'success');
+    renderOwnerAppLinks('links');
+  }
+}
+
+async function zyOwnerToggleAppLinkVisible(id, visible) {
+  const res = await apiFetch(`/api/app-links/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ visible: Boolean(visible) })
+  });
+  if (res && res.success) {
+    const it = _ownerAppLinksList.find(x => Number(x.id) === Number(id));
+    if (it) it.visible = Boolean(visible);
+    toast(visible ? 'App is now visible to authorized users.' : 'App hidden from users.', 'info');
+    renderOwnerAppLinks('links');
+  }
+}
+
+async function zyOwnerReorderAppLink(id, action) {
+  const res = await apiFetch('/api/app-links/reorder', {
+    method: 'POST',
+    body: JSON.stringify({ id, action })
+  });
+  if (res && res.success) {
+    _ownerAppLinksList = Array.isArray(res.data) ? res.data : _ownerAppLinksList;
+    zyRenderOwnerAppLinksBody();
+  }
+}
+
+function zyConfirmDeleteAppLink(id) {
+  const item = _ownerAppLinksList.find(x => Number(x.id) === Number(id));
+  if (!item) return;
+  openModal('Delete App Link', `
+    <p style="margin-bottom:16px;">Remove <strong>${escapeHtml(item.name)}</strong> from Apps Links directory?</p>
+    <div class="form-actions">
+      <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button type="button" class="btn btn-danger" onclick="zyExecuteDeleteAppLink(${Number(id)})"><i class="fas fa-trash"></i> Delete</button>
+    </div>
+  `);
+}
+
+async function zyExecuteDeleteAppLink(id) {
+  const res = await apiFetch(`/api/app-links/${id}`, { method: 'DELETE' });
+  if (res && res.success) {
+    closeModal();
+    toast('App link deleted.', 'warning');
+    renderOwnerAppLinks('links');
+  }
+}
+
+async function zyOwnerToggleAgentAppLinks(agentId, enable) {
+  const res = await apiFetch(`/api/agents/${agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ app_links_access: Boolean(enable) })
+  });
+  if (res && (res.id || res.success)) {
+    toast(enable ? 'Apps Links enabled for this Agent.' : 'Apps Links disabled for this Agent.', 'success');
+    renderOwnerAppLinks('access');
+  }
+}
 
 // ─── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {

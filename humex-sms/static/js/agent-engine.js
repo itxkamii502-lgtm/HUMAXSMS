@@ -60,14 +60,21 @@ function getAuthToken() {
 // ── API Helpers ──────────────────────────────────────────────────
 async function apiFetch(path, opts = {}, retries = 2) {
   try {
+    const isFormData = typeof FormData !== 'undefined' && opts && opts.body instanceof FormData;
+    const headers = {
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      'X-Agent-ID': AGENT_ID || '',
+      ...(opts.headers || {})
+    };
+    if (isFormData) {
+      delete headers['Content-Type'];
+      delete headers['content-type'];
+    }
+    const { headers: _h, ...restOpts } = opts || {};
     const response = await fetch(API + path, {
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Agent-ID': AGENT_ID || '',
-        ...(opts.headers || {})
-      },
-      ...opts
+      ...restOpts,
+      headers
     });
     
     if (response.status === 401) {

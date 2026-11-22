@@ -42,6 +42,7 @@ const ROOT_FILES_WHITELIST = [
   'VPS_DEPLOYMENT_GUIDE.md',
   'scripts/backup-vps.sh',
   'scripts/deploy-vps.sh',
+  'scripts/clear-all-logs.js',
   'deploy/nginx-humax-sms.conf'
 ];
 
@@ -53,7 +54,8 @@ const RUNTIME_PKG = {
   type: 'module',
   scripts: {
     start: 'node server.js --port 3000',
-    lint: 'node --check server.js'
+    lint: 'node --check server.js',
+    'reset:owner-only': 'node scripts/clear-all-logs.js --owner-only'
   },
   dependencies: {
     'adm-zip': '^0.6.1',

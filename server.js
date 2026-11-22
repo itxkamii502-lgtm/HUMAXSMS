@@ -1513,7 +1513,7 @@ function getUsdToPkrRate() {
   return 280;
 }
 
-function getMinPayoutPkr() {
+function getGlobalMinPayoutPkr() {
   const settings = readDb('settings');
   if (settings && !Array.isArray(settings)) {
     if (settings.min_payout_pkr !== undefined && settings.min_payout_pkr !== null && settings.min_payout_pkr !== '') {
@@ -1526,6 +1526,33 @@ function getMinPayoutPkr() {
     }
   }
   return 0;
+}
+
+function getMinPayoutPkr(agentId = null) {
+  if (agentId != null && Number(agentId) > 0) {
+    const agents = readDb('agents') || [];
+    const ag = agents.find(a => Number(a.id) === Number(agentId));
+    if (ag && ag.client_min_payout_pkr !== undefined && ag.client_min_payout_pkr !== null && ag.client_min_payout_pkr !== '') {
+      const amp = Number(ag.client_min_payout_pkr);
+      if (Number.isFinite(amp) && amp >= 0) return round2(amp);
+    }
+  }
+  return getGlobalMinPayoutPkr();
+}
+
+function resolveSessionAgentId(user) {
+  if (!user) return null;
+  const r = String(user.role || '').toLowerCase();
+  if (r === 'agent') return Number(user.id) || null;
+  if (r === 'client') {
+    const clients = readDb('clients') || [];
+    const c = clients.find(x =>
+      Number(x.id) === Number(user.id) ||
+      (user.username && String(x.username || '').toLowerCase() === String(user.username).toLowerCase())
+    );
+    return Number((c && c.agent_id) || user.agent_id || 0) || null;
+  }
+  return null;
 }
 
 function safeClientForOwner(c) {
@@ -2116,12 +2143,19 @@ function getAgentClientWeeklyPkrStats(agentId) {
   const remainingPkr = targetPkr > 0 ? Math.max(0, round2(targetPkr - usedPkr)) : null;
   const pct = targetPkr > 0 ? Math.min(100, Math.round((usedPkr / targetPkr) * 1000) / 10) : 0;
 
+  const customMinPkr = (ag.client_min_payout_pkr !== undefined && ag.client_min_payout_pkr !== null && ag.client_min_payout_pkr !== '')
+    ? Math.max(0, round2(Number(ag.client_min_payout_pkr)))
+    : null;
+
   return {
     weekly_pkr_target: targetPkr,
     weekly_pkr_used: usedPkr,
     weekly_pkr_remaining: remainingPkr,
     weekly_pkr_percent: pct,
     weekly_pkr_enforce_mode: enforceMode,
+    client_min_payout_pkr: customMinPkr !== null ? customMinPkr : getGlobalMinPayoutPkr(),
+    agent_client_min_payout_pkr: customMinPkr,
+    global_min_payout_pkr: getGlobalMinPayoutPkr(),
     week_start: weekStartIso.slice(0, 10)
   };
 }
@@ -8626,18 +8660,40 @@ app.put('/api/agent/pkr-target', requireAuth, (req, res) => {
   if (normRole(sessionUser.role) !== 'agent') {
     return res.status(403).json({ error: 'Forbidden. Agent account required.' });
   }
-  const target = Number(req.body?.weekly_pkr_target);
-  if (!Number.isFinite(target) || target < 0) {
-    return res.status(400).json({ error: 'weekly_pkr_target must be 0 or a positive PKR amount.' });
+  const hasWeeklyTarget = req.body?.weekly_pkr_target !== undefined && req.body?.weekly_pkr_target !== '';
+  const hasClientMin = req.body?.client_min_payout_pkr !== undefined;
+  if (!hasWeeklyTarget && !hasClientMin) {
+    return res.status(400).json({ error: 'Provide weekly_pkr_target or client_min_payout_pkr.' });
   }
-  const enforceMode = req.body?.weekly_pkr_enforce_mode === 'block' ? 'block' : 'warn';
   const agents = readDb('agents') || [];
   const idx = agents.findIndex(a => Number(a.id) === Number(sessionUser.id));
   if (idx === -1) return res.status(404).json({ error: 'Agent account not found.' });
-  agents[idx].weekly_pkr_target = round2(target);
-  agents[idx].weekly_pkr_enforce_mode = enforceMode;
+
+  if (hasWeeklyTarget) {
+    const target = Number(req.body.weekly_pkr_target);
+    if (!Number.isFinite(target) || target < 0) {
+      return res.status(400).json({ error: 'weekly_pkr_target must be 0 or a positive PKR amount.' });
+    }
+    agents[idx].weekly_pkr_target = round2(target);
+  }
+  if (req.body?.weekly_pkr_enforce_mode !== undefined) {
+    agents[idx].weekly_pkr_enforce_mode = req.body.weekly_pkr_enforce_mode === 'block' ? 'block' : 'warn';
+  }
+  if (hasClientMin) {
+    const rawMin = req.body.client_min_payout_pkr;
+    if (rawMin === null || rawMin === '') {
+      delete agents[idx].client_min_payout_pkr;
+    } else {
+      const mp = Number(rawMin);
+      if (!Number.isFinite(mp) || mp < 0) {
+        return res.status(400).json({ error: 'client_min_payout_pkr must be 0 or a positive PKR amount.' });
+      }
+      agents[idx].client_min_payout_pkr = round2(mp);
+    }
+  }
   writeDb('agents', agents);
-  res.json({ success: true, ...getAgentClientWeeklyPkrStats(sessionUser.id) });
+  const stats = getAgentClientWeeklyPkrStats(sessionUser.id);
+  res.json({ success: true, ...stats });
 });
 
 app.get('/api/client/rate-card', requireAuth, (req, res) => {
@@ -12293,7 +12349,8 @@ function registerPaginatedCrud(routePath, tableName) {
         : String(item.currency || 'USD').trim().toUpperCase();
 
       if (reqCurrency === 'PKR') {
-        const minPayoutPkr = getMinPayoutPkr();
+        const reqAgentId = isClient ? resolveSessionAgentId(sessionUser) : (isAgent ? Number(sessionUser.id) : null);
+        const minPayoutPkr = getMinPayoutPkr(reqAgentId);
         if (!isOwner && minPayoutPkr > 0 && item.amount < minPayoutPkr) {
           return res.status(400).json({ error: `Payment low. Minimum payout is Rs. ${cleanMoneyStr(minPayoutPkr, 4)} PKR.` });
         }
@@ -19398,6 +19455,8 @@ app.get('/api/settings', (req, res) => {
     if (isOwner) {
       return res.json(settings);
     }
+    const scopedAgentId = resolveSessionAgentId(user);
+    const effectiveMinPayoutPkr = getMinPayoutPkr(scopedAgentId);
     const safeSettings = {
       site_name: settings.site_name || 'HUMAX SMS',
       site_title: settings.site_title || 'HUMAX SMS',
@@ -19414,7 +19473,8 @@ app.get('/api/settings', (req, res) => {
       currency: settings.currency || 'USD',
       usd_to_pkr_rate: fxRate,
       min_payout: Number(settings.min_payout || 0),
-      min_payout_pkr: minPayoutPkr,
+      min_payout_pkr: effectiveMinPayoutPkr,
+      global_min_payout_pkr: minPayoutPkr,
       payterms: masterPayterms,
       monthly_cycle: monthlyCycle,
       live_access_agents_enabled: Boolean(settings.live_access_agents_enabled),
@@ -19790,9 +19850,12 @@ app.post('/api/settings/upload-logo', (req, res) => {
 
 app.get('/api/settings/min-payout', (req, res) => {
   const settings = readDb('settings') || {};
+  const user = getSessionUser(req);
+  const scopedAgentId = resolveSessionAgentId(user);
   res.json({
     min_payout: Number(settings.min_payout || 0),
-    min_payout_pkr: getMinPayoutPkr(),
+    min_payout_pkr: getMinPayoutPkr(scopedAgentId),
+    global_min_payout_pkr: getGlobalMinPayoutPkr(),
     usd_to_pkr_rate: getUsdToPkrRate()
   });
 });

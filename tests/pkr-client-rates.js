@@ -237,6 +237,23 @@ async function run() {
       withinCapReq.status === 200,
       JSON.stringify({ overCapStatus: overCapReq.status, overCapErr: overCapReq.data, withinCapStatus: withinCapReq.status, withinCapErr: withinCapReq.data }));
 
+    // 7f. Agent custom client_min_payout_pkr overrides global 2800 for own clients only
+    await ow('POST', '/api/settings', { min_payout_pkr: 2800 });
+    const cl1BeforeOverride = await cl1('GET', '/api/settings');
+    const ag1SetMin = await ag1('PUT', '/api/agent/pkr-target', { client_min_payout_pkr: 500 });
+    const cl1AfterOverride = await cl1('GET', '/api/settings');
+    const cl1MinEndpoint = await cl1('GET', '/api/settings/min-payout');
+    const cl3StillDefault = await cl3('GET', '/api/settings');
+    const cl1LowPayout = await cl1('POST', '/api/payout-requests', { amount: 100, currency: 'PKR', method: 'JazzCash', wallet: '03001234567' });
+    check('7f Agent custom client_min_payout_pkr (500) overrides global 2800 for own Client only & enforces on payout',
+      cl1BeforeOverride.data?.min_payout_pkr === 2800 &&
+      ag1SetMin.status === 200 && ag1SetMin.data?.client_min_payout_pkr === 500 &&
+      cl1AfterOverride.data?.min_payout_pkr === 500 &&
+      cl1MinEndpoint.data?.min_payout_pkr === 500 &&
+      cl3StillDefault.data?.min_payout_pkr === 2800 &&
+      cl1LowPayout.status === 400 && String(cl1LowPayout.data?.error || '').includes('500'),
+      JSON.stringify({ before: cl1BeforeOverride.data?.min_payout_pkr, ag1Set: ag1SetMin.data, after: cl1AfterOverride.data?.min_payout_pkr, cl3: cl3StillDefault.data?.min_payout_pkr, lowErr: cl1LowPayout.data }));
+
     const ok = summary('PKR CLIENT RATE CARD & PRIVACY SUITE');
     process.exitCode = ok ? 0 : 1;
   } finally {

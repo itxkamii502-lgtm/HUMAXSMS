@@ -13,6 +13,8 @@ logs
 .DS_Store
 humex-sms/data/*.json
 humex-sms/data/agent_files/
+humex-sms/data/chat_media/
+humex-sms/data/uploads/
 humex-sms/data/sessions/*
 humex-sms/data/archive/
 humex-sms/data/sms_log.journal.ndjson

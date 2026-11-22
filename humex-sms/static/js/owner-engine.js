@@ -6853,7 +6853,7 @@ async function renderGeneralSettings() {
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
                   <label class="form-label" style="font-size:12px;font-weight:600;color:#166534;">Client Min Payout (PKR)</label>
-                  <input type="number" step="1" min="0" value="${zyFmtMoney(Number(data.min_payout_pkr || (Number(data.min_payout || 50) * Number(data.usd_to_pkr_rate || 280))), 4)}" id="s-min-payout-pkr" placeholder="Auto: Min USD × FX">
+                  <input type="number" step="1" min="0" value="${zyFmtMoney(data.min_payout_pkr != null ? Number(data.min_payout_pkr) : (Number(data.min_payout || 50) * Number(data.usd_to_pkr_rate || 280)), 4)}" id="s-min-payout-pkr" placeholder="Auto: Min USD × FX">
                 </div>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">

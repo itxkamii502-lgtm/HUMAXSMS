@@ -2,15 +2,26 @@
 set -euo pipefail
 
 # HUMAX SMS — Safe One-Command VPS Deploy / Update Script (Private GitHub Repo + PM2)
-# Usage: bash scripts/deploy-vps.sh [branch]
+# Usage:
+#   bash scripts/deploy-vps.sh [branch]                     -> Normal safe update (keeps all live data)
+#   bash scripts/deploy-vps.sh [branch] --reset-owner-only  -> Stop PM2, clear PM2 logs + wipe all non-owner data, pull & restart
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BRANCH="${1:-main}"
+BRANCH="main"
+RESET_OWNER_ONLY=false
 APP_NAME="humex-sms"
+
+for arg in "$@"; do
+  if [ "$arg" = "--reset-owner-only" ]; then
+    RESET_OWNER_ONLY=true
+  elif [[ "$arg" != --* ]]; then
+    BRANCH="$arg"
+  fi
+done
 
 cd "$APP_DIR"
 
-echo "[DEPLOY] Directory: $APP_DIR (branch: $BRANCH)"
+echo "[DEPLOY] Directory: $APP_DIR (branch: $BRANCH, reset_owner_only: $RESET_OWNER_ONLY)"
 
 if [ ! -f ".env" ]; then
   echo "[DEPLOY] ERROR: .env file not found. Run: cp .env.example .env and configure secrets first." >&2
@@ -22,11 +33,22 @@ if grep -q "change_me_to_a_strong_random" .env; then
   exit 1
 fi
 
+if [ "$RESET_OWNER_ONLY" = true ]; then
+  echo "[DEPLOY] Stopping PM2 and flushing logs before Owner-only reset..."
+  pm2 stop "$APP_NAME" 2>/dev/null || true
+  pm2 flush || true
+fi
+
 if [ -d ".git" ]; then
-  echo "[DEPLOY] Pulling latest commits from private GitHub repo..."
+  echo "[DEPLOY] Pulling latest commits from GitHub..."
   git fetch origin "$BRANCH"
   git checkout "$BRANCH"
   git pull --ff-only origin "$BRANCH"
+fi
+
+if [ "$RESET_OWNER_ONLY" = true ]; then
+  echo "[DEPLOY] Running Owner-only production data & log reset..."
+  node scripts/clear-all-logs.js --owner-only
 fi
 
 echo "[DEPLOY] Installing production dependencies..."

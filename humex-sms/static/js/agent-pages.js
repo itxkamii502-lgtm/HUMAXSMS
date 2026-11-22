@@ -760,21 +760,38 @@ window.zyCrsUnpublishRow = async function(rangeId) {
 };
 
 window.zyCrsSaveTarget = async function(reloadClientPayouts = false) {
-  const val = parseFloat(document.getElementById('crs-target-val')?.value);
+  const valRaw = document.getElementById('crs-target-val')?.value;
+  const val = (valRaw === '' || valRaw == null) ? 0 : parseFloat(valRaw);
   const mode = document.getElementById('crs-target-mode')?.value === 'block' ? 'block' : 'warn';
   if (isNaN(val) || val < 0) {
     toast('Enter 0 or a positive Weekly PKR Target amount', 'error');
     return;
   }
+  const minEl = document.getElementById('crs-client-min-payout');
+  const payload = { weekly_pkr_target: val, weekly_pkr_enforce_mode: mode };
+  if (minEl) {
+    const rawMin = String(minEl.value ?? '').trim();
+    if (rawMin === '') {
+      payload.client_min_payout_pkr = null;
+    } else {
+      const mp = parseFloat(rawMin);
+      if (isNaN(mp) || mp < 0) {
+        toast('Enter 0 or a positive Client Min Payout (PKR) amount', 'error');
+        return;
+      }
+      payload.client_min_payout_pkr = mp;
+    }
+  }
   const btn = document.getElementById('crs-save-target-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   const res = await apiFetch('/api/agent/pkr-target', {
     method: 'PUT',
-    body: JSON.stringify({ weekly_pkr_target: val, weekly_pkr_enforce_mode: mode })
+    body: JSON.stringify(payload)
   });
   if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Save Target'; }
   if (res && res.success) {
-    toast('Weekly Client PKR target updated', 'success');
+    window._zyAgentRatesCache = null;
+    toast('Client PKR target & minimum payout updated', 'success');
     if (reloadClientPayouts || document.getElementById('cpr-agt-body')) {
       pgClientPaymentRequests(window._zyAgtCprTab || 'all');
     } else {
@@ -2944,8 +2961,11 @@ async function pgClientPaymentRequests(activeTab = 'all') {
     ]);
 
     const fx = Number(ratesRes?.usd_to_pkr_rate || settings?.usd_to_pkr_rate || 280);
-    const minPayoutPkr = Number(settings?.min_payout_pkr ?? 100);
     const wt = ratesRes?.weekly_target || {};
+    const minPayoutPkr = wt.client_min_payout_pkr != null
+      ? Number(wt.client_min_payout_pkr)
+      : Number(settings?.min_payout_pkr ?? 0);
+    const hasCustomClientMin = wt.agent_client_min_payout_pkr != null;
     const target = Number(wt.weekly_pkr_target || 0);
     const used = Number(wt.weekly_pkr_used || 0);
     const rem = wt.weekly_pkr_remaining != null ? Number(wt.weekly_pkr_remaining) : null;
@@ -3003,11 +3023,15 @@ async function pgClientPaymentRequests(activeTab = 'all') {
           <div class="zy-crs-fill ${fillCls}" style="width:${target > 0 ? Math.min(100, Math.max(0, pct)) : 0}%;"></div>
         </div>
         <div class="zy-crs-form-row">
-          <div style="flex:1;min-width:170px;">
+          <div style="flex:1;min-width:165px;">
+            <label class="zy-lbl" for="crs-client-min-payout">Client Min Payout (PKR)</label>
+            <input type="number" id="crs-client-min-payout" class="zy-input zy-crs-num" min="0" step="10" value="${minPayoutPkr}" style="height:34px;" placeholder="0 = no minimum">
+          </div>
+          <div style="flex:1;min-width:165px;">
             <label class="zy-lbl" for="crs-target-val">Weekly Target (PKR)</label>
             <input type="number" id="crs-target-val" class="zy-input zy-crs-num" min="0" step="100" value="${target}" style="height:34px;" placeholder="0 = unlimited">
           </div>
-          <div style="flex:1;min-width:200px;">
+          <div style="flex:1;min-width:190px;">
             <label class="zy-lbl" for="crs-target-mode">Cap Behavior</label>
             <select id="crs-target-mode" class="zy-input" style="height:34px;">
               <option value="warn" ${mode === 'warn' ? 'selected' : ''}>Warn Only (Track Budget)</option>
@@ -3035,7 +3059,10 @@ async function pgClientPaymentRequests(activeTab = 'all') {
           <div class="zy-crs-num" style="font-size:22px;font-weight:800;color:#0f172a;margin-top:4px;">${clientRequests.length}</div>
         </div>
         <div class="sp-card" style="padding:14px 16px;border-radius:10px;border:1.5px solid #cbd5e1;background:#ffffff;">
-          <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Client Min Payout</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Client Min Payout</div>
+            <span style="font-size:10px;font-weight:700;color:${hasCustomClientMin ? '#059669' : '#64748b'};">${hasCustomClientMin ? 'Agent Custom' : 'System Default'}</span>
+          </div>
           <div class="zy-crs-num" style="font-size:22px;font-weight:800;color:#7c3aed;margin-top:4px;">Rs. ${zyFmtMoney(minPayoutPkr, 2)}</div>
         </div>
       </div>

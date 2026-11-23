@@ -296,27 +296,7 @@ pgDashboard = async function () {
       };
     });
 
-    const pendingRateCount = Number(clientRatesRes?.pending_count || 0);
-    const dashFx = Number(clientRatesRes?.usd_to_pkr_rate || 280);
-    const dashTarget = clientRatesRes?.weekly_target || null;
-    const hasDashTarget = !!(dashTarget && Number(dashTarget.weekly_pkr_target || 0) > 0);
-    let dashAlertHtml = '';
-    if (pendingRateCount > 0 || hasDashTarget) {
-      const targetPart = hasDashTarget
-        ? `<span class="zy-crs-num" style="font-weight:700;color:var(--sp-text-secondary);">Weekly PKR Target: Rs. ${Number(dashTarget.weekly_pkr_used || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} / Rs. ${Number(dashTarget.weekly_pkr_target || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} (${Number(dashTarget.weekly_pkr_percent || 0)}%)</span>`
-        : '';
-      const pendingPart = pendingRateCount > 0
-        ? `<span><strong style="color:#d97706;">${pendingRateCount} range(s)</strong> pending Client PKR rate configuration (FX: 1 USD = Rs. ${zyFmtMoney(dashFx, 2)} PKR)</span>`
-        : `<span>All client ranges configured <span style="color:var(--sp-text-muted);">(FX: 1 USD = Rs. ${zyFmtMoney(dashFx, 2)} PKR)</span></span>`;
-      dashAlertHtml = `
-        <div class="zy-crs-alert-bar">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <i class="fas fa-tags" style="color:var(--sp-primary);"></i>
-            ${pendingPart}
-            ${targetPart ? `<span style="color:var(--sp-border);">|</span>${targetPart}` : ''}
-          </div>
-        </div>`;
-    }
+    const dashAlertHtml = '';
 
     if (typeof window.zyRenderUnifiedDashboard === 'function') {
       window.zyRenderUnifiedDashboard({

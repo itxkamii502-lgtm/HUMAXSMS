@@ -289,18 +289,18 @@ async function pgClientRateSet() {
       </div>
     </div>
     <div id="crs-top-cards" style="margin-bottom:16px;"><div class="zy-loading">Loading metric summaries…</div></div>
-    <div class="apx-card" style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <div class="apx-card zy-theme-card" style="border-radius:10px;overflow:hidden;">
       <div class="zy-crs-toolbar">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <span style="font-weight:700;font-size:13px;color:#1e293b;margin-right:4px;">
-            <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:4px;"></i> Termination Ranges (PKR Client Rates)
+          <span style="font-weight:700;font-size:13px;color:var(--sp-text-primary);margin-right:4px;">
+            <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:4px;"></i> Termination Ranges (PKR Client Rates &amp; Per-Range Limits)
           </span>
           <div class="zy-crs-tabs" id="crs-filter-tabs">
             <button type="button" class="zy-crs-tab active" data-filter="all" onclick="zyCrsSetFilter('all')">All</button>
             <button type="button" class="zy-crs-tab" data-filter="pending" onclick="zyCrsSetFilter('pending')">Pending Setup</button>
             <button type="button" class="zy-crs-tab" data-filter="configured" onclick="zyCrsSetFilter('configured')">Published</button>
           </div>
-          <input type="text" id="crs-search" class="zy-input" style="height:34px;width:220px;" placeholder="Search range, prefix, country…" oninput="zyCrsSetSearch(this.value)">
+          <input type="text" id="crs-search" class="zy-input" style="height:34px;width:220px;" placeholder="Search range…" oninput="zyCrsSetSearch(this.value)">
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <button type="button" class="btn btn-outline btn-sm" onclick="zyCrsReload(true)"><i class="fas fa-rotate"></i> Refresh</button>
@@ -363,25 +363,25 @@ function zyCrsRenderTopCards() {
 
   el.innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:10px;">
-      <div style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Total Ranges</div>
-        <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:#0f172a;margin-top:2px;">${totalRanges}</div>
-        <div style="font-size:11px;color:#64748b;margin-top:2px;">${totalPool.toLocaleString()} Numbers in Pool</div>
+      <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Total Ranges</div>
+        <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:var(--sp-text-primary);margin-top:2px;">${totalRanges}</div>
+        <div style="font-size:11px;color:var(--sp-text-muted);margin-top:2px;">${totalPool.toLocaleString()} Numbers in Pool</div>
       </div>
-      <div style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Published to Clients</div>
+      <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Published to Clients</div>
         <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:#059669;margin-top:2px;">${st.configured_count || 0}</div>
-        <div style="font-size:11px;color:#059669;margin-top:2px;">Visible on Client Rate Card</div>
+        <div style="font-size:11px;color:#059669;margin-top:2px;">Visible on Client Ranges Add</div>
       </div>
-      <div style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Pending Setup</div>
-        <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:${(st.pending_count || 0) > 0 ? '#d97706' : '#64748b'};margin-top:2px;">${st.pending_count || 0}</div>
-        <div style="font-size:11px;color:#64748b;margin-top:2px;">Hidden until PKR Rate Set</div>
+      <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Pending Setup</div>
+        <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:${(st.pending_count || 0) > 0 ? '#d97706' : 'var(--sp-text-muted)'};margin-top:2px;">${st.pending_count || 0}</div>
+        <div style="font-size:11px;color:var(--sp-text-muted);margin-top:2px;">Hidden until PKR Rate Set</div>
       </div>
-      <div style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:8px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Avg Client Rate (PKR)</div>
+      <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Avg Client Rate (PKR)</div>
         <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:#2563eb;margin-top:2px;">Rs. ${zyFmtMoney(avgPkr, 2)}</div>
-        <div style="font-size:11px;color:#64748b;margin-top:2px;">FX: 1 USD = Rs. ${zyFmtMoney(Number(st.fx || 280), 2)}</div>
+        <div style="font-size:11px;color:var(--sp-text-muted);margin-top:2px;">FX: 1 USD = Rs. ${zyFmtMoney(Number(st.fx || 280), 2)}</div>
       </div>
     </div>`;
 }
@@ -419,10 +419,15 @@ function zyCrsSyncSaveAllBtn() {
 
 function zyCrsGetRowDraft(r) {
   const dirty = (window._zyCrsState.dirty || {})[r.range_id];
+  const baseBatch = Math.max(1, parseInt(r.batch_size || (Array.isArray(r.allowed_quantities) ? r.allowed_quantities[0] : 25), 10) || 25);
+  const baseDaily = Math.max(1, parseInt(r.daily_request_limit, 10) || 1);
+  const baseMaxHold = Math.max(baseBatch, parseInt(r.max_hold_limit, 10) || Math.max(baseBatch, 25));
   return dirty || {
     client_rate_pkr: r.client_rate_pkr != null ? String(r.client_rate_pkr) : '',
-    allowed_quantities: Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities.slice() : [25, 50],
-    daily_request_limit: Number(r.daily_request_limit || 1)
+    batch_size: baseBatch,
+    allowed_quantities: [baseBatch],
+    daily_request_limit: baseDaily,
+    max_hold_limit: baseMaxHold
   };
 }
 
@@ -431,10 +436,15 @@ function zyCrsEnsureDirty(rangeId) {
   if (!st.dirty[rangeId]) {
     const base = (st.ranges || []).find(x => Number(x.range_id) === Number(rangeId));
     if (!base) return null;
+    const baseBatch = Math.max(1, parseInt(base.batch_size || (Array.isArray(base.allowed_quantities) ? base.allowed_quantities[0] : 25), 10) || 25);
+    const baseDaily = Math.max(1, parseInt(base.daily_request_limit, 10) || 1);
+    const baseMaxHold = Math.max(baseBatch, parseInt(base.max_hold_limit, 10) || Math.max(baseBatch, 25));
     st.dirty[rangeId] = {
       client_rate_pkr: base.client_rate_pkr != null ? String(base.client_rate_pkr) : '',
-      allowed_quantities: Array.isArray(base.allowed_quantities) && base.allowed_quantities.length ? base.allowed_quantities.slice() : [25, 50],
-      daily_request_limit: Number(base.daily_request_limit || 1)
+      batch_size: baseBatch,
+      allowed_quantities: [baseBatch],
+      daily_request_limit: baseDaily,
+      max_hold_limit: baseMaxHold
     };
   }
   return st.dirty[rangeId];
@@ -443,21 +453,20 @@ function zyCrsEnsureDirty(rangeId) {
 function zyCrsFormatMarginHtml(agentPkr, valStr) {
   const v = parseFloat(valStr);
   if (valStr === '' || isNaN(v)) {
-    return `<span style="color:var(--sp-text-muted);font-size:12px;">Not set</span>`;
+    return `<span style="color:var(--sp-text-muted);font-size:11px;">Not set</span>`;
   }
   if (v <= 0) {
-    return `<span style="color:var(--sp-danger);font-size:12px;font-weight:700;">Must be &gt; 0</span>`;
+    return `<span style="color:var(--sp-danger);font-size:11px;font-weight:700;">Must be &gt; 0</span>`;
   }
   if (agentPkr > 0 && v >= agentPkr) {
-    return `<span style="color:var(--sp-danger);font-size:12px;font-weight:700;">Exceeds max (&lt; Rs. ${zyFmtMoney(agentPkr, 4)})</span>`;
+    return `<span style="color:var(--sp-danger);font-size:11px;font-weight:700;">Exceeds max (&lt; Rs. ${zyFmtMoney(agentPkr, 4)})</span>`;
   }
   if (agentPkr <= 0) {
-    return `<span class="zy-crs-num" style="color:var(--sp-text-secondary);font-size:12px;">Set</span>`;
+    return `<span class="zy-crs-num" style="color:var(--sp-text-secondary);font-size:11px;">Set</span>`;
   }
   const margin = agentPkr - v;
   const pct = (margin / agentPkr) * 100;
-  return `<div class="zy-crs-num" style="color:var(--sp-success);font-weight:700;font-size:12.5px;">+Rs. ${zyFmtMoney(margin, 2)}</div>
-          <div class="zy-crs-num" style="color:var(--sp-text-muted);font-size:11px;">${pct.toFixed(1)}% margin</div>`;
+  return `<span class="zy-crs-num" style="color:var(--sp-success);font-weight:700;font-size:11.5px;">+Rs. ${zyFmtMoney(margin, 2)} (${pct.toFixed(1)}%)</span>`;
 }
 
 window.zyCrsOnRateInput = function(rangeId, inpEl) {
@@ -479,21 +488,35 @@ window.zyCrsOnRateInput = function(rangeId, inpEl) {
   zyCrsSyncSaveAllBtn();
 };
 
-window.zyCrsToggleQty = function(rangeId, qty, checked) {
+window.zyCrsOnBatchInput = function(rangeId, inpEl) {
   const draft = zyCrsEnsureDirty(rangeId);
   if (!draft) return;
-  const set = new Set(draft.allowed_quantities || [25, 50]);
-  if (checked) set.add(qty);
-  else set.delete(qty);
-  if (set.size === 0) set.add(qty);
-  draft.allowed_quantities = Array.from(set).sort((a, b) => a - b);
+  const b = Math.min(1000, Math.max(1, parseInt(inpEl.value, 10) || 25));
+  draft.batch_size = b;
+  draft.allowed_quantities = [b];
+  if (draft.max_hold_limit < b) {
+    draft.max_hold_limit = b;
+    const holdInp = document.getElementById(`crs-hold-${rangeId}`);
+    if (holdInp) holdInp.value = String(b);
+  }
+  inpEl.classList.add('is-dirty');
   zyCrsSyncSaveAllBtn();
 };
 
-window.zyCrsOnLimitInput = function(rangeId, val) {
+window.zyCrsOnLimitInput = function(rangeId, val, inpEl) {
   const draft = zyCrsEnsureDirty(rangeId);
   if (!draft) return;
-  draft.daily_request_limit = Math.max(1, parseInt(val, 10) || 1);
+  draft.daily_request_limit = Math.min(50, Math.max(1, parseInt(val, 10) || 1));
+  if (inpEl) inpEl.classList.add('is-dirty');
+  zyCrsSyncSaveAllBtn();
+};
+
+window.zyCrsOnMaxHoldInput = function(rangeId, inpEl) {
+  const draft = zyCrsEnsureDirty(rangeId);
+  if (!draft) return;
+  const mh = Math.min(5000, Math.max(1, parseInt(inpEl.value, 10) || 25));
+  draft.max_hold_limit = mh;
+  inpEl.classList.add('is-dirty');
   zyCrsSyncSaveAllBtn();
 };
 
@@ -509,9 +532,7 @@ function zyCrsRenderTable() {
 
   if (st.search) {
     rows = rows.filter(r =>
-      String(r.range_name || '').toLowerCase().includes(st.search) ||
-      String(r.country || '').toLowerCase().includes(st.search) ||
-      String(r.prefix || '').toLowerCase().includes(st.search)
+      String(r.range_name || '').toLowerCase().includes(st.search)
     );
   }
 
@@ -529,13 +550,13 @@ function zyCrsRenderTable() {
       <table class="zy-pro-table">
         <thead>
           <tr>
-            <th>Range &amp; Prefix</th>
+            <th>Range</th>
             <th style="text-align:right;">Agent Payout</th>
             <th>Client Rate (PKR)</th>
-            <th style="text-align:right;">Your Profit</th>
-            <th>Batch Sizes</th>
+            <th>Batch Size</th>
             <th>Daily Limit</th>
-            <th>Rate Card</th>
+            <th>Max Hold / Client</th>
+            <th>Status</th>
             <th style="text-align:right;">Actions</th>
           </tr>
         </thead>
@@ -548,7 +569,6 @@ function zyCrsRenderTable() {
             const valNum = parseFloat(draft.client_rate_pkr);
             const usdEqText = (!isNaN(valNum) && valNum > 0) ? `≈ $${zyFmtMoney((valNum / fx), 4)} USD` : 'Hidden from clients';
             const isInvalid = draft.client_rate_pkr !== '' && (isNaN(valNum) || valNum <= 0 || (agentPkr > 0 && valNum >= agentPkr));
-            const qtys = Array.isArray(draft.allowed_quantities) ? draft.allowed_quantities : [25, 50];
             const statusText = r.configured
               ? `<span style="color:var(--sp-success);font-weight:700;font-size:12px;">Published</span>`
               : `<span style="color:#d97706;font-weight:700;font-size:12px;">Pending Setup</span>`;
@@ -557,8 +577,8 @@ function zyCrsRenderTable() {
               <tr class="${!r.configured ? 'zy-crs-row-pending' : ''}">
                 <td>
                   <div class="${isWnRow ? 'zy-wn-range-name' : ''}" style="font-weight:700;${isWnRow ? '' : 'color:var(--sp-text-primary);'}">${zyEsc(r.range_name)}</div>
-                  <div style="font-size:11.5px;color:var(--sp-text-muted);">
-                    ${zyEsc(r.country || 'Global')} · <span class="zy-crs-num">${zyEsc(r.prefix || '—')}</span> · Pool: <strong>${Number(r.pool_available || 0)}</strong>
+                  <div style="font-size:11px;color:var(--sp-text-muted);">
+                    Pool: <strong>${Number(r.pool_available || 0).toLocaleString()}</strong>
                   </div>
                 </td>
                 <td style="text-align:right;">
@@ -570,29 +590,35 @@ function zyCrsRenderTable() {
                          step="0.01" min="0.01" value="${zyEsc(draft.client_rate_pkr)}"
                          placeholder="${agentPkr > 0 ? zyFmtMoney((agentPkr * 0.8), 4) : '0.50'}"
                          oninput="zyCrsOnRateInput(${Number(r.range_id)}, this)">
-                  <div id="crs-usdeq-${r.range_id}" class="zy-crs-num" style="font-size:11px;color:var(--sp-text-muted);margin-top:3px;">${usdEqText}</div>
-                </td>
-                <td style="text-align:right;" id="crs-margin-${r.range_id}">
-                  ${zyCrsFormatMarginHtml(agentPkr, draft.client_rate_pkr)}
-                </td>
-                <td>
-                  <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
-                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
-                      <input type="checkbox" ${qtys.includes(25) ? 'checked' : ''} onchange="zyCrsToggleQty(${Number(r.range_id)}, 25, this.checked)"> 25
-                    </label>
-                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
-                      <input type="checkbox" ${qtys.includes(50) ? 'checked' : ''} onchange="zyCrsToggleQty(${Number(r.range_id)}, 50, this.checked)"> 50
-                    </label>
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px;">
+                    <span id="crs-usdeq-${r.range_id}" class="zy-crs-num" style="font-size:11px;color:var(--sp-text-muted);">${usdEqText}</span>
+                    <span id="crs-margin-${r.range_id}">${zyCrsFormatMarginHtml(agentPkr, draft.client_rate_pkr)}</span>
                   </div>
                 </td>
                 <td>
-                  <input type="number" class="zy-input zy-crs-num" min="1" max="20" style="width:62px;height:32px;padding:0 6px;"
+                  <input type="number" id="crs-batch-${r.range_id}" class="zy-input zy-crs-num" min="1" max="1000" style="width:74px;height:32px;padding:0 8px;font-weight:700;"
+                         value="${Number(draft.batch_size || 25)}"
+                         title="Numbers per batch request/allocation (default 25)"
+                         oninput="zyCrsOnBatchInput(${Number(r.range_id)}, this)">
+                  <div style="font-size:10.5px;color:var(--sp-text-muted);margin-top:2px;">nums / batch</div>
+                </td>
+                <td>
+                  <input type="number" id="crs-daily-${r.range_id}" class="zy-input zy-crs-num" min="1" max="50" style="width:66px;height:32px;padding:0 8px;font-weight:700;"
                          value="${Number(draft.daily_request_limit || 1)}"
-                         oninput="zyCrsOnLimitInput(${Number(r.range_id)}, this.value)">
+                         title="How many times per day a client can add this range"
+                         oninput="zyCrsOnLimitInput(${Number(r.range_id)}, this.value, this)">
+                  <div style="font-size:10.5px;color:var(--sp-text-muted);margin-top:2px;">adds / day</div>
+                </td>
+                <td>
+                  <input type="number" id="crs-hold-${r.range_id}" class="zy-input zy-crs-num" min="1" max="5000" style="width:78px;height:32px;padding:0 8px;font-weight:700;"
+                         value="${Number(draft.max_hold_limit || 25)}"
+                         title="Maximum active numbers 1 client can hold in this range (default 25, e.g. 50 or 100)"
+                         oninput="zyCrsOnMaxHoldInput(${Number(r.range_id)}, this)">
+                  <div style="font-size:10.5px;color:var(--sp-text-muted);margin-top:2px;">max / client</div>
                 </td>
                 <td>
                   ${statusText}
-                  ${(r.is_whitenoise || String(r.provider || '').toLowerCase().includes('whitenoise') || String(r.payout_schedule || '').toLowerCase() === 'monthly30_5')
+                  ${isWnRow
                     ? `<div><span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;font-weight:700;">Monthly (30/5) {W}</span></div>`
                     : `<div style="font-size:11px;color:var(--sp-text-muted);">${typeof zyPaytermBadge === 'function' ? zyPaytermBadge(r.payterm || 'Weekly') : zyEsc(r.payterm || 'Weekly')}</div>`}
                 </td>
@@ -602,7 +628,7 @@ function zyCrsRenderTable() {
                     <button type="button" class="btn btn-primary btn-xs" onclick="zyCrsSaveRow(${Number(r.range_id)})">
                       <i class="fas fa-check"></i> Save
                     </button>
-                    ${r.configured ? `<button type="button" class="btn btn-outline btn-xs" onclick="zyCrsUnpublishRow(${Number(r.range_id)})" title="Hide from Client Rate Card">Hide</button>` : ''}
+                    ${r.configured ? `<button type="button" class="btn btn-outline btn-xs" onclick="zyCrsUnpublishRow(${Number(r.range_id)})" title="Hide from Client Ranges Add">Hide</button>` : ''}
                   </div>
                 </td>
               </tr>`;
@@ -626,7 +652,9 @@ window.zyCrsViewRangeSpec = function(rangeId) {
   const agentPkr = Number(r.agent_rate_pkr || 0);
   const draft = zyCrsGetRowDraft(r);
   const clPkr = Number(draft.client_rate_pkr || r.client_rate_pkr || 0);
-  const qtys = Array.isArray(draft.allowed_quantities) && draft.allowed_quantities.length ? draft.allowed_quantities : [25];
+  const batchSize = Number(draft.batch_size || r.batch_size || 25);
+  const dailyAdds = Number(draft.daily_request_limit || r.daily_request_limit || 1);
+  const maxHold = Math.max(batchSize, Number(draft.max_hold_limit || r.max_hold_limit || 25));
   const naCell = `<span class="zy-na">N/A</span>`;
   const wUsd = ptInfo.active.includes('Weekly') ? Number(pts['Weekly'] ?? pts['7/3'] ?? agentUsd) : null;
   const mUsd = ptInfo.active.includes('Monthly') ? Number(pts['Monthly'] ?? pts['30/5'] ?? agentUsd) : null;
@@ -639,8 +667,6 @@ window.zyCrsViewRangeSpec = function(rangeId) {
         </h5>
         <div style="font-size:12px;line-height:22px;">
           <div><span style="color:#64748b;">Range Name:</span> <b class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}">${zyEsc(r.range_name)}</b></div>
-          <div><span style="color:#64748b;">Country:</span> <b>${zyEsc(r.country || '—')}</b></div>
-          <div><span style="color:#64748b;">Prefix:</span> <b class="monospace" style="color:#2563eb;">${zyEsc(r.prefix || '—')}</b></div>
           <div><span style="color:#64748b;">Active Payterm:</span> <b class="badge badge-purple" style="font-size:10.5px;">${ptInfo.isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)'}</b></div>
           <div><span style="color:#64748b;">Active FX:</span> <b class="monospace">1 USD = Rs. ${zyFmtMoney(fx, 2)}</b></div>
         </div>
@@ -648,13 +674,13 @@ window.zyCrsViewRangeSpec = function(rangeId) {
 
       <div style="background:#f8fafc;padding:12px;border:1px solid #cbd5e1;border-radius:6px;">
         <h5 style="margin:0 0 10px 0;font-size:12px;font-weight:700;text-transform:uppercase;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:6px;">
-          <i class="fas fa-sliders" style="color:#10b981;margin-right:4px;"></i> Client Quota &amp; Routing
+          <i class="fas fa-sliders" style="color:#10b981;margin-right:4px;"></i> Per-Range Client Limits
         </h5>
         <div style="font-size:12px;line-height:22px;">
-          <div><span style="color:#64748b;">Client Rate Card:</span> ${r.configured ? '<span class="badge badge-green">Published</span>' : '<span class="badge badge-yellow">Pending Setup</span>'}</div>
-          <div><span style="color:#64748b;">Batch Sizes:</span> <b>${zyEsc(qtys.join(' / '))} numbers</b></div>
-          <div><span style="color:#64748b;">Per-Range Client Caps:</span> <b>25/day · 50 held · 3x/week</b></div>
-          <div><span style="color:#64748b;">Max SMS / Day:</span> <b>${r.max_sms_day != null ? r.max_sms_day : 'Unlimited'}</b></div>
+          <div><span style="color:#64748b;">Client Visibility:</span> ${r.configured ? '<span class="badge badge-green">Published</span>' : '<span class="badge badge-yellow">Pending Setup</span>'}</div>
+          <div><span style="color:#64748b;">Batch Size:</span> <b>${batchSize} numbers</b></div>
+          <div><span style="color:#64748b;">Daily Limit:</span> <b>${dailyAdds} add(s) / day (${batchSize * dailyAdds} nums/day)</b></div>
+          <div><span style="color:#64748b;">Max Hold / Client:</span> <b>${maxHold} active numbers</b></div>
           <div><span style="color:#64748b;">Pool Ready:</span> <b style="color:#10b981;">${Number(r.pool_available || 0).toLocaleString()} numbers</b></div>
           <div><span style="color:#64748b;">Allowed CLIs:</span> <small style="display:block;color:#64748b;line-height:1.3;">${zyEsc(r.cli_list || 'All CLIs')}</small></div>
         </div>
@@ -692,19 +718,24 @@ window.zyCrsSaveRow = async function(rangeId) {
     toast(`Client PKR rate (Rs. ${zyFmtMoney(pkr, 4)}) must be strictly less than Rs. ${zyFmtMoney(Number(r.agent_rate_pkr), 4)}`, 'error');
     return;
   }
+  const batchSize = Math.min(1000, Math.max(1, parseInt(draft.batch_size, 10) || 25));
+  const dailyLimit = Math.min(50, Math.max(1, parseInt(draft.daily_request_limit, 10) || 1));
+  const maxHold = Math.min(5000, Math.max(batchSize, parseInt(draft.max_hold_limit, 10) || batchSize));
   const res = await apiFetch('/api/agent/client-rates', {
     method: 'PUT',
     body: JSON.stringify({
       range_id: Number(rangeId),
       client_rate_pkr: pkr,
-      allowed_quantities: draft.allowed_quantities,
-      daily_request_limit: draft.daily_request_limit,
+      batch_size: batchSize,
+      allowed_quantities: [batchSize],
+      daily_request_limit: dailyLimit,
+      max_hold_limit: maxHold,
       published: true
     })
   });
   if (res && res.success) {
     delete st.dirty[rangeId];
-    toast(`Saved Client PKR rate for ${r.range_name}`, 'success');
+    toast(`Saved ${r.range_name} (Batch: ${batchSize}, Daily: ${dailyLimit}x, Max Hold: ${maxHold})`, 'success');
     await zyCrsReload(true);
   }
 };
@@ -727,11 +758,16 @@ window.zyCrsSaveAllModified = async function() {
       toast(`${r.range_name}: Rs. ${zyFmtMoney(pkr, 4)} must be less than Rs. ${zyFmtMoney(Number(r.agent_rate_pkr), 4)}`, 'error');
       return;
     }
+    const batchSize = Math.min(1000, Math.max(1, parseInt(d.batch_size, 10) || 25));
+    const dailyLimit = Math.min(50, Math.max(1, parseInt(d.daily_request_limit, 10) || 1));
+    const maxHold = Math.min(5000, Math.max(batchSize, parseInt(d.max_hold_limit, 10) || batchSize));
     items.push({
       range_id: rid,
       client_rate_pkr: pkr,
-      allowed_quantities: d.allowed_quantities,
-      daily_request_limit: d.daily_request_limit,
+      batch_size: batchSize,
+      allowed_quantities: [batchSize],
+      daily_request_limit: dailyLimit,
+      max_hold_limit: maxHold,
       published: true
     });
   }
@@ -741,7 +777,7 @@ window.zyCrsSaveAllModified = async function() {
   });
   if (res && res.success) {
     st.dirty = {};
-    toast(`Saved ${res.saved_count || items.length} client rate(s)`, 'success');
+    toast(`Saved ${res.saved_count || items.length} range configuration(s)`, 'success');
     await zyCrsReload(true);
   }
 };

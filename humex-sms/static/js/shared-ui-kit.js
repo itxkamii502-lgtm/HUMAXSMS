@@ -963,15 +963,17 @@ window.zyOpenSelfAllocateModal = async function(rangeName, rangeId, passedPolicy
   const maxByDaily = Number(policy.daily_limit) > 0 ? Math.max(0, Number(policy.daily_remaining ?? 0)) : Infinity;
   const maxByTotal = Number(policy.total_limit) > 0 ? Math.max(0, Number(policy.total_remaining ?? 0)) : Infinity;
   const isClientSelf = rangeObj && rangeObj.max_requestable_now != null;
+  const rangeBatchSize = isClientSelf ? Math.max(1, Number(rangeObj.batch_size || 25)) : 10;
+  const rangeMaxHold = isClientSelf ? Math.max(rangeBatchSize, Number(rangeObj.max_hold_limit || 25)) : 50;
+  const rangeDailyAdds = isClientSelf ? Math.max(1, Number(rangeObj.daily_adds_limit || rangeObj.daily_request_limit || 1)) : 1;
+  const rangeTodayAdds = isClientSelf ? Number(rangeObj.today_adds_used || 0) : 0;
   const clientCap = isClientSelf ? Math.max(0, Number(rangeObj.max_requestable_now || 0)) : Infinity;
   const maxAllowed = Math.min(maxByDaily, maxByTotal, clientCap, poolStock !== null ? poolStock : Infinity, 5000);
   const blocked = maxAllowed <= 0 && (isClientSelf || Number(policy.daily_limit) > 0 || Number(policy.total_limit) > 0);
   if (blocked) {
-    let blockMsg = `Your daily allocation limit for "${rangeName}" has been reached. It resets at 00:00 UTC (05:00 AM PKT).`;
+    let blockMsg = `Your daily allocation limit for "${rangeName}" has been reached (${rangeTodayAdds}/${rangeDailyAdds} adds today). Resets at 00:00 UTC (05:00 AM PKT).`;
     if (isClientSelf && rangeObj.block_reason === 'hold_limit') {
-      blockMsg = `Maximum active holding limit reached for "${rangeName}" (${Number(rangeObj.held_count || 0)}/${Number(rangeObj.max_hold_limit || 50)}). Return numbers first to allocate more.`;
-    } else if (isClientSelf && rangeObj.block_reason === 'weekly_limit') {
-      blockMsg = `Weekly limit reached for "${rangeName}" (${Number(rangeObj.weekly_adds_used || 0)}/${Number(rangeObj.weekly_adds_limit || 3)} additions in 7 days).`;
+      blockMsg = `Maximum active holding limit reached for "${rangeName}" (${Number(rangeObj.held_count || 0)}/${rangeMaxHold}). Return previous-day numbers first to allocate more.`;
     } else if (!isClientSelf && Number(policy.total_limit) > 0 && Number(policy.total_remaining ?? 0) <= 0) {
       blockMsg = 'Your overall number holding limit has been reached. Return unused numbers to allocate more.';
     }
@@ -979,7 +981,7 @@ window.zyOpenSelfAllocateModal = async function(rangeName, rangeId, passedPolicy
     return;
   }
   const limitHint = isClientSelf
-    ? `Per-Range Quota: Held <b>${Number(rangeObj.held_count || 0)}/50</b> · Today <b>${Number(rangeObj.today_numbers || 0)}/25</b> · Week <b>${Number(rangeObj.weekly_adds_used || 0)}/3</b>`
+    ? `Per-Range Quota: Batch <b>${rangeBatchSize}</b> · Held <b>${Number(rangeObj.held_count || 0)}/${rangeMaxHold}</b> · Daily Adds <b>${rangeTodayAdds}/${rangeDailyAdds}</b>`
     : window.zyFormatAllocLimitHint(policy, 'allocate');
 
   const ptInfo = window.zyResolveRangeActivePayterms(rangeObj || { range_name: rangeName });
@@ -1000,7 +1002,7 @@ window.zyOpenSelfAllocateModal = async function(rangeName, rangeId, passedPolicy
     </div>
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;">Quantity</label>
-      <input type="number" id="sa-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${Math.min(isClientSelf ? 25 : 10, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : 10)}">
+      <input type="number" id="sa-qty" class="zy-select-pill" min="1" ${Number.isFinite(maxAllowed) ? `max="${Math.max(1, maxAllowed)}"` : ''} value="${Math.min(rangeBatchSize, Number.isFinite(maxAllowed) ? Math.max(1, maxAllowed) : rangeBatchSize)}">
       <div style="font-size:11.5px;color:#64748b;margin-top:6px;line-height:1.5;">${limitHint}</div>
     </div>
   `, `
@@ -1110,6 +1112,9 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
     st.minDate = res.min_date || '';
     st.maxDate = res.max_date || '';
     st.totalHeld = Number(res.total_held || 0);
+    st.returnableCount = Number(res.returnable_count != null ? res.returnable_count : st.totalHeld);
+    st.lockedTodayCount = Number(res.locked_today_count || 0);
+    st.todayDate = res.today_date || '';
     st.selectedDates = new Set();
 
     if (!batches.length) {
@@ -1124,38 +1129,52 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
     }
 
     const batchRowsHtml = batches.map(b => {
+      const isLockedToday = b.returnable === false || b.is_today === true;
       const sampleText = b.sample_start
         ? (b.sample_end && b.sample_end !== b.sample_start ? `${b.sample_start} → ${b.sample_end}` : b.sample_start)
         : '—';
       const ptsText = Array.isArray(b.payterms) && b.payterms.length ? b.payterms.join(', ') : '';
       return `
-        <label class="zy-ret-batch-row" data-date="${zyEsc(b.date)}" onclick="zyToggleReturnDateRow(this, '${zyEsc(b.date)}')">
-          <input type="checkbox" class="zy-ret-chk" value="${zyEsc(b.date)}" data-count="${Number(b.count || 0)}" onclick="event.stopPropagation();zySyncReturnDateCheckboxes()">
+        <label class="zy-ret-batch-row ${isLockedToday ? 'is-locked-today' : ''}" data-date="${zyEsc(b.date)}" ${isLockedToday ? 'title="Allocated today — return unlocks tomorrow"' : `onclick="zyToggleReturnDateRow(this, '${zyEsc(b.date)}')"`}>
+          <input type="checkbox" class="zy-ret-chk" value="${zyEsc(b.date)}" data-count="${Number(b.count || 0)}" ${isLockedToday ? 'disabled' : ''} onclick="event.stopPropagation();zySyncReturnDateCheckboxes()">
           <div class="zy-ret-batch-main">
             <div class="zy-ret-batch-top">
               <span class="zy-ret-date-badge"><i class="fas fa-calendar-day"></i> ${zyEsc(b.date)}</span>
               <span class="zy-ret-count-badge">${Number(b.count || 0)} Number${Number(b.count) === 1 ? '' : 's'}</span>
               ${ptsText ? `<span class="zy-ret-pt-tag">${zyEsc(ptsText)}</span>` : ''}
+              ${isLockedToday ? `<span class="zy-ret-lock-tag"><i class="fas fa-clock"></i> Locked Today · Returnable Tomorrow</span>` : ''}
             </div>
             <div class="zy-ret-sample monospace">${zyEsc(sampleText)}</div>
           </div>
         </label>`;
     }).join('');
 
+    const lockedNoticeHtml = st.lockedTodayCount > 0
+      ? `<div class="zy-ret-today-notice">
+           <i class="fas fa-shield-halved"></i>
+           <span><b>Next-Day Return Rule:</b> ${st.lockedTodayCount} number(s) allocated today (${zyEsc(st.todayDate || 'Today')}) cannot be returned on the same day. They will unlock for return starting tomorrow.</span>
+         </div>`
+      : '';
+
+    const hasReturnable = st.returnableCount > 0;
+
     zyModal(`Return Range: ${zyEsc(st.rangeName)}`, `
       <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:12px;border:1px solid #e2e8f0;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <div>
             <div style="font-weight:800;color:#0f172a;font-size:14px;">${zyEsc(st.rangeName)}</div>
-            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Strictly scoped to this range only — choose date(s) to return.</div>
+            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Strictly scoped to this range only — choose previous-day date(s) to return.</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-size:10.5px;color:#64748b;font-weight:700;text-transform:uppercase;">Held in Range</div>
-            <div style="font-size:16px;font-weight:800;color:#dc2626;" class="monospace">${st.totalHeld} Numbers</div>
+            <div style="font-size:10.5px;color:#64748b;font-weight:700;text-transform:uppercase;">Returnable / Held</div>
+            <div style="font-size:16px;font-weight:800;color:${hasReturnable ? '#dc2626' : '#d97706'};" class="monospace">${st.returnableCount} / ${st.totalHeld}</div>
           </div>
         </div>
       </div>
 
+      ${lockedNoticeHtml}
+
+      ${hasReturnable ? `
       <div class="zy-ret-date-bar">
         <div class="zy-ret-date-field">
           <label for="zy-ret-from">From Date</label>
@@ -1167,10 +1186,10 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
         </div>
         <div class="zy-ret-date-actions">
           <button type="button" class="apx-btn apx-btn-small" onclick="zyApplyReturnDateSpan()"><i class="fas fa-filter"></i> Select Dates</button>
-          <button type="button" class="apx-btn apx-btn-small" onclick="zySetAllReturnDates(true)">All</button>
+          <button type="button" class="apx-btn apx-btn-small" onclick="zySetAllReturnDates(true)">All Eligible</button>
           <button type="button" class="apx-btn apx-btn-small" onclick="zySetAllReturnDates(false)">Clear</button>
         </div>
-      </div>
+      </div>` : ''}
 
       <div style="font-size:11.5px;font-weight:700;color:#475569;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
         <span>Assigned Date Batches (${batches.length} date${batches.length === 1 ? '' : 's'})</span>
@@ -1181,7 +1200,7 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
       </div>
     `, `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
-        <span style="font-size:11.5px;color:#64748b;" id="zy-ret-footer-hint">Select at least one date batch above.</span>
+        <span style="font-size:11.5px;color:#64748b;" id="zy-ret-footer-hint">${hasReturnable ? 'Select at least one eligible date batch above.' : 'Today’s allocations unlock for return tomorrow.'}</span>
         <div style="display:flex;align-items:center;gap:8px;">
           <button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Cancel</button>
           <button type="button" class="zy-btn-pill-submit" id="zy-ret-submit-btn" disabled style="background:#dc2626;opacity:0.5;cursor:not-allowed;" onclick="zySubmitRangeReturnByDate()">
@@ -1199,7 +1218,7 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
 
 window.zyToggleReturnDateRow = function(rowEl, dateKey) {
   const chk = rowEl ? rowEl.querySelector('.zy-ret-chk') : null;
-  if (chk) {
+  if (chk && !chk.disabled) {
     chk.checked = !chk.checked;
     window.zySyncReturnDateCheckboxes();
   }
@@ -1210,6 +1229,7 @@ window.zyApplyReturnDateSpan = function() {
   const toD = (document.getElementById('zy-ret-to')?.value || '').trim();
   const chks = document.querySelectorAll('#zy-ret-batch-list .zy-ret-chk');
   chks.forEach(chk => {
+    if (chk.disabled) { chk.checked = false; return; }
     const d = String(chk.value || '');
     const inRange = (!fromD || d >= fromD) && (!toD || d <= toD);
     chk.checked = inRange;
@@ -1219,6 +1239,7 @@ window.zyApplyReturnDateSpan = function() {
 
 window.zySetAllReturnDates = function(checked) {
   document.querySelectorAll('#zy-ret-batch-list .zy-ret-chk').forEach(chk => {
+    if (chk.disabled) { chk.checked = false; return; }
     chk.checked = Boolean(checked);
   });
   window.zySyncReturnDateCheckboxes();

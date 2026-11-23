@@ -239,9 +239,11 @@
     try {
       const p = String(page || 'dashboard').toLowerCase().trim();
       const isDash = (!p || p === 'dashboard' || p === 'overview');
+      const isLiveChat = (p === 'live-chat');
       if (document.body) {
         document.body.classList.toggle('zy-is-dashboard', isDash);
         document.body.classList.toggle('zy-is-subpage', !isDash);
+        document.body.classList.toggle('zy-is-live-chat', isLiveChat);
         document.body.dataset.zyPage = p || 'dashboard';
       }
     } catch (e) {}
@@ -275,7 +277,11 @@
       const label = resolveLabel(page);
       if (!isNavigatingHistory) {
         try {
-          const targetUrl = urlFor(page);
+          let targetUrl = urlFor(page);
+          if (String(page || '').toLowerCase() === 'live-chat') {
+            const chatMatch = String(location.search || '').match(/[?&]chat=(\d+)/);
+            if (chatMatch) targetUrl = `${targetUrl}?chat=${chatMatch[1]}`;
+          }
           history.replaceState({ page, role }, '', targetUrl);
           document.title = formatTitle(page);
         } catch (e) {}

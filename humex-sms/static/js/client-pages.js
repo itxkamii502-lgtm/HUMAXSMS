@@ -17,7 +17,7 @@ async function pgSmsRanges() {
           <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges Add (PKR)
         </div>
         <div class="page-subtitle" style="font-size:12.5px;">
-          Agent-approved termination ranges priced in PKR. Unlimited ranges — per range limit: <b>25/day</b>, <b>50 max held</b>, <b>3x/week</b>.
+          Agent-approved termination ranges priced in PKR. Batch size, daily additions, and max holding limits are configured per range by your Agent.
         </div>
       </div>
     </div>
@@ -55,7 +55,6 @@ async function pgSmsRanges() {
     const rows = list.map((r, i) => {
       const rName = r.range_name || r.name || r.country || '—';
       const rId = r.range_id || r.id || null;
-      const prefixOnly = r.prefix ? `+${String(r.prefix).trim().replace(/^\++/, '')}` : '—';
       const ptsPkr = r.payterms_pkr || {};
       const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
         ? zyResolveRangeActivePayterms(r)
@@ -68,38 +67,33 @@ async function pgSmsRanges() {
 
       const heldCount = Number(r.held_count || 0);
       const roomCount = Math.max(0, Number(r.available || 0));
-      const dailyLimitNums = Number(r.daily_numbers_limit || 25);
-      const maxHoldNums = Number(r.max_hold_limit || 50);
-      const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+      const batchSize = Math.max(1, Number(r.batch_size || (Array.isArray(r.allowed_quantities) ? r.allowed_quantities[0] : 25) || 25));
+      const dailyAddsLimit = Math.max(1, Number(r.daily_adds_limit || r.daily_request_limit || 1));
+      const todayAddsUsed = Number(r.today_adds_used || 0);
+      const dailyLimitNums = Math.max(batchSize, Number(r.daily_numbers_limit || (batchSize * dailyAddsLimit)));
+      const maxHoldNums = Math.max(batchSize, Number(r.max_hold_limit || 25));
       const todayNums = Number(r.today_numbers || 0);
-      const weeklyUsed = Number(r.weekly_adds_used || 0);
-      const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(dailyLimitNums - todayNums, maxHoldNums - heldCount));
-      const rawAllowed = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25];
-      const allowedQty = rawAllowed.filter(q => Number(q) > 0 && Number(q) <= dailyLimitNums);
-      const displayBatch = allowedQty.length ? allowedQty : [dailyLimitNums];
+      const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(batchSize, dailyLimitNums - todayNums, maxHoldNums - heldCount));
       const hasPendingReq = Boolean(r.has_pending_request || Number(r.pending_request_count || 0) > 0 || r.block_reason === 'pending_request');
       const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false || maxReqNow <= 0 || hasPendingReq;
       const blockReason = r.block_reason || (hasPendingReq ? 'pending_request' : (r.requested_today ? 'daily_limit' : ''));
 
-      let lockLabel = 'Requested Today';
-      let lockTip = 'Daily limit reached: 25 numbers per range per UTC day (resets 05:00 AM PKT).';
+      let lockLabel = 'Daily Limit';
+      let lockTip = `Daily limit reached (${todayAddsUsed}/${dailyAddsLimit} additions today). Resets at 00:00 UTC (05:00 AM PKT).`;
       if (blockReason === 'hold_limit') {
         lockLabel = `Hold Full (${heldCount}/${maxHoldNums})`;
-        lockTip = `Maximum ${maxHoldNums} active numbers held in this range. Return numbers to add more.`;
-      } else if (blockReason === 'weekly_limit') {
-        lockLabel = `Weekly (${weeklyUsed}/${weeklyLimitAdds})`;
-        lockTip = `Maximum ${weeklyLimitAdds} additions per week reached for this range.`;
+        lockTip = `Maximum ${maxHoldNums} active numbers held in this range. Return previous-day numbers to add more.`;
       } else if (blockReason === 'daily_limit') {
-        lockLabel = `Daily (${todayNums}/${dailyLimitNums})`;
-        lockTip = `Daily limit of ${dailyLimitNums} numbers per range reached today. Resets at 00:00 UTC (05:00 AM PKT).`;
+        lockLabel = `Daily (${todayAddsUsed}/${dailyAddsLimit})`;
+        lockTip = `Daily limit reached for this range (${todayAddsUsed}/${dailyAddsLimit} additions · ${todayNums}/${dailyLimitNums} numbers today). Resets at 00:00 UTC (05:00 AM PKT).`;
       } else if (blockReason === 'pending_request') {
         lockLabel = 'Pending Approval';
         lockTip = 'You already have a pending request on this range. Please wait for your Agent to review it.';
       }
 
       const quotaHtml = reqBlocked
-        ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`
-        : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} left)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Wk ${weeklyUsed}/${weeklyLimitAdds}</div></div>`;
+        ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`
+        : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} / batch)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`;
 
       const isWn = ptInfo.isWn;
       let actionBtnHtml = '';
@@ -127,11 +121,10 @@ async function pgSmsRanges() {
 
       return [
         { v: rName, h: `<strong class="${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
-        { v: prefixOnly, h: `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(prefixOnly)}</span>` },
         weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
         monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
         `<span class="monospace" style="font-size:11.5px;" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> · <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
-        `<span class="monospace" style="font-weight:700;">${zyEsc(displayBatch.join(' / '))} / day</span>`,
+        `<span class="monospace" style="font-weight:700;" title="Batch: ${batchSize} numbers · Daily Limit: ${dailyAddsLimit}x/day · Max Hold: ${maxHoldNums}">${batchSize} × ${dailyAddsLimit}/day</span>`,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
         { v: '', h: `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
@@ -142,7 +135,7 @@ async function pgSmsRanges() {
     });
 
     host.innerHTML = zyDT2('dt-cl-ranges', {
-      cols: ['Range', 'Prefix', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
+      cols: ['Range', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
       rows
     });
     zy2Render('dt-cl-ranges');
@@ -159,13 +152,14 @@ window.zyOpenClientRateCardRequestModal = function(i) {
   const rName = r.range_name || r.name || r.country || 'Range';
   const rId = r.range_id || r.id;
   const clientRatePkr = Number(r.client_rate_pkr ?? r.rate ?? r.payout ?? 0);
-  const dailyLimitNums = Number(r.daily_numbers_limit || 25);
-  const maxHoldNums = Number(r.max_hold_limit || 50);
-  const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+  const batchSize = Math.max(1, Number(r.batch_size || (Array.isArray(r.allowed_quantities) ? r.allowed_quantities[0] : 25) || 25));
+  const dailyAddsLimit = Math.max(1, Number(r.daily_adds_limit || r.daily_request_limit || 1));
+  const todayAddsUsed = Number(r.today_adds_used || 0);
+  const dailyLimitNums = Math.max(batchSize, Number(r.daily_numbers_limit || (batchSize * dailyAddsLimit)));
+  const maxHoldNums = Math.max(batchSize, Number(r.max_hold_limit || 25));
   const heldCount = Number(r.held_count || 0);
   const todayNums = Number(r.today_numbers || 0);
-  const weeklyUsed = Number(r.weekly_adds_used || 0);
-  const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(dailyLimitNums - todayNums, maxHoldNums - heldCount));
+  const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(batchSize, dailyLimitNums - todayNums, maxHoldNums - heldCount));
 
   if (r.has_pending_request || r.block_reason === 'pending_request') {
     toast(`You already have a pending request for "${rName}". Please wait for your Agent to review it first.`, 'warning');
@@ -173,18 +167,14 @@ window.zyOpenClientRateCardRequestModal = function(i) {
   }
   if (r.can_request_now === false || maxReqNow <= 0) {
     if (r.block_reason === 'hold_limit') {
-      toast(`Holding limit reached for "${rName}" (${heldCount}/${maxHoldNums}). Return numbers first to request more.`, 'error');
-    } else if (r.block_reason === 'weekly_limit') {
-      toast(`Weekly limit reached for "${rName}" (${weeklyUsed}/${weeklyLimitAdds} additions in 7 days).`, 'error');
+      toast(`Holding limit reached for "${rName}" (${heldCount}/${maxHoldNums}). Return previous-day numbers first to request more.`, 'error');
     } else {
-      toast(`Daily limit reached for "${rName}" (${todayNums}/${dailyLimitNums} numbers today). Resets at 00:00 UTC (05:00 AM PKT).`, 'error');
+      toast(`Daily limit reached for "${rName}" (${todayAddsUsed}/${dailyAddsLimit} additions · ${todayNums}/${dailyLimitNums} numbers today). Resets at 00:00 UTC (05:00 AM PKT).`, 'error');
     }
     return;
   }
 
-  const rawAllowed = Array.isArray(r.allowed_quantities) && r.allowed_quantities.length ? r.allowed_quantities : [25];
-  let selectableQtys = rawAllowed.map(Number).filter(q => q > 0 && q <= maxReqNow);
-  if (!selectableQtys.length) selectableQtys = [maxReqNow];
+  const selectableQtys = [Math.min(batchSize, maxReqNow)];
   const defaultQty = selectableQtys[0];
 
   const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
@@ -207,7 +197,7 @@ window.zyOpenClientRateCardRequestModal = function(i) {
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <div>
           <div style="font-weight:800;color:#0f172a;font-size:14.5px;">${zyEsc(rName)}</div>
-          <div style="font-size:11.5px;color:#64748b;margin-top:2px;">${zyEsc(r.country || 'International')} · Prefix: <b class="monospace">${zyEsc(r.prefix || '—')}</b></div>
+          <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Batch Size: <b>${batchSize}</b> · Max Hold: <b>${maxHoldNums}</b></div>
         </div>
         <div style="text-align:right;">
           <div style="font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;">Client Rate</div>
@@ -217,13 +207,13 @@ window.zyOpenClientRateCardRequestModal = function(i) {
       <div style="margin-top:8px;padding-top:8px;border-top:1px dashed #cbd5e1;font-size:11.5px;color:#475569;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
         <span>Agent Free Pool: <b style="color:${Number(r.available || 0) > 0 ? '#059669' : '#dc2626'};">${Number(r.available || 0).toLocaleString()}</b></span>
         <span>Held: <b>${heldCount}/${maxHoldNums}</b></span>
-        <span>Today: <b>${todayNums}/${dailyLimitNums}</b></span>
-        <span>Week: <b>${weeklyUsed}/${weeklyLimitAdds}</b></span>
+        <span>Daily Adds: <b>${todayAddsUsed}/${dailyAddsLimit}</b></span>
+        <span>Today Nums: <b>${todayNums}/${dailyLimitNums}</b></span>
       </div>
     </div>
 
     <div style="margin-bottom:14px;">
-      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Select Allowed Number Batch (Max ${maxReqNow} now) *</label>
+      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Allowed Number Batch (Max ${maxReqNow} now) *</label>
       <input type="hidden" id="cl-rc-qty" value="${Number(defaultQty)}">
       <div class="zy-qty-grid">${qtyButtonsHtml}</div>
     </div>
@@ -323,11 +313,12 @@ function zyViewClientRange(i) {
   const monthlyVal = hasMonthly ? Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? clientRatePkr) : null;
 
   const heldCount = Number(r.held_count || 0);
-  const dailyLimitNums = Number(r.daily_numbers_limit || 25);
-  const maxHoldNums = Number(r.max_hold_limit || 50);
-  const weeklyLimitAdds = Number(r.weekly_adds_limit || 3);
+  const batchSize = Math.max(1, Number(r.batch_size || 25));
+  const dailyAddsLimit = Math.max(1, Number(r.daily_adds_limit || r.daily_request_limit || 1));
+  const todayAddsUsed = Number(r.today_adds_used || 0);
+  const dailyLimitNums = Math.max(batchSize, Number(r.daily_numbers_limit || (batchSize * dailyAddsLimit)));
+  const maxHoldNums = Math.max(batchSize, Number(r.max_hold_limit || 25));
   const todayNums = Number(r.today_numbers || 0);
-  const weeklyUsed = Number(r.weekly_adds_used || 0);
   const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false;
   const roomCount = Math.max(0, Number(r.available || 0));
   const naCell = `<span class="zy-na">N/A</span>`;
@@ -341,8 +332,6 @@ function zyViewClientRange(i) {
         </h5>
         <div style="font-size:12px;line-height:22px;">
           <div><span style="color:#64748b;">Range Name:</span> <b class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</b> ${ptInfo.isWn ? '<span class="zy-wn-route-tag">{W} Monthly Route</span>' : ''}</div>
-          <div><span style="color:#64748b;">Country:</span> <b>${zyEsc(r.country || '—')}</b></div>
-          <div><span style="color:#64748b;">Prefix:</span> <b class="monospace" style="color:#2563eb;">${zyEsc(r.prefix || '—')}</b></div>
           <div><span style="color:#64748b;">Currency:</span> <b style="color:#059669;">PKR</b></div>
           <div><span style="color:#64748b;">Active Payterm:</span> <b class="badge badge-purple" style="font-size:10.5px;">${ptInfo.isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)'}</b></div>
         </div>
@@ -355,10 +344,9 @@ function zyViewClientRange(i) {
         </h5>
         <div style="font-size:12px;line-height:22px;">
           <div><span style="color:#64748b;">Status:</span> ${r.active !== false ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Inactive</span>'}</div>
-          <div><span style="color:#64748b;">Max SMS / Day:</span> <b>${r.max_sms_day != null ? r.max_sms_day : 'Unlimited'}</b></div>
-          <div><span style="color:#64748b;">Daily Limit (Range):</span> <b>${todayNums} / ${dailyLimitNums} numbers</b></div>
-          <div><span style="color:#64748b;">Holding Limit (Range):</span> <b>${heldCount} / ${maxHoldNums} active</b></div>
-          <div><span style="color:#64748b;">Weekly Limit (Range):</span> <b>${weeklyUsed} / ${weeklyLimitAdds} additions</b></div>
+          <div><span style="color:#64748b;">Batch Size:</span> <b>${batchSize} numbers</b></div>
+          <div><span style="color:#64748b;">Daily Limit:</span> <b>${todayAddsUsed}/${dailyAddsLimit} adds (${todayNums}/${dailyLimitNums} nums)</b></div>
+          <div><span style="color:#64748b;">Max Hold (Range):</span> <b>${heldCount} / ${maxHoldNums} active</b></div>
           <div><span style="color:#64748b;">Room in Agent Pool:</span> <b style="color:#10b981;">${roomCount.toLocaleString()} numbers</b></div>
           <div><span style="color:#64748b;">Allowed CLIs:</span> <small style="display:block;color:#64748b;line-height:1.3;margin-top:2px;">${zyEsc(r.cli_list || 'All CLIs')}</small></div>
         </div>

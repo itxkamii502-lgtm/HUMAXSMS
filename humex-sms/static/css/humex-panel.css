@@ -11850,6 +11850,77 @@ body.rmsui.dark .zy-ret-sample,
   color: #94a3b8;
 }
 
+/* Next-day return cooldown locked batch row & notice */
+.zy-ret-today-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.zy-ret-today-notice i {
+  color: #d97706;
+  flex-shrink: 0;
+}
+.zy-ret-batch-row.is-locked-today {
+  opacity: 0.72;
+  cursor: not-allowed;
+  background: #f8fafc;
+  border-style: dashed;
+  border-color: #cbd5e1;
+}
+.zy-ret-batch-row.is-locked-today:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+.zy-ret-batch-row.is-locked-today input[type="checkbox"] {
+  cursor: not-allowed;
+}
+.zy-ret-lock-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+body.dark .zy-ret-today-notice,
+body.rmsui.dark .zy-ret-today-notice,
+[data-theme="dark"] .zy-ret-today-notice {
+  background: rgba(217, 119, 6, 0.14);
+  border-color: rgba(251, 191, 36, 0.35);
+  color: #fde68a;
+}
+body.dark .zy-ret-today-notice i,
+body.rmsui.dark .zy-ret-today-notice i,
+[data-theme="dark"] .zy-ret-today-notice i {
+  color: #fbbf24;
+}
+body.dark .zy-ret-batch-row.is-locked-today,
+body.rmsui.dark .zy-ret-batch-row.is-locked-today,
+[data-theme="dark"] .zy-ret-batch-row.is-locked-today {
+  background: rgba(15, 23, 42, 0.65);
+  border-color: #334155;
+}
+body.dark .zy-ret-lock-tag,
+body.rmsui.dark .zy-ret-lock-tag,
+[data-theme="dark"] .zy-ret-lock-tag {
+  background: rgba(217, 119, 6, 0.22);
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    {W} MONTHLY ROUTE VISUAL DISTINCTION (Ranges & Numbers — Dark Blue Default)
    ═══════════════════════════════════════════════════════════════ */
@@ -14400,6 +14471,184 @@ body.dark .zy-vps-auto-btn.is-on {
 .zy-dt th {
   font-weight: 700;
 }
+
+/* ==========================================================================
+   LIVE CHAT — FULL-PAGE PROFILE-BY-ID MODE + EXTRA +10% ZOOM-IN
+   - Hides top panel header/URL/notification bar & sidebar for a pure full-page chat app
+   - Extra +10% zoom on top of subpage +10% (desktop: 1.20, mobile: 1.02)
+   - Clicking any user/group opens a full-page Profile Chat view by ID
+   ========================================================================== */
+body.zy-is-live-chat .zy-header,
+body.zy-is-live-chat .zy-side,
+body.zy-is-live-chat .zy-side-overlay,
+body.zy-is-live-chat .zy-mob-overlay {
+  display: none !important;
+}
+body.zy-is-live-chat .zy-main,
+body.zy-is-live-chat #main-wrapper {
+  margin-left: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 0 !important;
+}
+body.zy-is-live-chat .zy-body {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+body.zy-is-live-chat #page-content {
+  padding: 0 !important;
+  margin: 0 !important;
+  max-width: 100% !important;
+}
+
+@media (min-width: 769px) {
+  body.zy-is-live-chat #page-content {
+    zoom: 1.20 !important;
+  }
+  body.zy-is-live-chat .zy-chat-shell {
+    height: calc(100dvh / 1.20) !important;
+    min-height: calc(100dvh / 1.20) !important;
+  }
+}
+@media (max-width: 768px) {
+  body.zy-is-live-chat #page-content {
+    zoom: 1.02 !important;
+  }
+  body.zy-is-live-chat .zy-chat-shell {
+    height: calc(100dvh / 1.02) !important;
+    min-height: calc(100dvh / 1.02) !important;
+  }
+}
+
+/* Full-Page Profile-by-ID View (both Desktop & Mobile) */
+body.zy-is-live-chat .zy-chat-shell {
+  display: flex !important;
+  flex-direction: column;
+  width: 100% !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+body.zy-is-live-chat .zy-chat-shell:not(.is-profile-open) .zy-chat-left {
+  display: flex !important;
+  width: 100% !important;
+  flex: 1 1 auto;
+  border-right: none !important;
+}
+body.zy-is-live-chat .zy-chat-shell:not(.is-profile-open) .zy-chat-right {
+  display: none !important;
+}
+body.zy-is-live-chat .zy-chat-shell.is-profile-open .zy-chat-left {
+  display: none !important;
+}
+body.zy-is-live-chat .zy-chat-shell.is-profile-open .zy-chat-right {
+  display: flex !important;
+  width: 100% !important;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Always show Back-to-Chats Profile button in full-page Profile view */
+body.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  width: auto !important;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid var(--theme-card-border, #e2e8f0);
+  background: var(--sp-bg-subtle, #f8fafc);
+  color: var(--sp-text-primary, #0f172a);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+body.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile:hover {
+  background: #e2e8f0;
+}
+
+/* Back to Panel button */
+.zy-chat-exit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--theme-card-border, #cbd5e1);
+  background: var(--sp-bg-subtle, #f1f5f9);
+  color: var(--sp-text-primary, #0f172a);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.zy-chat-exit-btn:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+
+/* ID Badge on Conversation Rows & Profile Chat Header */
+.zy-chat-row-name-wrap,
+.zy-chat-thread-name-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.zy-chat-id-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.10);
+  color: #1d4ed8;
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.45;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.zy-chat-id-pill.is-head {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.zy-chat-ava.is-profile-ava {
+  width: 44px;
+  height: 44px;
+  font-size: 15px;
+}
+
+/* Dark theme harmonization for Full-Page Live Chat controls & ID pills */
+[data-theme="dark"] .zy-chat-exit-btn,
+body.dark .zy-chat-exit-btn,
+[data-theme="dark"] body.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile,
+body.dark.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #f1f5f9 !important;
+}
+[data-theme="dark"] .zy-chat-exit-btn:hover,
+body.dark .zy-chat-exit-btn:hover,
+[data-theme="dark"] body.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile:hover,
+body.dark.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile:hover {
+  background: #334155 !important;
+}
+[data-theme="dark"] .zy-chat-id-pill,
+body.dark .zy-chat-id-pill {
+  background: rgba(59, 130, 246, 0.20) !important;
+  color: #93c5fd !important;
+  border-color: rgba(96, 165, 250, 0.35) !important;
+}
+
 
 
 

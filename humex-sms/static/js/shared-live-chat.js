@@ -667,6 +667,41 @@
     }
   }
 
+  function syncChatUrlId(convId) {
+    try {
+      const u = new URL(window.location.href);
+      const cid = Number(convId);
+      if (Number.isInteger(cid) && cid > 0) {
+        u.searchParams.set('chat', String(cid));
+      } else {
+        u.searchParams.delete('chat');
+      }
+      history.replaceState(history.state || { page: 'live-chat' }, '', u.pathname + u.search);
+    } catch (_) {}
+  }
+
+  function closeProfileChat() {
+    state.activeConvId = null;
+    state.mobileShowThread = false;
+    state.drawerOpen = false;
+    state.confirmDeleteGroup = false;
+    state.selectMode = false;
+    state.selectedMsgIds.clear();
+    state.emojiOpen = false;
+    state.replyTo = null;
+    clearPendingImages();
+    syncChatUrlId(null);
+    if (state.mounted) renderWorkspace();
+  }
+
+  function exitLiveChatToPanel() {
+    syncChatUrlId(null);
+    try { document.body.classList.remove('zy-is-live-chat'); } catch (_) {}
+    if (typeof window.loadPage === 'function') {
+      window.loadPage('dashboard');
+    }
+  }
+
   async function selectConversation(convId) {
     state.activeConvId = Number(convId);
     clearPendingImages();
@@ -678,6 +713,7 @@
     state.selectedMsgIds.clear();
     state.expandedDeletedIds.clear();
     state.mobileShowThread = true;
+    syncChatUrlId(state.activeConvId);
     const conv = state.conversations.find(c => Number(c.id) === Number(convId));
     if (conv && conv.unread_count > 0) {
       conv.unread_count = 0;
@@ -1535,7 +1571,8 @@
         if (state.filterTab === 'groups' && c.type !== 'agent_group') return false;
       }
       if (!q) return true;
-      const hay = `${c.title || ''} ${c.last_message_preview || ''} ${(c.peer && c.peer.username) || ''}`.toLowerCase();
+      const peerIdStr = c.peer && c.peer.id != null ? `#${c.peer.id} ${c.peer.id}` : '';
+      const hay = `${c.title || ''} ${c.last_message_preview || ''} ${(c.peer && c.peer.username) || ''} #${c.id} ${c.id} ${peerIdStr}`.toLowerCase();
       return hay.includes(q);
     });
 
@@ -1553,7 +1590,8 @@
         if (state.filterTab === 'groups') return false;
       }
       if (!q) return true;
-      return `${ct.display_name || ''} ${ct.username || ''}`.toLowerCase().includes(q);
+      const ctIdStr = ct.id != null ? `#${ct.id} ${ct.id}` : '';
+      return `${ct.display_name || ''} ${ct.username || ''} ${ctIdStr}`.toLowerCase().includes(q);
     }).sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
 
     let html = '';
@@ -1567,6 +1605,9 @@
         const isOnline = !isGroup && Boolean(c.peer && c.peer.online);
         const typingText = getTypingText(c.id);
         const schedClosed = isGroup && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
+        const idTag = isGroup
+          ? `Group #${c.id}`
+          : `ID #${(c.peer && c.peer.id != null) ? c.peer.id : c.id}`;
         const roleSub = isGroup
           ? (hideMembers
               ? `Group${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
@@ -1585,7 +1626,10 @@
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
-                <span class="zy-chat-row-name">${esc(c.title)}</span>
+                <span class="zy-chat-row-name-wrap">
+                  <span class="zy-chat-row-name">${esc(c.title)}</span>
+                  <span class="zy-chat-id-pill">${esc(idTag)}</span>
+                </span>
                 <span class="zy-chat-row-time">${esc(formatInboxTime(c.last_message_at))}</span>
               </div>
               <div class="zy-chat-row-sub">${esc(roleSub)}</div>
@@ -1606,6 +1650,7 @@
       html += `<div class="zy-chat-sec-label">${esc(heading)}</div>`;
       html += availableContacts.map(ct => {
         const roleLabel = ct.role === 'owner' ? 'Owner' : (ct.role === 'agent' ? 'Agent' : 'My Client');
+        const ctIdTag = ct.id != null ? `ID #${ct.id}` : '';
         return `
           <button type="button" class="zy-chat-row is-contact" data-contact-key="${esc(ct.key)}">
             <div class="zy-chat-ava" style="--ava-bg:${colorForKey(ct.key)};">
@@ -1614,10 +1659,13 @@
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
-                <span class="zy-chat-row-name">${esc(ct.display_name || ct.username)}</span>
+                <span class="zy-chat-row-name-wrap">
+                  <span class="zy-chat-row-name">${esc(ct.display_name || ct.username)}</span>
+                  ${ctIdTag ? `<span class="zy-chat-id-pill">${esc(ctIdTag)}</span>` : ''}
+                </span>
                 <span class="zy-chat-row-time">${ct.online ? 'Online' : ''}</span>
               </div>
-              <div class="zy-chat-row-sub">${esc(roleLabel)} · Tap to start chat</div>
+              <div class="zy-chat-row-sub">${esc(roleLabel)} · Tap to open profile chat</div>
             </div>
           </button>
         `;
@@ -2198,17 +2246,26 @@
     const hideGroupDrawer = Boolean(isGroup && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
     const isOnline = !isGroup && Boolean(conv.peer && conv.peer.online);
     const pinned = conv.pinned_message;
+    const profileIdTag = isGroup
+      ? `Group #${conv.id}`
+      : `ID #${(conv.peer && conv.peer.id != null) ? conv.peer.id : conv.id}`;
 
     rightEl.innerHTML = `
       <div class="zy-chat-thread-col">
         <div class="zy-chat-thread-head">
-          <button type="button" class="zy-chat-back-btn" id="zy-chat-back" aria-label="Back to chats"><i class="fas fa-arrow-left"></i></button>
-          <div class="zy-chat-ava ${isGroup ? 'is-group' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id)};">
+          <button type="button" class="zy-chat-back-btn zy-chat-back-profile" id="zy-chat-back" title="Back to Chats" aria-label="Back to chats">
+            <i class="fas fa-arrow-left"></i>
+            <span>Chats</span>
+          </button>
+          <div class="zy-chat-ava is-profile-ava ${isGroup ? 'is-group' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id)};">
             ${isGroup ? '<i class="fas fa-users"></i>' : esc(initials(conv.title))}
             ${isOnline ? '<span class="zy-chat-dot-online"></span>' : ''}
           </div>
           <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${(isGroup && !hideGroupDrawer) ? 'role="button" tabindex="0"' : ''}>
-            <div class="zy-chat-thread-name">${esc(conv.title)}</div>
+            <div class="zy-chat-thread-name-row">
+              <span class="zy-chat-thread-name">${esc(conv.title)}</span>
+              <span class="zy-chat-id-pill is-head">${esc(profileIdTag)}</span>
+            </div>
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
           <div class="zy-chat-thread-actions">
@@ -2226,6 +2283,10 @@
                 <span>${conv.can_manage ? 'Manage' : 'Info'}</span>
               </button>
             ` : ''}
+            <button type="button" class="zy-chat-head-btn zy-chat-exit-btn" id="zy-chat-thread-exit-panel" title="Back to Panel Dashboard">
+              <i class="fas fa-house"></i>
+              <span>Panel</span>
+            </button>
           </div>
         </div>
 
@@ -2321,9 +2382,13 @@
     const backBtn = document.getElementById('zy-chat-back');
     if (backBtn) {
       backBtn.addEventListener('click', () => {
-        state.mobileShowThread = false;
-        const shell = document.getElementById('zy-chat-shell');
-        if (shell) shell.classList.remove('is-mobile-thread');
+        closeProfileChat();
+      });
+    }
+    const threadExitBtn = document.getElementById('zy-chat-thread-exit-panel');
+    if (threadExitBtn) {
+      threadExitBtn.addEventListener('click', () => {
+        exitLiveChatToPanel();
       });
     }
 
@@ -2510,12 +2575,17 @@
     const root = document.getElementById(state.containerId);
     if (!root) { state.mounted = false; return; }
     const isAgent = state.me && state.me.role === 'agent';
+    const isProfileOpen = Boolean(state.mobileShowThread && state.activeConvId);
 
     root.innerHTML = `
-      <div class="zy-chat-shell ${state.mobileShowThread && state.activeConvId ? 'is-mobile-thread' : ''}" id="zy-chat-shell">
+      <div class="zy-chat-shell ${isProfileOpen ? 'is-mobile-thread is-profile-open' : ''}" id="zy-chat-shell">
         <aside class="zy-chat-left">
           <div class="zy-chat-left-head">
             <div class="zy-chat-left-title-wrap">
+              <button type="button" class="zy-chat-exit-btn" id="zy-chat-exit-panel" title="Back to Panel Dashboard">
+                <i class="fas fa-arrow-left"></i>
+                <span>Panel</span>
+              </button>
               <span class="zy-chat-left-title">Live Chat</span>
               <span class="zy-chat-conn ${state.wsConnected ? 'is-live' : 'is-warn'}" id="zy-chat-conn-status">${state.wsConnected ? 'Live' : 'Reconnecting...'}</span>
             </div>
@@ -2523,7 +2593,7 @@
           </div>
           <div class="zy-chat-search-wrap">
             <i class="fas fa-magnifying-glass"></i>
-            <input type="text" id="zy-chat-search" class="zy-chat-search" placeholder="Search chats or contacts..." value="${esc(state.search)}">
+            <input type="text" id="zy-chat-search" class="zy-chat-search" placeholder="Search chats, contacts, or #ID..." value="${esc(state.search)}">
           </div>
           ${isAgent ? `
             <div class="zy-chat-tabs" role="tablist">
@@ -2541,6 +2611,11 @@
       </div>
       ${renderCreateGroupModalHtml()}
     `;
+
+    const exitPanelBtn = document.getElementById('zy-chat-exit-panel');
+    if (exitPanelBtn) {
+      exitPanelBtn.addEventListener('click', () => exitLiveChatToPanel());
+    }
 
     const searchInp = document.getElementById('zy-chat-search');
     if (searchInp) {
@@ -2603,19 +2678,39 @@
     async renderPage(containerId = 'page-content') {
       state.containerId = containerId;
       state.mounted = true;
+      try { document.body.classList.add('zy-is-live-chat'); } catch (_) {}
       if (typeof window.zyUpdateBreadcrumb === 'function') {
         window.zyUpdateBreadcrumb('live-chat', 'Live Chat');
+      }
+      // Check if URL has ?chat=<id> to auto-open that profile chat directly
+      let urlChatId = null;
+      try {
+        const m = String(window.location.search || '').match(/[?&]chat=(\d+)/);
+        if (m) {
+          const parsed = Number(m[1]);
+          if (Number.isInteger(parsed) && parsed > 0) urlChatId = parsed;
+        }
+      } catch (_) {}
+      if (urlChatId && !state.activeConvId) {
+        state.activeConvId = urlChatId;
+        state.mobileShowThread = true;
       }
       renderWorkspace();
       await fetchBootstrap(false);
       connectWs();
-      if (state.activeConvId) {
+      if (state.activeConvId && state.conversations.some(c => Number(c.id) === Number(state.activeConvId))) {
+        state.mobileShowThread = true;
+        syncChatUrlId(state.activeConvId);
+        renderWorkspace();
         await loadMessages(state.activeConvId, { silent: true });
+      } else if (urlChatId) {
+        syncChatUrlId(null);
       }
     },
     unmount() {
       state.mounted = false;
       state.emojiOpen = false;
+      try { document.body.classList.remove('zy-is-live-chat'); } catch (_) {}
       stopScheduleCountdownTick();
     },
     refreshBadge: () => fetchBootstrap(true),

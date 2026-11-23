@@ -2019,14 +2019,61 @@ function getAgentRangeClientPkrRate(acr, payterm = 'Weekly') {
   return round2(acr.client_rate_pkr || 0);
 }
 
-// Per-Range Client Limits (NO cross-range limit; strictly enforced per individual range):
-// - Max 25 numbers added/requested per UTC day per range
-// - Max 50 active (+ pending) numbers held at a time per range
-// - Max 3 additions/requests per rolling 7-day week per range
+// Default Per-Range Client Limits (overridden per range via Agent Client Rate Set):
+// - Default Batch Size: 25 numbers per batch
+// - Default Daily Limit: 1 addition/request per UTC day per range
+// - Default Max Hold: 25 active (+ pending) numbers held at a time per range (editable e.g. 50, 100, etc.)
+const CLIENT_RANGE_DEFAULT_BATCH_SIZE = 25;
+const CLIENT_RANGE_DEFAULT_DAILY_ADDS = 1;
+const CLIENT_RANGE_DEFAULT_MAX_HOLD = 25;
 const CLIENT_RANGE_DAILY_NUMBERS_MAX = 25;
 const CLIENT_RANGE_ACTIVE_HOLD_MAX = 50;
 const CLIENT_RANGE_WEEKLY_ADDS_MAX = 3;
 const CLIENT_RANGE_WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function resolveRangeClientLimits(acr, opts = {}) {
+  const unconfiguredFallbackHold = opts.unconfiguredFallbackHold || CLIENT_RANGE_ACTIVE_HOLD_MAX;
+  if (!acr) {
+    return {
+      batch_size: CLIENT_RANGE_DEFAULT_BATCH_SIZE,
+      daily_request_limit: CLIENT_RANGE_DEFAULT_DAILY_ADDS,
+      daily_numbers_limit: CLIENT_RANGE_DEFAULT_BATCH_SIZE * CLIENT_RANGE_DEFAULT_DAILY_ADDS,
+      max_hold_limit: unconfiguredFallbackHold,
+      allowed_quantities: [CLIENT_RANGE_DEFAULT_BATCH_SIZE]
+    };
+  }
+  const rawBatch = parseInt(acr.batch_size, 10);
+  const fallbackFromArr = Array.isArray(acr.allowed_quantities) && acr.allowed_quantities.length
+    ? parseInt(acr.allowed_quantities[0], 10)
+    : NaN;
+  const batchSize = Math.min(1000, Math.max(1, Number.isFinite(rawBatch) && rawBatch > 0 ? rawBatch : (Number.isFinite(fallbackFromArr) && fallbackFromArr > 0 ? fallbackFromArr : CLIENT_RANGE_DEFAULT_BATCH_SIZE)));
+  const dailyAddsLimit = Math.min(50, Math.max(1, parseInt(acr.daily_request_limit, 10) || CLIENT_RANGE_DEFAULT_DAILY_ADDS));
+  const rawMaxHold = parseInt(acr.max_hold_limit, 10);
+  const defaultHold = Number.isFinite(rawMaxHold) && rawMaxHold > 0
+    ? rawMaxHold
+    : Math.max(batchSize, CLIENT_RANGE_DEFAULT_MAX_HOLD);
+  const maxHoldLimit = Math.min(5000, Math.max(batchSize, defaultHold));
+  const dailyNumbersLimit = Math.min(maxHoldLimit * dailyAddsLimit, batchSize * dailyAddsLimit);
+  return {
+    batch_size: batchSize,
+    daily_request_limit: dailyAddsLimit,
+    daily_numbers_limit: dailyNumbersLimit,
+    max_hold_limit: maxHoldLimit,
+    allowed_quantities: [batchSize]
+  };
+}
+
+function getTodayUtcDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getNumberAssignedDateKey(n, isClient) {
+  if (!n) return '';
+  const rawTs = isClient
+    ? (n.client_assigned_at || n.assigned_at || n.assigned_date || n.allocated_at || n.created || '')
+    : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
+  return /^\d{4}-\d{2}-\d{2}/.test(String(rawTs)) ? String(rawTs).slice(0, 10) : '';
+}
 
 function matchesRangeRef(item, rangeId, rangeName) {
   if (!item) return false;
@@ -2038,7 +2085,7 @@ function matchesRangeRef(item, rangeId, rangeName) {
   return false;
 }
 
-function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null) {
+function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null, limitsOverride = null) {
   const cid = Number(clientId);
   const numbers = (preloaded && preloaded.numbers) || readDb('numbers') || [];
   const requests = (preloaded && preloaded.requests) || readDb('number_requests') || [];
@@ -2046,6 +2093,23 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   const nowMs = Date.now();
   const todayIso = new Date(nowMs).toISOString().slice(0, 10);
   const weekCutoffMs = nowMs - CLIENT_RANGE_WEEKLY_WINDOW_MS;
+
+  // Resolve per-range limits from the client's Agent Client Rate Set if not supplied
+  let lim = limitsOverride;
+  if (!lim) {
+    let agId = preloaded && preloaded.agentId ? Number(preloaded.agentId) : 0;
+    if (!agId) {
+      const clients = (preloaded && preloaded.clients) || readDb('clients') || [];
+      const clRec = clients.find(c => c && Number(c.id) === cid);
+      agId = clRec ? Number(clRec.agent_id || 0) : 0;
+    }
+    const acr = agId ? findAgentClientRate(agId, rangeId, rangeName) : null;
+    lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
+  }
+  const batchSize = Math.max(1, Number(lim.batch_size || CLIENT_RANGE_DEFAULT_BATCH_SIZE));
+  const dailyAddsLimit = Math.max(1, Number(lim.daily_request_limit || CLIENT_RANGE_DEFAULT_DAILY_ADDS));
+  const maxHoldLimit = Math.max(batchSize, Number(lim.max_hold_limit || CLIENT_RANGE_DEFAULT_MAX_HOLD));
+  const dailyNumbersLimit = Math.max(batchSize, Number(lim.daily_numbers_limit || (batchSize * dailyAddsLimit)));
 
   const heldCount = numbers.filter(n =>
     n && Number(n.client_id) === cid && matchesRangeRef(n, rangeId, rangeName)
@@ -2064,11 +2128,22 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   const pendingQty = pendingReqs
     .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
 
-  const todayReqNums = clientRangeReqs
-    .filter(r => String(r.created || r.timestamp || '').slice(0, 10) === todayIso)
+  const todayReqItems = clientRangeReqs
+    .filter(r => String(r.created || r.timestamp || '').slice(0, 10) === todayIso);
+  const todayReqNums = todayReqItems
     .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
 
   // Direct allocations (self-allocate or manual agent assign) not originating from a number request
+  const directTodayHistory = history.filter(h => {
+    if (!h) return false;
+    const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
+      || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
+    if (!isThisClient) return false;
+    if (h.request_id || /^(Allocated via Request #|Request #\d+)/i.test(String(h.notes || '').trim())) return false;
+    if (!matchesRangeRef(h, rangeId, rangeName)) return false;
+    return String(h.timestamp || h.created || '').slice(0, 10) === todayIso;
+  });
+
   const directTodayNums = numbers.filter(n => {
     if (!n || Number(n.client_id) !== cid) return false;
     if (!matchesRangeRef(n, rangeId, rangeName)) return false;
@@ -2078,7 +2153,9 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     return true;
   }).length;
 
-  const todayNumbers = todayReqNums + directTodayNums;
+  const directTodayFromHistNums = directTodayHistory.reduce((s, h) => s + (parseInt(h.count, 10) || 0), 0);
+  const todayNumbers = todayReqNums + Math.max(directTodayNums, directTodayFromHistNums);
+  const todayAddsUsed = todayReqItems.length + Math.max(directTodayHistory.length, directTodayNums > 0 && directTodayHistory.length === 0 ? 1 : 0);
 
   const weeklyEventsMs = [];
   for (const r of clientRangeReqs) {
@@ -2097,19 +2174,23 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   }
   weeklyEventsMs.sort((a, b) => a - b);
 
+  const weeklyAddsLimit = Math.max(CLIENT_RANGE_WEEKLY_ADDS_MAX, dailyAddsLimit * 7);
   const weeklyAddsUsed = weeklyEventsMs.length;
-  const dailyRemaining = Math.max(0, CLIENT_RANGE_DAILY_NUMBERS_MAX - todayNumbers);
-  const holdRemaining = Math.max(0, CLIENT_RANGE_ACTIVE_HOLD_MAX - heldCount - pendingQty);
-  const weeklyAddsRemaining = Math.max(0, CLIENT_RANGE_WEEKLY_ADDS_MAX - weeklyAddsUsed);
-  const maxRequestableNow = weeklyAddsRemaining > 0 ? Math.min(dailyRemaining, holdRemaining) : 0;
+  const dailyAddsRemaining = Math.max(0, dailyAddsLimit - todayAddsUsed);
+  const dailyRemaining = dailyAddsRemaining > 0 ? Math.max(0, dailyNumbersLimit - todayNumbers) : 0;
+  const holdRemaining = Math.max(0, maxHoldLimit - heldCount - pendingQty);
+  const weeklyAddsRemaining = Math.max(0, weeklyAddsLimit - weeklyAddsUsed);
+  const maxRequestableNow = (dailyAddsRemaining > 0 && weeklyAddsRemaining > 0)
+    ? Math.min(batchSize, dailyRemaining, holdRemaining)
+    : 0;
   const canRequestNow = maxRequestableNow > 0 && !hasPendingRequest;
 
   let blockReason = null;
   if (!canRequestNow) {
-    if (holdRemaining <= 0) blockReason = 'hold_limit';
+    if (hasPendingRequest) blockReason = 'pending_request';
+    else if (holdRemaining <= 0) blockReason = 'hold_limit';
+    else if (dailyAddsRemaining <= 0 || dailyRemaining <= 0) blockReason = 'daily_limit';
     else if (weeklyAddsRemaining <= 0) blockReason = 'weekly_limit';
-    else if (dailyRemaining <= 0) blockReason = 'daily_limit';
-    else if (hasPendingRequest) blockReason = 'pending_request';
   }
 
   const nextWeeklySlotAt = (weeklyAddsRemaining <= 0 && weeklyEventsMs.length > 0)
@@ -2117,16 +2198,21 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     : null;
 
   return {
-    daily_numbers_limit: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+    batch_size: batchSize,
+    daily_request_limit: dailyAddsLimit,
+    daily_adds_limit: dailyAddsLimit,
+    today_adds_used: todayAddsUsed,
+    daily_adds_remaining: dailyAddsRemaining,
+    daily_numbers_limit: dailyNumbersLimit,
     today_numbers: todayNumbers,
     daily_remaining: dailyRemaining,
-    max_hold_limit: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+    max_hold_limit: maxHoldLimit,
     held_count: heldCount,
     pending_qty: pendingQty,
     pending_request_count: pendingRequestCount,
     has_pending_request: hasPendingRequest,
     hold_remaining: holdRemaining,
-    weekly_adds_limit: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+    weekly_adds_limit: weeklyAddsLimit,
     weekly_adds_used: weeklyAddsUsed,
     weekly_adds_remaining: weeklyAddsRemaining,
     next_weekly_slot_at: nextWeeklySlotAt,
@@ -8368,9 +8454,9 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
 
       const isWnRng = isWhitenoiseRecord(r, null, wnTags);
       const ptInfo = resolveRangeActivePayterms(r, isWnRng);
-      const quota = getClientRangeQuota(_viewer.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory });
-      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
-      const effAllowedQty = allowedQty.length ? allowedQty : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
+      const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
+      const quota = getClientRangeQuota(_viewer.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory, agentId: myAgentId }, lim);
+      const effAllowedQty = lim.allowed_quantities;
       const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
       const poolAvailable = rangeNums.filter(n =>
         myAgentId ? (Number(n.agent_id) === Number(myAgentId) && !n.client_id) : (!n.agent_id && !n.client_id)
@@ -8393,7 +8479,6 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
         client_rate_pkr: round2(acr.client_rate_pkr),
         usd_to_pkr_rate: fx,
         allowed_quantities: effAllowedQty,
-        daily_request_limit: 1,
         ...quota,
         requests_today: quota.today_numbers,
         requested_today: !quota.can_request_now,
@@ -8555,6 +8640,7 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
       Number(n.agent_id) === agentId && !n.client_id
     ).length;
 
+    const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
     return {
       range_id: r.id,
       range_name: rangeName,
@@ -8577,8 +8663,10 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
       margin_pkr: marginPkr,
       published: acr ? acr.published !== false : false,
       configured: isConfigured,
-      allowed_quantities: acr ? normalizeAllowedQuantities(acr.allowed_quantities) : [25],
-      daily_request_limit: acr ? Math.max(1, parseInt(acr.daily_request_limit, 10) || 1) : 1,
+      batch_size: lim.batch_size,
+      allowed_quantities: lim.allowed_quantities,
+      daily_request_limit: lim.daily_request_limit,
+      max_hold_limit: lim.max_hold_limit,
       pool_available: poolAvailable,
       updated_at: acr ? (acr.updated_at || acr.created || '') : ''
     };
@@ -8645,8 +8733,13 @@ function handleSaveAgentClientRates(req, res) {
       });
     }
 
-    const allowedQty = normalizeAllowedQuantities(raw.allowed_quantities);
-    const dailyLimit = Math.max(1, parseInt(raw.daily_request_limit, 10) || 1);
+    const parsedBatch = parseInt(raw.batch_size, 10);
+    const fallbackArr = normalizeAllowedQuantities(raw.allowed_quantities);
+    const batchSize = Math.min(1000, Math.max(1, Number.isFinite(parsedBatch) && parsedBatch > 0 ? parsedBatch : (fallbackArr[0] || CLIENT_RANGE_DEFAULT_BATCH_SIZE)));
+    const dailyLimit = Math.min(50, Math.max(1, parseInt(raw.daily_request_limit, 10) || CLIENT_RANGE_DEFAULT_DAILY_ADDS));
+    const parsedMaxHold = parseInt(raw.max_hold_limit, 10);
+    const maxHoldLimit = Math.min(5000, Math.max(batchSize, Number.isFinite(parsedMaxHold) && parsedMaxHold > 0 ? parsedMaxHold : Math.max(batchSize, CLIENT_RANGE_DEFAULT_MAX_HOLD)));
+    const allowedQty = [batchSize];
     const published = raw.published !== false;
     const rName = rng.range_name || rng.name || rng.country || 'Range';
 
@@ -8659,8 +8752,10 @@ function handleSaveAgentClientRates(req, res) {
       range_name: rName,
       client_rate_pkr: clientRatePkr,
       client_rate_usd_eq: round6(clientRatePkr / fx),
+      batch_size: batchSize,
       allowed_quantities: allowedQty,
       daily_request_limit: dailyLimit,
+      max_hold_limit: maxHoldLimit,
       published,
       fx_usd_to_pkr_at_save: fx,
       updated_at: nowIso,
@@ -8778,30 +8873,35 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
                 acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
     if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
 
-    const rawAllowed = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
-    const allowedQty = rawAllowed.length ? rawAllowed : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
+    const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
+    const allowedQty = lim.allowed_quantities;
     const poolAvailable = numbers.filter(n =>
       n && matchesRangeRef(n, r.id, rangeName) &&
       (targetAgentId ? (Number(n.agent_id) === Number(targetAgentId) && !n.client_id) : (!n.agent_id && !n.client_id))
     ).length;
 
     const quota = role === 'client'
-      ? getClientRangeQuota(sessionUser.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory })
+      ? getClientRangeQuota(sessionUser.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory, agentId: targetAgentId }, lim)
       : {
-          daily_numbers_limit: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+          batch_size: lim.batch_size,
+          daily_request_limit: lim.daily_request_limit,
+          daily_adds_limit: lim.daily_request_limit,
+          today_adds_used: 0,
+          daily_adds_remaining: lim.daily_request_limit,
+          daily_numbers_limit: lim.daily_numbers_limit,
           today_numbers: 0,
-          daily_remaining: CLIENT_RANGE_DAILY_NUMBERS_MAX,
-          max_hold_limit: CLIENT_RANGE_ACTIVE_HOLD_MAX,
+          daily_remaining: lim.daily_numbers_limit,
+          max_hold_limit: lim.max_hold_limit,
           held_count: 0,
           pending_qty: 0,
           pending_request_count: 0,
           has_pending_request: false,
-          hold_remaining: CLIENT_RANGE_ACTIVE_HOLD_MAX,
-          weekly_adds_limit: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+          hold_remaining: lim.max_hold_limit,
+          weekly_adds_limit: Math.max(CLIENT_RANGE_WEEKLY_ADDS_MAX, lim.daily_request_limit * 7),
           weekly_adds_used: 0,
-          weekly_adds_remaining: CLIENT_RANGE_WEEKLY_ADDS_MAX,
+          weekly_adds_remaining: Math.max(CLIENT_RANGE_WEEKLY_ADDS_MAX, lim.daily_request_limit * 7),
           next_weekly_slot_at: null,
-          max_requestable_now: CLIENT_RANGE_DAILY_NUMBERS_MAX,
+          max_requestable_now: lim.batch_size,
           can_request_now: true,
           block_reason: null
         };
@@ -8839,7 +8939,6 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
       payout: baseClientPkr,
       client_rate_pkr: baseClientPkr,
       allowed_quantities: allowedQty,
-      daily_request_limit: 1,
       ...quota,
       requests_today: quota.today_numbers,
       requested_today: !quota.can_request_now,
@@ -13584,27 +13683,52 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
       }
     }
 
+    const todayIso = getTodayUtcDateKey();
     let count = 0;
+    let blockedTodayCount = 0;
 
     numbers = numbers.map(n => {
       if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return n;
 
       if (isClient) {
         if (Number(n.client_id) !== Number(sessionUser.id)) return n;
+        const assignedDate = getNumberAssignedDateKey(n, true);
+        if (assignedDate && assignedDate >= todayIso) {
+          blockedTodayCount++;
+          return n;
+        }
         count++;
         // Client returns to Agent pool
-        return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: n.status === 'blocked' ? 'blocked' : 'assigned' };
+        return { ...n, client_id: null, client_name: '', client_username: '', user: '', client_assigned_at: null, status: n.status === 'blocked' ? 'blocked' : 'assigned' };
       } else if (isAgent) {
         if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
+        const assignedDate = getNumberAssignedDateKey(n, false);
+        if (assignedDate && assignedDate >= todayIso) {
+          blockedTodayCount++;
+          return n;
+        }
         count++;
         // Agent returns directly to Owner pool
-        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', status: n.status === 'blocked' ? 'blocked' : 'active' };
+        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, client_assigned_at: null, status: n.status === 'blocked' ? 'blocked' : 'active' };
       }
       return n;
     });
 
+    if (count === 0 && blockedTodayCount > 0) {
+      return res.status(400).json({
+        error: `Numbers allocated today (${todayIso}) cannot be returned on the same day. You can return them starting tomorrow.`
+      });
+    }
+
     writeDb('numbers', numbers);
-    res.json({ success: true, returned: count });
+    res.json({
+      success: true,
+      returned: count,
+      skipped_today: blockedTodayCount,
+      message: blockedTodayCount > 0
+        ? `Returned ${count} number(s). ${blockedTodayCount} number(s) allocated today cannot be returned until tomorrow.`
+        : `Returned ${count} number(s).`
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -13665,27 +13789,39 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
       if (isAgent && n.client_id) g.assigned_to_clients++;
     }
 
+    const todayIso = getTodayUtcDateKey();
+    let returnableCount = 0;
+    let lockedTodayCount = 0;
+
     const batches = Array.from(groups.values())
       .map(g => {
         g.nums.sort();
+        const isToday = g.date !== 'Unknown' && g.date >= todayIso;
+        if (isToday) lockedTodayCount += g.count;
+        else returnableCount += g.count;
         return {
           date: g.date,
           count: g.count,
           sample_start: g.nums[0] || '',
           sample_end: g.nums[g.nums.length - 1] || '',
           payterms: Array.from(g.payterms),
-          assigned_to_clients: g.assigned_to_clients
+          assigned_to_clients: g.assigned_to_clients,
+          is_today: isToday,
+          returnable: !isToday
         };
       })
       .sort((a, b) => (a.date === 'Unknown' ? 1 : (b.date === 'Unknown' ? -1 : b.date.localeCompare(a.date))));
 
-    const validDates = batches.map(b => b.date).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+    const validDates = batches.filter(b => b.returnable && /^\d{4}-\d{2}-\d{2}$/.test(b.date)).map(b => b.date).sort();
 
     res.json({
       success: true,
       range_id: effRangeId,
       range_name: effRangeName,
+      today_date: todayIso,
       total_held: heldInRange.length,
+      returnable_count: returnableCount,
+      locked_today_count: lockedTodayCount,
       min_date: validDates[0] || '',
       max_date: validDates[validDates.length - 1] || '',
       batches
@@ -13741,10 +13877,22 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'Monthly Route numbers cannot be returned directly. Please contact your Agent.' });
     }
 
+    const todayIso = getTodayUtcDateKey();
+    if (dateSet.size > 0) {
+      for (const d of dateSet) {
+        if (d !== 'Unknown' && d >= todayIso) {
+          return res.status(400).json({
+            error: `Numbers allocated today (${todayIso}) cannot be returned on the same day. You can return them starting tomorrow.`
+          });
+        }
+      }
+    }
+
     let numbers = readDb('numbers') || [];
     const returnedIds = [];
     const returnedDates = new Set();
     let remainingInRange = 0;
+    let skippedTodayCount = 0;
     let upstreamAgentId = null;
 
     numbers = numbers.map(n => {
@@ -13755,10 +13903,7 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       if (!ownedByUser) return n;
       if (!matchesRangeRef(n, effRangeId, effRangeName)) return n;
 
-      const rawTs = isClient
-        ? (n.client_assigned_at || n.assigned_at || n.assigned_date || n.allocated_at || n.created || '')
-        : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
-      const dateStr = /^\d{4}-\d{2}-\d{2}/.test(String(rawTs)) ? String(rawTs).slice(0, 10) : 'Unknown';
+      const dateStr = getNumberAssignedDateKey(n, isClient) || 'Unknown';
 
       let matchesDate = false;
       if (dateSet.size > 0) {
@@ -13770,6 +13915,13 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       }
 
       if (!matchesDate) {
+        remainingInRange++;
+        return n;
+      }
+
+      // Same-day return lock: numbers allocated today can only be returned starting the next day
+      if (dateStr !== 'Unknown' && dateStr >= todayIso) {
+        skippedTodayCount++;
         remainingInRange++;
         return n;
       }
@@ -13805,6 +13957,11 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
     });
 
     if (returnedIds.length === 0) {
+      if (skippedTodayCount > 0) {
+        return res.status(400).json({
+          error: `Numbers allocated today (${todayIso}) cannot be returned on the same day. You can return them starting tomorrow.`
+        });
+      }
       return res.status(400).json({ error: `No active numbers matched the selected date(s) in range "${effRangeName}".` });
     }
 
@@ -13981,14 +14138,17 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
       if (rngPtInfo && rawReqPt && !isWnNumber && !rngPtInfo.active_payterms.includes(clientPayterm)) {
         return res.status(400).json({ error: `Payterm "${clientPayterm}" is not available on range "${rng.range_name || rng.name}". Allowed: ${rngPtInfo.active_payterms.join(', ')}.` });
       }
-      // Enforce max 50 active numbers per range per client
+      // Enforce per-range max active numbers per client (from Agent Client Rate Set)
+      const holdCheckAgentId = effectiveAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || cl.agent_id || null);
+      const holdAcr = holdCheckAgentId ? findAgentClientRate(holdCheckAgentId, n.range_id || (rng && rng.id), n.range_name || (rng && rng.range_name)) : null;
+      const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
       const curHeldInRange = numbers.filter(x =>
         x && Number(x.client_id) === Number(targetId) &&
         Number(x.id) !== Number(n.id) &&
         matchesRangeRef(x, n.range_id || (rng && rng.id), n.range_name || (rng && rng.range_name))
       ).length;
-      if (curHeldInRange + 1 > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
-        return res.status(400).json({ error: `Client "${cl.username}" already holds ${curHeldInRange}/${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in this range (max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} per range).` });
+      if (curHeldInRange + 1 > effMaxHold) {
+        return res.status(400).json({ error: `Client "${cl.username}" already holds ${curHeldInRange}/${effMaxHold} numbers in this range (max ${effMaxHold} per range).` });
       }
       const ptMeta = getPaytermMeta(clientPayterm);
       const agentRate = (n.agent_rate !== undefined && n.agent_rate !== null && Number(n.agent_rate) > 0)
@@ -14262,11 +14422,14 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
         if (!perRangeCounts.has(key)) perRangeCounts.set(key, { rid: n.range_id, rname: n.range_name || (rObj && rObj.range_name) || '', add: 0 });
         perRangeCounts.get(key).add++;
       }
+      const bulkHoldAgentId = bulkClientRecord.agent_id || (isAgent ? Number(sessionUser.id) : null);
       for (const info of perRangeCounts.values()) {
+        const holdAcr = bulkHoldAgentId ? findAgentClientRate(bulkHoldAgentId, info.rid, info.rname) : null;
+        const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
         const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && !numberIds.has(Number(x.id)) && matchesRangeRef(x, info.rid, info.rname)).length;
-        if (curHeld + info.add > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+        if (curHeld + info.add > effMaxHold) {
           return res.status(400).json({
-            error: `Client "${bulkClientRecord.username}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
+            error: `Client "${bulkClientRecord.username}" cannot hold more than ${effMaxHold} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
           });
         }
       }
@@ -14588,18 +14751,29 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     if (isClient) {
       const effRid = matchedRng ? Number(matchedRng.id) : rId;
       const effRname = (matchedRng && (matchedRng.range_name || matchedRng.name)) || range_name || '';
-      const quota = getClientRangeQuota(sessionUser.id, effRid, effRname, { numbers });
-      if (quota.weekly_adds_remaining <= 0) {
-        return res.status(429).json({ error: `Weekly limit reached for "${effRname}": max ${CLIENT_RANGE_WEEKLY_ADDS_MAX} additions per week (${quota.weekly_adds_used}/${CLIENT_RANGE_WEEKLY_ADDS_MAX} used).` });
+      const clRec = (readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+      const clAgentId = Number(clRec.agent_id || sessionUser.agent_id || 0);
+      const acr = clAgentId ? findAgentClientRate(clAgentId, effRid, effRname) : null;
+      const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
+      const quota = getClientRangeQuota(sessionUser.id, effRid, effRname, { numbers, agentId: clAgentId }, lim);
+      if (qty > lim.batch_size) {
+        return res.status(400).json({
+          error: `Batch size limit for "${effRname}" is ${lim.batch_size} numbers per allocation. You requested ${qty}.`
+        });
       }
-      if (qty > CLIENT_RANGE_DAILY_NUMBERS_MAX || qty > quota.daily_remaining) {
+      if (quota.daily_adds_remaining <= 0) {
+        return res.status(429).json({
+          error: `Daily limit reached for "${effRname}": max ${quota.daily_adds_limit} addition(s) per day (${quota.today_adds_used}/${quota.daily_adds_limit} used today).`
+        });
+      }
+      if (qty > quota.daily_remaining) {
         return res.status(quota.daily_remaining <= 0 ? 429 : 400).json({
-          error: `Daily limit for "${effRname}": max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers/day (used ${quota.today_numbers}/${CLIENT_RANGE_DAILY_NUMBERS_MAX}, remaining ${quota.daily_remaining}).`
+          error: `Daily limit for "${effRname}": max ${quota.daily_numbers_limit} numbers/day (used ${quota.today_numbers}/${quota.daily_numbers_limit}, remaining ${quota.daily_remaining}).`
         });
       }
       if (qty > quota.hold_remaining) {
         return res.status(400).json({
-          error: `Active holding limit for "${effRname}": max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers per range (currently ${quota.held_count} held + ${quota.pending_qty} pending). Return numbers first to add more.`
+          error: `Active holding limit for "${effRname}": max ${quota.max_hold_limit} numbers per client (currently ${quota.held_count} held + ${quota.pending_qty} pending). Return numbers first to add more.`
         });
       }
     }
@@ -14804,11 +14978,14 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
         if (!perRangeAddCounts.has(key)) perRangeAddCounts.set(key, { rid: sn.range_id, rname: sn.range_name || (rng && rng.range_name) || '', add: 0 });
         perRangeAddCounts.get(key).add++;
       }
+      const allocHoldAgentId = targetClientRec.agent_id || (isAgent ? Number(sessionUser.id) : null);
       for (const info of perRangeAddCounts.values()) {
+        const holdAcr = allocHoldAgentId ? findAgentClientRate(allocHoldAgentId, info.rid, info.rname) : null;
+        const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
         const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && matchesRangeRef(x, info.rid, info.rname)).length;
-        if (curHeld + info.add > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+        if (curHeld + info.add > effMaxHold) {
           return res.status(400).json({
-            error: `Client "${targetClientRec.username}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
+            error: `Client "${targetClientRec.username}" cannot hold more than ${effMaxHold} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
           });
         }
       }
@@ -15846,35 +16023,35 @@ function handleCreateNumberRequest(req, res) {
       if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) {
         return res.status(400).json({ error: 'This range is not enabled by your Agent yet.' });
       }
-      if (qty > CLIENT_RANGE_DAILY_NUMBERS_MAX) {
-        return res.status(400).json({ error: `Daily limit per range is max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers. You requested ${qty}.` });
+      const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
+      if (qty > lim.batch_size) {
+        return res.status(400).json({ error: `Batch size limit for "${resolvedRangeName}" is max ${lim.batch_size} numbers. You requested ${qty}.` });
       }
 
-      const quota = getClientRangeQuota(sessionUser.id, resolvedRangeId, resolvedRangeName, { requests });
-      if (quota.weekly_adds_remaining <= 0) {
-        return res.status(429).json({
-          error: `Weekly limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_WEEKLY_ADDS_MAX} additions per week (${quota.weekly_adds_used}/${CLIENT_RANGE_WEEKLY_ADDS_MAX} used in last 7 days).`
-        });
-      }
-      if (quota.daily_remaining <= 0 || qty > quota.daily_remaining) {
-        return res.status(quota.daily_remaining <= 0 ? 429 : 400).json({
-          error: `Daily limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_DAILY_NUMBERS_MAX} numbers per day (${quota.today_numbers}/${CLIENT_RANGE_DAILY_NUMBERS_MAX} used today, remaining ${quota.daily_remaining}).`
-        });
-      }
-      if (qty > quota.hold_remaining) {
-        return res.status(400).json({
-          error: `Active holding limit reached for "${resolvedRangeName}": max ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers per range (${quota.held_count} held + ${quota.pending_qty} pending). Return numbers in this range first.`
-        });
-      }
+      const quota = getClientRangeQuota(sessionUser.id, resolvedRangeId, resolvedRangeName, { requests, agentId: effectiveAgentId }, lim);
       if (quota.has_pending_request) {
         return res.status(409).json({
           error: `You already have a pending request for "${resolvedRangeName}". Please wait for your Agent to review it before submitting another request.`
         });
       }
-      const allowedQty = normalizeAllowedQuantities(acr.allowed_quantities).filter(q => q <= CLIENT_RANGE_DAILY_NUMBERS_MAX);
-      const effAllowed = allowedQty.length ? allowedQty : [CLIENT_RANGE_DAILY_NUMBERS_MAX];
-      if (!effAllowed.includes(qty) && qty !== Math.min(quota.daily_remaining, quota.hold_remaining)) {
-        return res.status(400).json({ error: `Allowed number batch for "${resolvedRangeName}": ${effAllowed.join(' or ')} numbers (max ${CLIENT_RANGE_DAILY_NUMBERS_MAX}/day).` });
+      if (quota.daily_adds_remaining <= 0) {
+        return res.status(429).json({
+          error: `Daily limit reached for "${resolvedRangeName}": max ${quota.daily_adds_limit} addition(s) per day (${quota.today_adds_used}/${quota.daily_adds_limit} used today).`
+        });
+      }
+      if (quota.daily_remaining <= 0 || qty > quota.daily_remaining) {
+        return res.status(quota.daily_remaining <= 0 ? 429 : 400).json({
+          error: `Daily limit reached for "${resolvedRangeName}": max ${quota.daily_numbers_limit} numbers per day (${quota.today_numbers}/${quota.daily_numbers_limit} used today, remaining ${quota.daily_remaining}).`
+        });
+      }
+      if (qty > quota.hold_remaining) {
+        return res.status(400).json({
+          error: `Active holding limit reached for "${resolvedRangeName}": max ${quota.max_hold_limit} numbers per client (${quota.held_count} held + ${quota.pending_qty} pending). Return numbers in this range first.`
+        });
+      }
+      const maxAllowedNow = Math.min(lim.batch_size, quota.daily_remaining, quota.hold_remaining);
+      if (qty !== lim.batch_size && qty !== maxAllowedNow) {
+        return res.status(400).json({ error: `Allowed number batch for "${resolvedRangeName}": ${lim.batch_size} numbers (or remaining capacity ${maxAllowedNow}).` });
       }
       stampedClientRatePkr = getAgentRangeClientPkrRate(acr, reqPtMeta.key);
     } else if (isAgent) {
@@ -16059,10 +16236,12 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
     }
     const targetPayterm = isWnReq ? 'Monthly' : (fulfillPtInfo.active_payterms.includes(requestedFulfillPt) ? requestedFulfillPt : fulfillPtInfo.primary_payterm);
     if (isClientReq && reqItem.client_id) {
+      const fulfillHoldAcr = effAgentId ? findAgentClientRate(effAgentId, rangeId, rangeLabel) : null;
+      const effMaxHold = resolveRangeClientLimits(fulfillHoldAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
       const curHeld = numbers.filter(n => n && Number(n.client_id) === Number(reqItem.client_id) && matchesRangeRef(n, rangeId, rangeLabel)).length;
-      if (curHeld + allocCount > CLIENT_RANGE_ACTIVE_HOLD_MAX) {
+      if (curHeld + allocCount > effMaxHold) {
         return res.status(400).json({
-          error: `Client "${reqItem.client_username || reqItem.client_id}" cannot hold more than ${CLIENT_RANGE_ACTIVE_HOLD_MAX} numbers in "${rangeLabel}" (currently ${curHeld} held, trying to fulfill ${allocCount}).`
+          error: `Client "${reqItem.client_username || reqItem.client_id}" cannot hold more than ${effMaxHold} numbers in "${rangeLabel}" (currently ${curHeld} held, trying to fulfill ${allocCount}).`
         });
       }
     }

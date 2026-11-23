@@ -809,11 +809,18 @@ window.zyResolveRangeActivePayterms = function(r) {
     Monthly: 'Monthly (30/5) {W} — 5 Day Hold'
   };
   const obj = (r && typeof r === 'object') ? r : {};
+  const ptStr = String(obj.payterm || obj.client_payterm || obj.agent_payterm || '').toLowerCase();
+  const activePts = Array.isArray(obj.active_payterms) ? obj.active_payterms.map(x => String(x || '').toLowerCase()) : [];
+  const ptsObj = (obj.payterms && typeof obj.payterms === 'object') ? obj.payterms : {};
+  const hasMonthlyPtOnly = (ptsObj.Monthly !== undefined || ptsObj['30/5'] !== undefined) && (ptsObj.Weekly === undefined && ptsObj['7/3'] === undefined);
   const isWn = Boolean(
     obj.is_whitenoise ||
     String(obj.provider || '').toLowerCase().includes('whitenoise') ||
     String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
-    String(obj.range_name || obj.name || '').toLowerCase().includes('whitenoise')
+    String(obj.range_name || obj.name || '').toLowerCase().includes('whitenoise') ||
+    ptStr === 'monthly' || ptStr === '30/5' || ptStr === 'monthly30_5' ||
+    (activePts.includes('monthly') && !activePts.includes('weekly')) ||
+    hasMonthlyPtOnly
   );
   if (isWn) {
     return { active: ['Monthly'], primary: 'Monthly', isWn: true, labels: labelMap };
@@ -1345,12 +1352,12 @@ const ZY_COUNTRY_LIST = ['Afghanistan','Aland Islands','Albania','Algeria','Amer
 function getLocalDateStr(dateObj = new Date()) {
   const d = dateObj instanceof Date ? dateObj : new Date(dateObj);
   const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 function zyMonthStart() {
   const d = new Date();
   const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01`;
 }
 function zyToday() { return getLocalDateStr(); }
 
@@ -3066,11 +3073,12 @@ window.zyCopyNumber = function(num, el) {
 };
 
 // ── Clean Centered Number + Icon-Only Copy Box (No leading +, no "Copy" label) ─
-window.zyRenderNumberCopyBox = function(num) {
+window.zyRenderNumberCopyBox = function(num, opts) {
   const clean = String(num || '').trim().replace(/^\++/, '');
   if (!clean || clean === '—') return '—';
+  const isWn = Boolean(opts && (opts === true || opts.isWn));
   const esc = typeof zyEsc === 'function' ? zyEsc(clean) : clean.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  return `<button type="button" class="zy-num-copy-box" onclick="event.stopPropagation();window.zyCopyNumber('${esc}', this)" title="Copy number" aria-label="Copy ${esc}"><span class="zy-copy-num">${esc}</span><span class="zy-copy-badge" aria-hidden="true"><i class="far fa-copy"></i></span></button>`;
+  return `<button type="button" class="zy-num-copy-box${isWn ? ' is-wn-num' : ''}" onclick="event.stopPropagation();window.zyCopyNumber('${esc}', this)" title="Copy number" aria-label="Copy ${esc}"><span class="zy-copy-num${isWn ? ' zy-wn-number' : ''}">${esc}</span><span class="zy-copy-badge" aria-hidden="true"><i class="far fa-copy"></i></span></button>`;
 };
 
 // ── Shared Date Column Cell for My Numbers (Owner / Agent / Client) ──────
@@ -3627,15 +3635,15 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const container = document.getElementById(cfg.containerId || 'page-content');
   if (!container) return;
 
+  if (window._zyDashLiveAccessTimer) {
+    clearInterval(window._zyDashLiveAccessTimer);
+    window._zyDashLiveAccessTimer = null;
+  }
+
   const alertHtml = cfg.alertHtml || '';
   const hero = cfg.hero || {};
   const todaySms = Number(hero.value || 0);
   const chartTodayTotal = cfg.chartTodayTotal != null ? Number(cfg.chartTodayTotal) : todaySms;
-  const yestSms = Number(hero.yesterday || 0);
-  const diff = todaySms - yestSms;
-  const deltaText = yestSms > 0
-    ? `${diff >= 0 ? '+' : ''}${Math.round((diff / yestSms) * 100)}% vs yesterday`
-    : `${yestSms.toLocaleString()} yesterday`;
 
   const moneyCards = (cfg.moneyCards || []).slice(0, 2);
   const shortcuts = (cfg.shortcuts || []).slice(0, 6);
@@ -3643,13 +3651,10 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const volGridClass = volumes.length === 3 ? 'zy-ud-vol-grid zy-ud-vol-grid-3' : 'zy-ud-vol-grid';
   const summaryRows = (cfg.summaryRows || []).slice(0, 4);
   const latestRanges = cfg.latestRanges || [];
-  const topAccess = cfg.topAccess || [];
-  const notifications = cfg.notifications || [];
+  const appLinks = Array.isArray(cfg.appLinks) ? cfg.appLinks.slice(0, 10) : [];
 
-  const rangesRoute = cfg.rangesRoute || 'sms-ranges';
-  const reportsRoute = cfg.reportsRoute || 'my-sms';
-  const notificationsRoute = cfg.notificationsRoute || 'notifications';
   const chartId = cfg.chartId || 'zy-ud-weekly-chart';
+  const liveAccessHostId = 'zy-ud-live-access-body';
 
   const quickTilesHtml = shortcuts.map((s, idx) => {
     const tone = s.tone || (idx % 2 === 0 ? 'blue' : 'green');
@@ -3670,12 +3675,12 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   `).join('');
 
   const sumItemsHtml = summaryRows.map(r => `
-    <div class="zy-ud-sum-item">
+    <div class="zy-ud-sum-item"${r.page ? ` style="cursor:pointer;" onclick="loadPage('${zyEsc(r.page)}')"` : ''}>
       <div class="zy-ud-sum-left">
-        <div class="zy-ud-sum-ic"><i class="fas ${zyEsc(r.icon || 'fa-chart-simple')}"></i></div>
+        <div class="zy-ud-sum-ic${r.tone === 'red' ? ' is-red' : ''}"><i class="fas ${zyEsc(r.icon || 'fa-chart-simple')}"></i></div>
         <div class="zy-ud-sum-lbl">${zyEsc(r.label)}</div>
       </div>
-      <div class="zy-ud-sum-val zy-ud-num">${zyEsc(String(r.value ?? '0'))}</div>
+      <div class="zy-ud-sum-val zy-ud-num${r.tone === 'red' ? ' is-red' : ''}">${zyEsc(String(r.value ?? '0'))}</div>
     </div>
   `).join('');
 
@@ -3685,8 +3690,8 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <thead>
           <tr>
             <th>Range Name</th>
-            <th>Weekly Rate</th>
-            <th class="r">Date Added</th>
+            <th>Rate</th>
+            <th class="r">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -3702,63 +3707,42 @@ window.zyRenderUnifiedDashboard = function (cfg) {
     </div>
   ` : `<div class="zy-ud-empty"><i class="fas fa-layer-group" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No SMS ranges configured yet.</div>`;
 
-  const topAccessHtml = topAccess.length ? `
-    <div class="zy-ud-table-wrap">
-      <table class="zy-ud-table">
-        <thead>
-          <tr>
-            <th>CLI</th>
-            <th>Range</th>
-            <th class="r">Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${topAccess.slice(0, 5).map(item => `
-            <tr>
-              <td><span class="zy-ud-cli-tag">${zyEsc(item.cli || '—')}</span></td>
-              <td>${zyEsc(item.range || '—')}</td>
-              <td class="r zy-ud-num"><b>${Number(item.total || 0).toLocaleString()}</b></td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  ` : `<div class="zy-ud-empty"><i class="fas fa-wave-square" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No SMS access traffic recorded today yet.</div>`;
+  const safeHref = (u) => {
+    const s = String(u || '').trim();
+    return /^https?:\/\//i.test(s) ? s : '#';
+  };
 
-  const newsHtml = notifications.length ? `
-    <div class="zy-ud-table-wrap">
-      <table class="zy-ud-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Headline</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${notifications.slice(0, 5).map(n => `
-            <tr>
-              <td style="white-space:nowrap;color:var(--sp-text-muted);font-size:12px;">${zyEsc(n.date || '—')}</td>
-              <td><strong>${zyEsc(n.title || 'System Update')}</strong></td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
+  const appLinksHtml = appLinks.length ? `
+    <div class="zy-ud-applinks-list">
+      ${appLinks.map((app, i) => {
+        const href = safeHref(app.url);
+        const cat = String(app.category || '').trim();
+        return `
+          <a class="zy-ud-applink-item" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer">
+            <span class="zy-ud-applink-idx">${i + 1}</span>
+            <span class="zy-ud-applink-name">${zyEsc(app.name || 'App Link')}</span>
+            ${cat ? `<span class="zy-ud-applink-cat">${zyEsc(cat)}</span>` : ''}
+            <i class="fas fa-arrow-up-right-from-square zy-ud-applink-ext" aria-hidden="true"></i>
+          </a>
+        `;
+      }).join('')}
     </div>
-  ` : `<div class="zy-ud-empty"><i class="far fa-bell" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No recent notifications or announcements.</div>`;
+  ` : `<div class="zy-ud-empty"><i class="fas fa-link" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No app links added yet.</div>`;
+
+  const moneyPairClass = moneyCards.length === 1 ? 'zy-ud-money-pair zy-ud-money-pair-single' : 'zy-ud-money-pair';
 
   container.innerHTML = `
     <div class="zy-ud">
       ${alertHtml}
 
-      <!-- Row 1: Hero Card + 2-Column Earnings Cards (Read-only Data Display) -->
-      <div class="zy-ud-top-row">
+      <!-- Row 1: Hero Card + Monthly {W} Card -->
+      <div class="zy-ud-top-row${moneyCards.length === 1 ? ' zy-ud-top-row-2col' : ''}">
         <div class="zy-ud-card zy-ud-hero-card">
           <div style="min-width:0;">
             <div class="zy-ud-hero-label">${zyEsc(hero.label || 'Today SMS')}</div>
             <div class="zy-ud-hero-val zy-ud-num">${todaySms.toLocaleString()}</div>
             <div class="zy-ud-hero-sub">
-              <span>${zyEsc(hero.subtitle || 'On your numbers today')}</span>
-              <span class="zy-ud-delta-pill">${zyEsc(deltaText)}</span>
+              <span>${zyEsc(hero.subtitle || 'Today API SMS (UTC)')}</span>
             </div>
           </div>
           <div class="zy-ud-hero-badge" aria-hidden="true">
@@ -3766,12 +3750,12 @@ window.zyRenderUnifiedDashboard = function (cfg) {
           </div>
         </div>
 
-        <div class="zy-ud-money-pair">
+        <div class="${moneyPairClass}">
           ${moneyCards.map((mc, idx) => `
             <div class="zy-ud-card zy-ud-money-card">
               <div class="zy-ud-money-top">
                 <span class="zy-ud-money-label">${zyEsc(mc.label)}</span>
-                <span class="zy-ud-money-ic ${idx === 0 ? 'emerald' : 'blue'}"><i class="fas ${zyEsc(mc.icon || (idx === 0 ? 'fa-wallet' : 'fa-chart-line'))}"></i></span>
+                <span class="zy-ud-money-ic ${idx === 0 ? 'emerald' : 'blue'}"><i class="fas ${zyEsc(mc.icon || (idx === 0 ? 'fa-tower-cell' : 'fa-chart-line'))}"></i></span>
               </div>
               <div class="zy-ud-money-val zy-ud-num">${zyEsc(mc.value)}</div>
               <div class="zy-ud-money-sub">${zyEsc(mc.sub || '')}</div>
@@ -3781,7 +3765,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
       </div>
 
       ${shortcuts.length ? `
-      <!-- Row 2: Quick Access Grid (Desktop 6-col, Mobile 3x2) -->
+      <!-- Row 2: Quick Access Grid -->
       <div class="zy-ud-card">
         <div class="zy-ud-card-head">
           <div class="zy-ud-card-title"><i class="fas fa-bolt"></i> Quick Access</div>
@@ -3797,7 +3781,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <div class="zy-ud-card zy-ud-volume-card">
           <div class="zy-ud-card-head">
             <div class="zy-ud-card-title"><i class="fas fa-layer-group"></i> Volume Overview</div>
-            <span class="zy-ud-card-sub">SMS Counts</span>
+            <span class="zy-ud-card-sub">Mon–Sun SMS</span>
           </div>
           <div class="${volGridClass}">
             ${volBoxesHtml}
@@ -3827,34 +3811,86 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <div class="zy-ud-card zy-ud-ranges-card">
           <div class="zy-ud-card-head">
             <div class="zy-ud-card-title"><i class="fas fa-globe"></i> Latest Ranges</div>
-            <span class="zy-ud-card-sub">Weekly Payouts</span>
+            <span class="zy-ud-card-sub">Active Rates</span>
           </div>
           ${rangesTableHtml}
         </div>
       </div>
 
-      <!-- Row 5: Top Access + Notifications -->
+      <!-- Row 5: Live Access Feed + Latest 10 App Links -->
       <div class="zy-ud-bot-row">
         <div class="zy-ud-card" style="display:flex;flex-direction:column;">
           <div class="zy-ud-card-head">
-            <div class="zy-ud-card-title"><i class="fas fa-fire"></i> Top Access</div>
-            <span class="zy-ud-card-sub">Top CLI + Range (Today)</span>
+            <div class="zy-ud-card-title"><span class="zy-live-pulse-dot" aria-hidden="true"></span> Live Access</div>
+            <span class="zy-ud-card-sub">Auto-Updating Live Feed</span>
           </div>
-          ${topAccessHtml}
+          <div id="${liveAccessHostId}" class="zy-ud-live-access-wrap">
+            <div class="zy-ud-empty"><i class="fas fa-tower-broadcast" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>Loading live access feed…</div>
+          </div>
         </div>
 
         <div class="zy-ud-card" style="display:flex;flex-direction:column;">
           <div class="zy-ud-card-head">
-            <div class="zy-ud-card-title"><i class="fas fa-bullhorn"></i> Notifications</div>
-            <span class="zy-ud-card-sub">Latest Updates</span>
+            <div class="zy-ud-card-title"><i class="fas fa-mobile-screen-button"></i> Apps &amp; Links</div>
+            <span class="zy-ud-card-sub">Latest 10 Apps</span>
           </div>
-          ${newsHtml}
+          ${appLinksHtml}
         </div>
       </div>
     </div>
   `;
 
   window.zyRenderWeeklyAreaChart(chartId, cfg.weeklyLabels, cfg.weeklyTraffic);
+
+  // Auto-updating Live Access feed widget (auto-stops when leaving dashboard)
+  const renderLiveAccessFeed = async () => {
+    const host = document.getElementById(liveAccessHostId);
+    if (!host) {
+      if (window._zyDashLiveAccessTimer) {
+        clearInterval(window._zyDashLiveAccessTimer);
+        window._zyDashLiveAccessTimer = null;
+      }
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/live-access?limit=8', { silent: true }).catch(() => null);
+      if (!document.getElementById(liveAccessHostId)) return;
+      const items = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
+      if (!items.length) {
+        host.innerHTML = `<div class="zy-ud-empty"><i class="fas fa-tower-broadcast" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No live SMS access events yet.</div>`;
+        return;
+      }
+      host.innerHTML = `
+        <div class="zy-ud-table-wrap">
+          <table class="zy-ud-table">
+            <thead>
+              <tr>
+                <th>CLI / App</th>
+                <th>Range</th>
+                <th class="r">Time (UTC)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${items.slice(0, 8).map(ev => {
+                const cli = ev.cli || ev.app || ev.service || '—';
+                const rng = ev.range_name || ev.range || ev.country || '—';
+                const ts = String(ev.timestamp || ev.created_at || ev.time || '').replace('T', ' ').slice(11, 19) || 'Live';
+                return `
+                  <tr class="zy-live-row-fade">
+                    <td><span class="zy-ud-cli-tag">${zyEsc(cli)}</span></td>
+                    <td><strong>${zyEsc(rng)}</strong></td>
+                    <td class="r zy-ud-num" style="color:var(--sp-text-muted);font-size:11.5px;">${zyEsc(ts)}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } catch (_) {}
+  };
+  renderLiveAccessFeed();
+  window._zyDashLiveAccessTimer = setInterval(renderLiveAccessFeed, 6000);
 };
 
 /* ═══ SAFE 1-CLICK CLIPBOARD COPY HELPER ═══ */

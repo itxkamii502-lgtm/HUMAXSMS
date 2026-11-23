@@ -599,6 +599,8 @@ function stopWebSockets() {
   activeWS = [];
   activePollers.forEach(id => { try { clearInterval(id); } catch (e) {} });
   activePollers = [];
+  if (window._vpsHealthTimer) { try { clearInterval(window._vpsHealthTimer); } catch (_) {} window._vpsHealthTimer = null; }
+  if (window._zyDashLiveAccessTimer) { try { clearInterval(window._zyDashLiveAccessTimer); } catch (_) {} window._zyDashLiveAccessTimer = null; }
 }
 
 function loadPage(page) {
@@ -620,6 +622,7 @@ function loadPage(page) {
 
   const pages = {
     'dashboard': renderDashboard,
+    'vps-health': () => { if (typeof window.renderVpsHealth === 'function') window.renderVpsHealth(); },
     'my-numbers': renderMyNumbers,
     'bulk-allocation': renderBulkAllocation,
     'allocation-history': renderAllocationHistory,
@@ -1468,9 +1471,11 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
       apiFetch('/api/agents?limit=5000')
     ]);
 
-    const ranges = (rangesData && rangesData.data) || (Array.isArray(rangesData) ? rangesData : []);
+    const ranges = ((rangesData && rangesData.data) || (Array.isArray(rangesData) ? rangesData : []))
+      .slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
     const rateCard = (rateCardData && rateCardData.data) || (Array.isArray(rateCardData) ? rateCardData : []);
-    const agents = (agentsData && agentsData.data) || (Array.isArray(agentsData) ? agentsData : []);
+    const agents = ((agentsData && agentsData.data) || (Array.isArray(agentsData) ? agentsData : []))
+      .slice().sort((a, b) => String(a.username || a.name || '').localeCompare(String(b.username || b.name || ''), undefined, { sensitivity: 'base' }));
 
     ZY_OWNER_RANGES = ranges;
     ZY_OWNER_AGENTS = agents;
@@ -1482,7 +1487,7 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
     ZY_OWNER_AG_BY_ID = {}; agents.forEach(a => { ZY_OWNER_AG_BY_ID[a.id] = a.username; });
     ZY_OWNER_CL_BY_ID = {};
 
-    // Populate Range Filter
+    // Populate Range Filter (A-Z)
     const rangeSel = document.getElementById('num-range-filter');
     if (rangeSel) {
       rangeSel.innerHTML = '<option value="">All Ranges</option>' + ranges.map(r => {
@@ -1492,7 +1497,7 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
       }).join('');
     }
 
-    // Populate Agent Filter
+    // Populate Agent Filter (A-Z)
     const agSel = document.getElementById('num-agent-filter');
     if (agSel) {
       agSel.innerHTML = '<option value="">All Agents</option>' + agents.map(a => `<option value="${escapeHtml(String(a.id))}">${escapeHtml(a.username || '')}</option>`).join('');
@@ -1587,21 +1592,22 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
       const isAssigned = !!(n.client_id || n.agent_id);
 
       const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
+      const isWnNum = Boolean(
+        n.is_whitenoise ||
+        (rInfo && rInfo.is_whitenoise) ||
+        String(n.provider || (rInfo && rInfo.provider) || '').toLowerCase().includes('whitenoise') ||
+        String(n.payout_schedule || (rInfo && rInfo.payout_schedule) || '').toLowerCase() === 'monthly30_5' ||
+        String(n.payterm || (rInfo && rInfo.payterm) || '').toLowerCase() === 'monthly'
+      );
       const rawNumBox = typeof zyRenderNumberCopyBox === 'function'
-        ? zyRenderNumberCopyBox(cleanNumber)
-        : `<span class="monospace fw-600">${escapeHtml(cleanNumber || '—')}</span>`;
+        ? zyRenderNumberCopyBox(cleanNumber, { isWn: isWnNum })
+        : `<span class="monospace fw-600${isWnNum ? ' zy-wn-number' : ''}">${escapeHtml(cleanNumber || '—')}</span>`;
       const numBox = isBlockedNum
         ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${escapeHtml(cleanNumber || '—')}</span>`
         : rawNumBox;
       const statusCell = isBlockedNum
         ? `<span class="badge badge-red" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-weight:700;"><i class="fas fa-ban"></i> Blocked${n.inactivity_days_limit ? ` (${n.inactivity_days_limit}d)` : ''}</span>`
         : statusBadge(n.status || 'active');
-      const isWnNum = Boolean(
-        n.is_whitenoise ||
-        (rInfo && rInfo.is_whitenoise) ||
-        String(n.provider || (rInfo && rInfo.provider) || '').toLowerCase().includes('whitenoise') ||
-        String(n.payout_schedule || (rInfo && rInfo.payout_schedule) || '').toLowerCase() === 'monthly30_5'
-      );
       const rangeCellHtml = isBlockedNum
         ? `<span style="color:#dc2626;font-weight:700;">${escapeHtml(rangeDisplayName)}</span>`
         : (isWnNum ? `<span class="zy-wn-range-name">${escapeHtml(rangeDisplayName)}</span>` : escapeHtml(rangeDisplayName));
@@ -1949,13 +1955,22 @@ async function openAuraAddNumberModal() {
       apiFetch('/api/numbers/sms-ranges').catch(() => []),
       apiFetch('/api/agents?limit=1000').catch(() => ({ data: [] }))
     ]);
-    ranges = (Array.isArray(rangesRes) ? rangesRes : (rangesRes && rangesRes.data)) || [];
-    agents = (agentsRes && agentsRes.data) || [];
+    ranges = (((Array.isArray(rangesRes) ? rangesRes : (rangesRes && rangesRes.data)) || []))
+      .slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
+    agents = (((agentsRes && agentsRes.data) || []))
+      .slice().sort((a, b) => String(a.username || a.name || '').localeCompare(String(b.username || b.name || ''), undefined, { sensitivity: 'base' }));
   } catch (err) {
     console.warn('Could not pre-fetch ranges/agents:', err);
   }
 
-  const rangeOptions = ranges.map(r => `<option value="${r.id}">${zyEsc(r.range_name || r.name || r.country || r.id)} (${zyEsc(r.prefix || '')})</option>`).join('');
+  window._auraModalRangesById = {};
+  ranges.forEach(r => { window._auraModalRangesById[String(r.id)] = r; });
+
+  const rangeOptions = ranges.map(r => {
+    const resolved = typeof zyResolveRangePaytermRates === 'function' ? zyResolveRangePaytermRates(r) : { isWn: Boolean(r.is_whitenoise) };
+    const tag = resolved.isWn ? ' [Monthly 30/5 {W}]' : '';
+    return `<option value="${r.id}">${zyEsc(r.range_name || r.name || r.country || r.id)} (${zyEsc(r.prefix || '')})${tag}</option>`;
+  }).join('');
   const agentOptions = agents.map(a => `<option value="${a.id}">${zyEsc(a.username || a.name || a.id)}</option>`).join('');
 
   openModal('Add Numbers (AURA 4-in-1 Softswitch)', `
@@ -1968,7 +1983,7 @@ async function openAuraAddNumberModal() {
           </h5>
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Select Range *</label>
-            <select id="aura-num-range" class="form-control" required style="width:100%;height:30px;font-size:12px;">
+            <select id="aura-num-range" class="form-control" required style="width:100%;height:30px;font-size:12px;" onchange="zySyncAuraRangePayterm(this.value)">
               <option value="">-- Choose Range --</option>
               ${rangeOptions}
             </select>
@@ -2048,7 +2063,6 @@ async function openAuraAddNumberModal() {
             <label class="form-label" style="font-size:11px;font-weight:700;">Payterm</label>
             <select id="aura-num-payterm" class="form-control" style="width:100%;height:30px;font-size:12px;">
               <option value="Weekly" selected>Weekly (7/3) — 3d Hold</option>
-              <option value="Biweekly">Biweekly (15/3) — 3d Hold</option>
               <option value="Monthly">Monthly (30/5) {W} — 5d Hold</option>
             </select>
           </div>
@@ -2066,6 +2080,14 @@ async function openAuraAddNumberModal() {
     </form>
   `);
 }
+
+window.zySyncAuraRangePayterm = function(rangeId) {
+  const r = (window._auraModalRangesById || {})[String(rangeId)];
+  const ptEl = document.getElementById('aura-num-payterm');
+  if (!r || !ptEl) return;
+  const resolved = typeof zyResolveRangePaytermRates === 'function' ? zyResolveRangePaytermRates(r) : { isWn: Boolean(r.is_whitenoise) };
+  ptEl.value = resolved.isWn ? 'Monthly' : 'Weekly';
+};
 
 window.switchAuraNumMode = function(mode) {
   document.getElementById('aura-mode-single').style.display = mode === 'single' ? 'block' : 'none';
@@ -2123,6 +2145,10 @@ async function submitAuraAddNumber(event) {
   }
 
   try {
+    const selectedRange = (window._auraModalRangesById || {})[String(rangeId)] || null;
+    const rangeIsWn = selectedRange && typeof zyResolveRangePaytermRates === 'function' ? zyResolveRangePaytermRates(selectedRange).isWn : false;
+    const rawPt = document.getElementById('aura-num-payterm')?.value || (rangeIsWn ? 'Monthly' : 'Weekly');
+    const isMonthlyPt = rawPt === 'Monthly' || rangeIsWn;
     const payload = {
       range_id: rangeId,
       numbers: numberList.join('\n'),
@@ -2131,7 +2157,9 @@ async function submitAuraAddNumber(event) {
       max_sms_week: parseInt(document.getElementById('aura-num-max-week')?.value, 10) || 0,
       test_auto: 'none',
       agent_id: document.getElementById('aura-num-agent')?.value || '',
-      payterm: document.getElementById('aura-num-payterm')?.value || 'Weekly',
+      payterm: isMonthlyPt ? 'Monthly' : 'Weekly',
+      payout_schedule: isMonthlyPt ? 'monthly30_5' : 'weekly7_3',
+      is_whitenoise: isMonthlyPt,
       agent_rate: parseFloat(document.getElementById('aura-num-rate')?.value) || 0
     };
 
@@ -2479,24 +2507,31 @@ function zyResolveRangePaytermRates(r) {
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : null;
   };
+  const rawW = readNum(pts['Weekly'] !== undefined ? pts['Weekly'] : pts['7/3']);
+  const rawM = readNum(pts['Monthly'] !== undefined ? pts['Monthly'] : pts['30/5']);
+  const ptStr = String((r && (r.payterm || r.client_payterm || r.agent_payterm)) || '').toLowerCase();
+  const activePts = Array.isArray(r && r.active_payterms) ? r.active_payterms.map(x => String(x || '').toLowerCase()) : [];
   const isWn = Boolean(
     (r && r.is_whitenoise) ||
     String((r && r.provider) || '').toLowerCase().includes('whitenoise') ||
     String((r && r.payout_schedule) || '').toLowerCase() === 'monthly30_5' ||
-    String((r && (r.range_name || r.name)) || '').toLowerCase().includes('whitenoise')
+    String((r && (r.range_name || r.name)) || '').toLowerCase().includes('whitenoise') ||
+    ptStr === 'monthly' || ptStr === '30/5' || ptStr === 'monthly30_5' ||
+    (activePts.includes('monthly') && !activePts.includes('weekly')) ||
+    (rawM !== null && rawW === null)
   );
-  const rawW = readNum(pts['Weekly'] !== undefined ? pts['Weekly'] : pts['7/3']);
-  const rawM = readNum(pts['Monthly'] !== undefined ? pts['Monthly'] : pts['30/5']);
   const fallbackRate = readNum(r && r.payout) ?? 0;
 
   if (isWn) {
     return {
+      isWn: true,
       activeKeys: ['Monthly'],
       Weekly: null,
       Monthly: rawM !== null ? rawM : fallbackRate
     };
   }
   return {
+    isWn: false,
     activeKeys: ['Weekly'],
     Weekly: rawW !== null ? rawW : fallbackRate,
     Monthly: null
@@ -2796,10 +2831,14 @@ async function submitAddRange(event) {
       return;
     }
 
-    const isWn = provider.toLowerCase().includes('whitenoise') || range_name.toLowerCase().includes('whitenoise');
-    const payterms = {};
     const parsedW = rawW !== '' && !isNaN(parseFloat(rawW)) ? parseFloat(rawW) : null;
     const parsedM = rawM !== '' && !isNaN(parseFloat(rawM)) ? parseFloat(rawM) : null;
+    const isWn = Boolean(
+      provider.toLowerCase().includes('whitenoise') ||
+      range_name.toLowerCase().includes('whitenoise') ||
+      (parsedM !== null && parsedW === null)
+    );
+    const payterms = {};
 
     if (isWn) {
       const wnRate = parsedM !== null ? parsedM : parsedW;
@@ -2839,6 +2878,10 @@ async function submitAddRange(event) {
       cost: companyCost,
       payout: primaryPayout,
       payterm: primaryPayterm,
+      payout_schedule: isWn ? 'monthly30_5' : 'weekly7_3',
+      cycle_days: isWn ? 30 : 7,
+      hold_days: isWn ? 5 : 3,
+      is_whitenoise: isWn,
       payterms,
       active_payterms,
       otp_limit: parseInt(document.getElementById('range-otplimit')?.value) || 0,
@@ -3018,14 +3061,16 @@ async function submitEditRange(event, rangeId) {
   try {
     const range_name = document.getElementById('er-name').value.trim();
     const providerVal = document.getElementById('er-provider').value.trim() || 'Manual';
-    const isWn = providerVal.toLowerCase().includes('whitenoise') || range_name.toLowerCase().includes('whitenoise');
     const companyCost = parseFloat(document.getElementById('er-company-cost').value) || 0;
-
     const rawW = (document.getElementById('er-pt-weekly')?.value ?? '').trim();
     const rawM = (document.getElementById('er-pt-monthly')?.value ?? '').trim();
-
     const parsedW = rawW !== '' && !isNaN(parseFloat(rawW)) ? parseFloat(rawW) : null;
     const parsedM = rawM !== '' && !isNaN(parseFloat(rawM)) ? parseFloat(rawM) : null;
+    const isWn = Boolean(
+      providerVal.toLowerCase().includes('whitenoise') ||
+      range_name.toLowerCase().includes('whitenoise') ||
+      (parsedM !== null && parsedW === null)
+    );
     const payterms = {};
 
     if (isWn) {
@@ -3061,6 +3106,10 @@ async function submitEditRange(event, rangeId) {
       cost: companyCost,
       payout: primaryPayout,
       payterm: primaryPayterm,
+      payout_schedule: isWn ? 'monthly30_5' : 'weekly7_3',
+      cycle_days: isWn ? 30 : 7,
+      hold_days: isWn ? 5 : 3,
+      is_whitenoise: isWn,
       payterms,
       active_payterms,
       otp_limit: parseInt(document.getElementById('er-otplimit').value) || 0,

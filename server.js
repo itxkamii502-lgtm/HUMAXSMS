@@ -3,6 +3,7 @@ import compression from 'compression';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -466,8 +467,8 @@ function buildSmsContentKey(num, msg, rawTs) {
   if (!nKey || !mKey) return '';
   if (rawTs && !isRelativeTimestampStr(rawTs)) {
     const iso = normalizeIsoTimestamp(rawTs);
-    // Minute precision protects against sub-second formatting variance across polls
-    return `c:${md5(`${nKey}|${iso.slice(0, 16)}|${mKey}`)}`;
+    // Exact second precision so two real OTPs in the same minute with distinct timestamps never collide
+    return `c:${md5(`${nKey}|${iso.slice(0, 19)}|${mKey}`)}`;
   }
   return '';
 }
@@ -478,7 +479,7 @@ function buildSmsBodyKey(num, msg) {
   return `b:${md5(`${nKey}|${mKey}`)}`;
 }
 
-// Duplicate detection index (sms_id / ext_key / canonical content / recent body window)
+// Duplicate detection index (sms_id / ext_key / canonical content / short no-timestamp body guard)
 const smsIdx = { set: new Set(), bodyLastTs: new Map(), len: -1, ref: null };
 function smsIndexAddRow(r) {
   if (!r) return;
@@ -512,15 +513,15 @@ function smsIndexHas(log, dedupeKey, smsId, { number = '', message = '', rawTime
     if (hasRealTimestamp && rawTimestamp) {
       const cKey = buildSmsContentKey(number, message, rawTimestamp);
       if (cKey && smsIdx.set.has(cKey)) return true;
+      // When the provider supplies a real timestamp, do NOT drop distinct-timestamp OTPs via a body window
+      return false;
     }
     const bKey = buildSmsBodyKey(number, message);
     if (bKey && smsIdx.bodyLastTs.has(bKey)) {
       const prevMs = smsIdx.bodyLastTs.get(bKey) || 0;
       const nowMs = Date.now();
-      // If source omitted a real timestamp (or sent relative time like "2 mins ago"), block same number+message for 24h;
-      // even with a timestamp, block identical number+message within 90s to stop clock-drift / multi-source dupes.
-      const windowMs = hasRealTimestamp ? 90 * 1000 : 24 * 3600 * 1000;
-      if (Math.abs(nowMs - prevMs) <= windowMs) return true;
+      // Only guard rapid duplicate polls (20s) when a provider omits timestamps entirely — never block for 24h
+      if (Math.abs(nowMs - prevMs) <= 20 * 1000) return true;
     }
   }
   return false;
@@ -1146,6 +1147,17 @@ function normalizeIsoTimestamp(raw) {
   const dmyIso = parseWhitenoiseTimestamp(s);
   if (dmyIso) return dmyIso;
 
+  // Treat plain "YYYY-MM-DD HH:mm:ss" or "YYYY-MM-DDTHH:mm:ss" (no TZ offset) strictly as UTC
+  if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s)) {
+    const utcCandidate = s.replace(' ', 'T') + 'Z';
+    const dUtc = new Date(utcCandidate);
+    if (!isNaN(dUtc.getTime())) return dUtc.toISOString();
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const dDate = new Date(s + 'T00:00:00Z');
+    if (!isNaN(dDate.getTime())) return dDate.toISOString();
+  }
+
   let d = new Date(s);
   if (!isNaN(d.getTime())) return d.toISOString();
 
@@ -1184,19 +1196,14 @@ function extractDateStr(s) {
 
 function getDateRangeBuckets() {
   const now = new Date();
+  // Strict UTC day boundaries (00:00:00 UTC to 23:59:59 UTC) — never leak local/PKT midnight into Today
   const utcToday = now.toISOString().slice(0, 10);
-  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const todaySet = new Set([utcToday, localToday]);
+  const todaySet = new Set([utcToday]);
 
-  const yestUtc = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const yestLocalObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  const yestLocal = `${yestLocalObj.getFullYear()}-${String(yestLocalObj.getMonth() + 1).padStart(2, '0')}-${String(yestLocalObj.getDate()).padStart(2, '0')}`;
-  const yesterdaySet = new Set([yestUtc, yestLocal]);
-  yesterdaySet.delete(utcToday);
-  yesterdaySet.delete(localToday);
+  const yestUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString().slice(0, 10);
+  const yesterdaySet = new Set([yestUtc]);
 
   // Standardize week/month/year boundaries on UTC Monday 00:00 (Monday 05:00 AM PKT)
-  // matching getAgentClientWeeklyPkrStats and period-stats so server TZ never causes drift.
   const utcDayOfWeek = (now.getUTCDay() + 6) % 7;
   const startOfWeekUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - utcDayOfWeek));
   const weekStartStr = startOfWeekUtc.toISOString().slice(0, 10);
@@ -1729,6 +1736,21 @@ function isWhitenoiseRecord(obj, rangesMap = null, wnTags = null) {
   if (obj.is_whitenoise === true) return true;
   if (String(obj.source || '').trim().toLowerCase() === 'whitenoise') return true;
   if (obj.whitenoise_sms_id != null && obj.whitenoise_sms_id !== '') return true;
+  // Honor explicit Monthly (30/5) {W} payterm/schedule so Monthly ranges never revert to Weekly
+  if (String(obj.payout_schedule || '').trim().toLowerCase() === 'monthly30_5') return true;
+  if (obj.payterm && normalizePaytermKey(obj.payterm) === 'Monthly') return true;
+  if (obj.client_payterm && normalizePaytermKey(obj.client_payterm) === 'Monthly') return true;
+  if (Array.isArray(obj.active_payterms) && obj.active_payterms.length) {
+    const normList = obj.active_payterms.map(p => normalizePaytermKey(p));
+    if (normList.includes('Monthly') && !normList.includes('Weekly')) return true;
+  }
+  if (obj.payterms && typeof obj.payterms === 'object' && !Array.isArray(obj.payterms)) {
+    const hasM = (obj.payterms['Monthly'] !== undefined && obj.payterms['Monthly'] !== '' && obj.payterms['Monthly'] !== null && obj.payterms['Monthly'] !== 'NA')
+      || (obj.payterms['30/5'] !== undefined && obj.payterms['30/5'] !== '' && obj.payterms['30/5'] !== null && obj.payterms['30/5'] !== 'NA');
+    const hasW = (obj.payterms['Weekly'] !== undefined && obj.payterms['Weekly'] !== '' && obj.payterms['Weekly'] !== null && obj.payterms['Weekly'] !== 'NA')
+      || (obj.payterms['7/3'] !== undefined && obj.payterms['7/3'] !== '' && obj.payterms['7/3'] !== null && obj.payterms['7/3'] !== 'NA');
+    if (hasM && !hasW) return true;
+  }
   const tags = wnTags || getWhitenoiseProviderTags();
   const candidates = [obj.provider, obj.panel_name, obj.range_name, obj.range_label, obj.range, obj.name];
   for (const c of candidates) {
@@ -3067,12 +3089,12 @@ async function pollSingleCrApiConnection(connId, force = false) {
   try {
     const base = assertSafeExternalUrl(conn.panel_url, 'CR API Panel URL');
     const sep = base.includes('?') ? '&' : '?';
-    // Use records=100 for reliable polling, deduplicating locally via ingestSms
+    // Use records=500 so high-volume OTP bursts never overflow a single poll window
     const hasTokenParam = /[?&]token=/i.test(base);
     const hasRecordsParam = /[?&]records=/i.test(base);
     const pollUrl = hasTokenParam
-      ? (hasRecordsParam ? base : `${base}${sep}records=100`)
-      : `${base}${sep}token=${encodeURIComponent(conn.token)}${hasRecordsParam ? '' : '&records=100'}`;
+      ? (hasRecordsParam ? base : `${base}${sep}records=500`)
+      : `${base}${sep}token=${encodeURIComponent(conn.token)}${hasRecordsParam ? '' : '&records=500'}`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
@@ -3131,6 +3153,7 @@ async function pollSingleCrApiConnection(connId, force = false) {
       let rowCountry = '';
       let rowProvider = '';
       let rowCurrency = '';
+      let rowExtId = '';
       let payoutVal;
 
       if (Array.isArray(row)) {
@@ -3155,6 +3178,7 @@ async function pollSingleCrApiConnection(connId, force = false) {
           msg = String(row[3] || '').trim();
         }
       } else if (row && typeof row === 'object') {
+        rowExtId = String(row.id ?? row.sms_id ?? row.uid ?? row.msgid ?? row.message_id ?? '').trim();
         num = String(row.num ?? row.number ?? row.to ?? row.to_number ?? row.destination ?? row.dst ?? row.msisdn ?? row.phone ?? row.receiver ?? row.recipient ?? '').trim();
         cli = String(row.cli ?? row.sender ?? row.from ?? row.sender_id ?? row.sid ?? row.originator ?? row.src ?? row.service ?? row.app ?? '').trim();
         msg = String(row.message ?? row.sms ?? row.sms_text ?? row.text ?? row.msg ?? row.body ?? row.content ?? row.otp_message ?? '').trim();
@@ -3171,9 +3195,11 @@ async function pollSingleCrApiConnection(connId, force = false) {
       const cleanDt = (dt && !isRelativeTimestampStr(dt)) ? dt : '';
       const normNum = normalizePhoneKey(num);
       const normMsg = normalizeMsgKey(msg);
-      const smsId = cleanDt
-        ? `crapi-${conn.id}-${md5(`${cleanDt}|${normNum}|${cli}|${normMsg}`).slice(0, 16)}`
-        : `crapi-${conn.id}-${md5(`${normNum}|${cli}|${normMsg}`).slice(0, 16)}`;
+      const smsId = rowExtId
+        ? `crapi-${conn.id}-id-${md5(`${rowExtId}|${normNum}`).slice(0, 16)}`
+        : (cleanDt
+            ? `crapi-${conn.id}-${md5(`${cleanDt}|${normNum}|${cli}|${normMsg}`).slice(0, 16)}`
+            : `crapi-${conn.id}-${md5(`${normNum}|${cli}|${normMsg}|${Math.floor(Date.now() / 20000)}`).slice(0, 16)}`);
       const ingestRes = ingestSms({
         sender: cli,
         to_number: num,
@@ -3200,9 +3226,9 @@ async function pollSingleCrApiConnection(connId, force = false) {
   } catch (err) {
     lastStatus = `Error — ${String(err.message).slice(0, 180)}`;
     const prev = crApiBackoff.get(connId) || { errors: 0, nextAllowedAt: 0 };
-    const errs = Math.min(prev.errors + 1, 6);
+    const errs = Math.min(prev.errors + 1, 4);
     const baseSec = Math.max(5, parseInt(conn.interval) || 10);
-    const delaySec = Math.min(120, baseSec * Math.pow(2, errs - 1));
+    const delaySec = Math.min(30, baseSec * Math.pow(2, errs - 1));
     crApiBackoff.set(connId, { errors: errs, nextAllowedAt: Date.now() + delaySec * 1000 });
   } finally {
     crApiInFlight.delete(connId);
@@ -6662,6 +6688,9 @@ function savePersistedSessions() {
 
 loadPersistedSessions();
 
+const TWO_FA_TRUST_WINDOW_SEC = 3 * 60 * 60; // 3 hours
+const TWO_FA_TRUST_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || crypto.createHash('sha256').update(DATA_DIR + ':humex-2fa-trust-v1').digest('hex');
+
 function parseCookies(req) {
   const list = {};
   const rc = req && req.headers && req.headers.cookie;
@@ -6674,6 +6703,33 @@ function parseCookies(req) {
     });
   }
   return list;
+}
+
+function sign2faTrustToken(source, userId) {
+  const exp = Date.now() + TWO_FA_TRUST_WINDOW_SEC * 1000;
+  const payload = `${source}:${Number(userId)}:${exp}`;
+  const sig = crypto.createHmac('sha256', TWO_FA_TRUST_SECRET).update(payload).digest('hex').slice(0, 32);
+  return `${payload}.${sig}`;
+}
+
+function verify2faTrustCookie(req, source, userId) {
+  try {
+    const cookies = parseCookies(req);
+    const raw = cookies['humex_2fa_trust'];
+    if (!raw || !raw.includes('.')) return false;
+    const [payload, sig] = raw.split('.');
+    if (!payload || !sig) return false;
+    const expectedSig = crypto.createHmac('sha256', TWO_FA_TRUST_SECRET).update(payload).digest('hex').slice(0, 32);
+    if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
+      return false;
+    }
+    const [src, uid, expStr] = payload.split(':');
+    const exp = Number(expStr);
+    if (src !== String(source) || Number(uid) !== Number(userId)) return false;
+    return Number.isFinite(exp) && Date.now() < exp;
+  } catch (_) {
+    return false;
+  }
 }
 
 function getSessionToken(req) {
@@ -7023,10 +7079,12 @@ const API_RULES = [
   { p: /^\/numbers\/(upload|import-to-range|bulk-range-import|smart-sheet-preview|smart-sheet-commit|bulk-delete-many|download|test|blacklist)(\/.*)?$/, roles: ['owner'] },
   { m: new Set(['POST']), p: /^\/numbers$/, roles: ['owner'] },
   { m: new Set(['DELETE']), p: /^\/numbers\/[^/]+$/, roles: ['owner'] },
-  { p: /^\/numbers\/(bulk-allocate|allocation-history|blocked)(\/.*)?$/, roles: ['owner', 'agent'] },
+  { p: /^\/numbers\/(bulk-allocate|allocation-history)(\/.*)?$/, roles: ['owner', 'agent'] },
+  { m: WRITE_METHODS, p: /^\/numbers\/blocked(\/.*)?$/, roles: ['owner', 'agent'] },
   { m: WRITE_METHODS, p: /^\/(audit-logs|login-activity)(\/|$)/, roles: ['owner'] },
   { p: /^\/rate-limits(\/|$)/, roles: ['owner'] },
-  { m: WRITE_METHODS, p: /^\/(settings|services|registration-requests|payterms|monthly-cycle|app-links|announcements)(\/|$)/, roles: ['owner'] },
+  { m: WRITE_METHODS, p: /^\/(settings|services|registration-requests|payterms|monthly-cycle|announcements)(\/|$)/, roles: ['owner'] },
+  { m: WRITE_METHODS, p: /^\/app-links(\/|$)/, roles: ['owner', 'agent'] },
   { m: WRITE_METHODS, p: /^\/numbers\/(sms-ranges|rate-card)(\/.*)?$/, roles: ['owner'] },
   { m: WRITE_METHODS, p: /^\/number-transfers(\/|$)/, roles: ['owner'] },
   { m: new Set(['POST']), p: /^\/notifications$/, roles: ['owner'] },
@@ -7041,6 +7099,7 @@ const CLIENT_ALLOW = [
   { p: /^\/(auth|user|account|notifications|support-tickets|chat)(\/|$)/ },
   { m: new Set(['GET']), p: /^\/(settings|announcements|payterms|monthly-cycle|app-links|live-access)(\/|$)/ },
   { m: new Set(['GET']), p: /^\/numbers$/ },
+  { m: new Set(['GET']), p: /^\/numbers\/blocked$/ },
   { m: new Set(['GET']), p: /^\/numbers\/sms-ranges$/ },
   { m: new Set(['GET']), p: /^\/numbers\/rate-card$/ },
   { m: new Set(['GET']), p: /^\/numbers\/allocation-policy$/ },
@@ -7177,23 +7236,10 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(400).json({ success: false, error: 'Username and password are required', detail: 'Username and password are required' });
   }
 
-  // Strict math captcha verification (always required)
-  cleanExpiredCaptchas();
-  if (!captcha_id || captcha_answer === undefined || String(captcha_answer).trim() === '') {
-    return res.status(400).json({ success: false, error: 'Please enter the correct answer to the math captcha.', detail: 'Missing captcha' });
-  }
-  const capRecord = activeCaptchas.get(String(captcha_id));
-  if (!capRecord || Date.now() > capRecord.expires) {
-    if (capRecord) activeCaptchas.delete(String(captcha_id));
-    return res.status(400).json({ success: false, error: 'Captcha expired. Please refresh and try again.', detail: 'Captcha expired' });
-  }
-  const parsedAns = parseInt(String(captcha_answer).trim(), 10);
-  if (isNaN(parsedAns) || parsedAns !== capRecord.answer) {
+  // Login captcha removed per owner configuration (brute-force & rate limiting remain active)
+  if (captcha_id) {
     activeCaptchas.delete(String(captcha_id));
-    return res.status(400).json({ success: false, error: 'Incorrect captcha answer. Please try again.', detail: 'Invalid captcha' });
   }
-  // Captcha is single-use: consume immediately upon verification
-  activeCaptchas.delete(String(captcha_id));
 
   const clientIp = req.ip || (req.socket && req.socket.remoteAddress) || '127.0.0.1';
   if (isIpBlocked(clientIp)) {
@@ -7270,28 +7316,33 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(403).json({ success: false, error: 'Account inactive or suspended', detail: 'Account inactive or suspended' });
     }
 
-    // ── TWO-FACTOR AUTHENTICATION (2FA) CHECK ──
+    // ── TWO-FACTOR AUTHENTICATION (2FA) CHECK (3-Hour Trusted Device Window) ──
+    let issue2faTrustCookie = false;
     if (user.two_fa && user.two_fa_secret) {
-      if (!two_fa_code) {
-        if (isRateLimited('login_2fa_prompt:' + source + ':' + user.id, 10, 15 * 60 * 1000)) {
-          return res.status(429).json({ success: false, error: 'Too many 2FA challenges. Please wait 15 minutes.', detail: 'Rate limit exceeded' });
+      const hasValid2faTrust = verify2faTrustCookie(req, source, user.id);
+      if (!hasValid2faTrust) {
+        if (!two_fa_code) {
+          if (isRateLimited('login_2fa_prompt:' + source + ':' + user.id, 10, 15 * 60 * 1000)) {
+            return res.status(429).json({ success: false, error: 'Too many 2FA challenges. Please wait 15 minutes.', detail: 'Rate limit exceeded' });
+          }
+          return res.json({
+            success: false,
+            require_2fa: true,
+            message: 'Enter your 2FA code.'
+          });
         }
-        return res.json({
-          success: false,
-          require_2fa: true,
-          message: 'Enter your 2FA code.'
-        });
-      }
-      const is2faValid = verifyTotp(two_fa_code, user.two_fa_secret) ||
-        (Array.isArray(user.two_fa_backup_codes) && user.two_fa_backup_codes.includes(String(two_fa_code).trim()));
-      if (!is2faValid) {
-        isRateLimited(userLockKey, maxLoginAttempts, 15 * 60 * 1000);
-        isRateLimited(acctLockKey, maxLoginAttempts, 15 * 60 * 1000);
-        return res.status(401).json({
-          success: false,
-          require_2fa: true,
-          error: 'Invalid 2FA code. Please check your Authenticator app.'
-        });
+        const is2faValid = verifyTotp(two_fa_code, user.two_fa_secret) ||
+          (Array.isArray(user.two_fa_backup_codes) && user.two_fa_backup_codes.includes(String(two_fa_code).trim()));
+        if (!is2faValid) {
+          isRateLimited(userLockKey, maxLoginAttempts, 15 * 60 * 1000);
+          isRateLimited(acctLockKey, maxLoginAttempts, 15 * 60 * 1000);
+          return res.status(401).json({
+            success: false,
+            require_2fa: true,
+            error: 'Invalid 2FA code. Please check your Authenticator app.'
+          });
+        }
+        issue2faTrustCookie = true;
       }
     }
 
@@ -7332,11 +7383,16 @@ app.post('/api/auth/login', (req, res) => {
     const sameSite = isHttps ? 'None' : 'Lax';
 
     // Set secure HTTP session cookies with HttpOnly protection (iframe friendly)
-    res.setHeader('Set-Cookie', [
+    const cookiesToSet = [
       `humex_session_token=${sessionToken}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=86400${sec}`,
       `humex_session_role=${role}; Path=/; SameSite=${sameSite}; Max-Age=86400${sec}`,
       `session_token=${sessionToken}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=86400${sec}`
-    ]);
+    ];
+    if (issue2faTrustCookie) {
+      const trustToken = sign2faTrustToken(source, user.id);
+      cookiesToSet.push(`humex_2fa_trust=${trustToken}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${TWO_FA_TRUST_WINDOW_SEC}${sec}`);
+    }
+    res.setHeader('Set-Cookie', cookiesToSet);
 
     rateLimitBuckets.delete(userLockKey);
     rateLimitBuckets.delete(acctLockKey);
@@ -7934,19 +7990,14 @@ app.get('/api/sms/period-stats', (req, res) => {
     return res.json(cached.data);
   }
 
-  // 1. Today & Yesterday: calendar day in UTC + local
+  // 1. Today & Yesterday: strict UTC calendar day (00:00:00 UTC to 23:59:59 UTC)
   const todayStartUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
   const todayStartMs = todayStartUtc.getTime();
   const todayDateStr = todayStartUtc.toISOString().slice(0, 10);
-  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const todaySet = new Set([todayDateStr, localTodayStr]);
+  const todaySet = new Set([todayDateStr]);
 
   const yestUtcStr = new Date(todayStartMs - 86400000).toISOString().slice(0, 10);
-  const yestLocalObj = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  const yestLocalStr = `${yestLocalObj.getFullYear()}-${String(yestLocalObj.getMonth() + 1).padStart(2, '0')}-${String(yestLocalObj.getDate()).padStart(2, '0')}`;
-  const yesterdaySet = new Set([yestUtcStr, yestLocalStr]);
-  yesterdaySet.delete(todayDateStr);
-  yesterdaySet.delete(localTodayStr);
+  const yesterdaySet = new Set([yestUtcStr]);
 
   // 2. Weekly SMS: calendar week Monday 00:00 UTC to now
   const dayOffset = (now.getUTCDay() + 6) % 7;
@@ -8430,6 +8481,7 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
     }
   });
 
+  enriched.sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base', numeric: true }));
   res.json(enriched);
 });
 
@@ -8466,6 +8518,7 @@ app.get('/api/rates/agent-card', requireAuth, (req, res) => {
       payterm: ptInfo.primary_payterm
     };
   });
+  card.sort((a, b) => String(a.range_name || a.country || '').localeCompare(String(b.range_name || b.country || ''), undefined, { sensitivity: 'base', numeric: true }));
   res.json({ success: true, ranges: card });
 });
 
@@ -8531,11 +8584,8 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
     };
   });
 
-  // Pending / unconfigured ranges appear at the TOP for quick Agent setup
-  items.sort((a, b) => {
-    if (a.configured !== b.configured) return a.configured ? 1 : -1;
-    return Number(b.range_id) - Number(a.range_id);
-  });
+  // Strict A-to-Z alphabetical sort by range name
+  items.sort((a, b) => String(a.range_name || a.country || '').localeCompare(String(b.range_name || b.country || ''), undefined, { sensitivity: 'base', numeric: true }));
 
   const pendingCount = items.filter(i => !i.configured).length;
   res.json({
@@ -8800,6 +8850,8 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
     });
   }
 
+  card.sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base', numeric: true }));
+
   res.json({
     success: true,
     currency: 'PKR',
@@ -8942,14 +8994,26 @@ app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
   };
   writeDb('sms_ranges', ranges);
 
-  // Synchronize range_name into numbers database if changed
-  if (rangeName) {
+  // Synchronize range_name & payterm metadata into numbers database when range is updated
+  {
     let numbers = readDb('numbers') || [];
     let changed = false;
     numbers.forEach(n => {
       if (n.range_id && Number(n.range_id) === id) {
-        n.range_name = rangeName;
-        changed = true;
+        if (rangeName && n.range_name !== rangeName) {
+          n.range_name = rangeName;
+          changed = true;
+        }
+        if (n.payterm !== ptMeta.key || n.payout_schedule !== ptMeta.schedule || Boolean(n.is_whitenoise) !== Boolean(isWnRng)) {
+          n.payterm = ptMeta.key;
+          if (!n.client_id || n.client_payterm !== ptMeta.key) n.client_payterm = ptMeta.key;
+          n.payout_schedule = ptMeta.schedule;
+          n.cycle_days = ptMeta.cycle_days;
+          n.hold_days = ptMeta.hold_days;
+          if (isWnRng) n.is_whitenoise = true;
+          else delete n.is_whitenoise;
+          changed = true;
+        }
       }
     });
     if (changed) writeDb('numbers', numbers);
@@ -9001,7 +9065,9 @@ app.delete('/api/numbers/sms-ranges/:id', (req, res) => {
 app.post('/api/numbers/import-to-range', (req, res) => {
   try {
     const payload = req.body || {};
-    const numbersText = payload.numbers || '';
+    const numbersText = Array.isArray(payload.numbers)
+      ? payload.numbers.map(v => String(v || '').trim()).filter(Boolean).join('\n')
+      : String(payload.numbers || '');
     const lines = numbersText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     if (!lines.length) {
       return res.status(400).json({ error: 'No numbers provided' });
@@ -9084,6 +9150,8 @@ app.post('/api/numbers/import-to-range', (req, res) => {
     const targetRangeId = Number(rng.id);
     const targetRangeName = rng.range_name || rng.name || rng.country || 'Range';
     const isWnTargetRng = isWhitenoiseRecord(rng);
+    const targetPtInfo = resolveRangeActivePayterms(rng, isWnTargetRng);
+    const targetPtMeta = getPaytermMeta(targetPtInfo.primary_payterm);
 
     for (let i = 0; i < validLines.length; i++) {
       const num = validLines[i];
@@ -9123,7 +9191,12 @@ app.post('/api/numbers/import-to-range', (req, res) => {
         user: 'unallocated',
         country: countryOverride || rng.country || '',
         provider: rng.provider || 'Manual',
-        ...(isWnTargetRng ? { is_whitenoise: true, payterm: 'Monthly', client_payterm: 'Monthly', payout_schedule: 'monthly30_5', cycle_days: 30, hold_days: 5 } : {}),
+        payterm: targetPtMeta.key,
+        client_payterm: targetPtMeta.key,
+        payout_schedule: targetPtMeta.schedule,
+        cycle_days: targetPtMeta.cycle_days,
+        hold_days: targetPtMeta.hold_days,
+        ...(isWnTargetRng ? { is_whitenoise: true } : {}),
         otp_limit: rng.otp_limit || 0,
         created_at: importNowIso,
         created: importNowIso,
@@ -10091,23 +10164,61 @@ function parseAppLinksExcelBuffer(buffer, filename = 'services.xlsx') {
 
 app.get('/api/app-links', requireAuth, (req, res) => {
   const role = normRole(req.sessionUser.role);
-  if (!hasAppLinksAccess(req.sessionUser)) {
+  const isDashWidget = String(req.query.dashboard || '') === '1';
+  if (!isDashWidget && !hasAppLinksAccess(req.sessionUser)) {
     return res.status(403).json({ error: 'Apps Links access is not enabled for your account.' });
   }
   const allLinks = sortAppLinksList(readDb('app_links') || []);
-  const items = role === 'owner' ? allLinks : allLinks.filter(item => item.visible !== false);
+  let items;
+  if (role === 'owner') {
+    items = isDashWidget ? allLinks.filter(item => item.visible !== false && !item.agent_id) : allLinks;
+  } else if (role === 'agent') {
+    const myId = Number(req.sessionUser.id);
+    items = allLinks.filter(item => {
+      if (Number(item.agent_id) === myId) return isDashWidget ? item.visible !== false : true;
+      return !item.agent_id && item.visible !== false;
+    });
+  } else {
+    // Client sees their Agent's scoped app links first, plus Owner global visible app links
+    const clients = readDb('clients') || [];
+    const cl = clients.find(c => Number(c.id) === Number(req.sessionUser.id));
+    const agId = cl && cl.agent_id != null ? Number(cl.agent_id) : Number(req.sessionUser.agent_id || 0);
+    items = allLinks.filter(item => item.visible !== false && (!item.agent_id || (agId && Number(item.agent_id) === agId)));
+    // Prioritize Agent's custom links above global links on dashboard
+    items.sort((a, b) => {
+      const aOwn = (agId && Number(a.agent_id) === agId) ? 1 : 0;
+      const bOwn = (agId && Number(b.agent_id) === agId) ? 1 : 0;
+      if (aOwn !== bOwn) return bOwn - aOwn;
+      return 0;
+    });
+  }
+  if (isDashWidget) {
+    const lim = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    // Sort latest first for dashboard Latest 10 App Links widget
+    items = items.slice().sort((a, b) => {
+      const aOwn = role === 'client' ? (a.agent_id ? 1 : 0) : 0;
+      const bOwn = role === 'client' ? (b.agent_id ? 1 : 0) : 0;
+      if (aOwn !== bOwn) return bOwn - aOwn;
+      if (Boolean(a.pinned_top) !== Boolean(b.pinned_top)) return a.pinned_top ? -1 : 1;
+      const ta = Date.parse(a.updated_at || a.created_at || '') || 0;
+      const tb = Date.parse(b.updated_at || b.created_at || '') || 0;
+      if (tb !== ta) return tb - ta;
+      return Number(b.id || 0) - Number(a.id || 0);
+    }).slice(0, lim);
+  }
   res.json({
     success: true,
     data: items,
     total: items.length,
-    visible_count: allLinks.filter(item => item.visible !== false).length,
-    hidden_count: allLinks.filter(item => item.visible === false).length
+    visible_count: items.filter(item => item.visible !== false).length,
+    hidden_count: items.filter(item => item.visible === false).length
   });
 });
 
 app.post('/api/app-links', requireAuth, (req, res) => {
-  if (normRole(req.sessionUser.role) !== 'owner') {
-    return res.status(403).json({ error: 'Only Owner can add App Links.' });
+  const role = normRole(req.sessionUser.role);
+  if (role !== 'owner' && role !== 'agent') {
+    return res.status(403).json({ error: 'Only Owner or Agent can add App Links.' });
   }
   const body = req.body || {};
   const name = String(body.name || '').trim();
@@ -10127,12 +10238,14 @@ app.post('/api/app-links', requireAuth, (req, res) => {
     visible: body.visible !== false,
     pinned_top: Boolean(body.pinned_top),
     sort_order: Number.isFinite(Number(body.sort_order)) ? Number(body.sort_order) : (maxOrder + 10),
+    agent_id: role === 'agent' ? Number(req.sessionUser.id) : null,
+    created_by_role: role,
     created_at: nowIso,
     updated_at: nowIso
   };
   list.push(item);
   writeDb('app_links', sortAppLinksList(list));
-  logAudit('Admin', 'App Link Added', `Added app link "${item.name}"`, 'Apps Links');
+  logAudit(req.sessionUser.username || 'Admin', 'App Link Added', `Added app link "${item.name}"`, 'Apps Links');
   res.json({ success: true, data: item });
 });
 
@@ -10151,7 +10264,9 @@ app.post('/api/app-links/import-excel', requireAuth, upload.single('file'), (req
 
     const list = sortAppLinksList(readDb('app_links') || []);
     const byName = new Map();
-    list.forEach(item => byName.set(String(item.name || '').trim().toLowerCase(), item));
+    list.forEach(item => {
+      if (!item.agent_id) byName.set(String(item.name || '').trim().toLowerCase(), item);
+    });
 
     let maxOrder = list.reduce((mx, x) => Math.max(mx, Number(x.sort_order) || 0), 0);
     let baseId = nextId(list, 'app_links');
@@ -10180,6 +10295,8 @@ app.post('/api/app-links/import-excel', requireAuth, upload.single('file'), (req
           visible: defaultVisible,
           pinned_top: false,
           sort_order: maxOrder,
+          agent_id: null,
+          created_by_role: 'owner',
           created_at: nowIso,
           updated_at: nowIso
         };
@@ -10255,7 +10372,6 @@ app.post('/api/app-links/reorder', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Invalid reorder action. Use top, up, down, or low.' });
   }
 
-  // Re-normalize sort_order sequentially while preserving pinned_top consistency for top/low moves
   if (action === 'up' || action === 'down') {
     const neighbor = list[action === 'up' ? Math.min(list.length - 1, Math.max(0, idx - 1) + 1) : Math.max(0, Math.min(list.length - 1, idx + 1) - 1)];
     if (neighbor && Boolean(neighbor.pinned_top) !== Boolean(item.pinned_top)) {
@@ -10272,13 +10388,17 @@ app.post('/api/app-links/reorder', requireAuth, (req, res) => {
 });
 
 app.patch('/api/app-links/:id', requireAuth, (req, res) => {
-  if (normRole(req.sessionUser.role) !== 'owner') {
-    return res.status(403).json({ error: 'Only Owner can edit App Links.' });
+  const role = normRole(req.sessionUser.role);
+  if (role !== 'owner' && role !== 'agent') {
+    return res.status(403).json({ error: 'Only Owner or Agent can edit App Links.' });
   }
   const id = Number(req.params.id);
   const list = readDb('app_links') || [];
   const item = list.find(x => Number(x.id) === id);
   if (!item) return res.status(404).json({ error: 'App link not found.' });
+  if (role === 'agent' && Number(item.agent_id) !== Number(req.sessionUser.id)) {
+    return res.status(403).json({ error: 'Agents can only edit their own App Links.' });
+  }
 
   const body = req.body || {};
   if ('name' in body) {
@@ -10304,16 +10424,20 @@ app.patch('/api/app-links/:id', requireAuth, (req, res) => {
 });
 
 app.delete('/api/app-links/:id', requireAuth, (req, res) => {
-  if (normRole(req.sessionUser.role) !== 'owner') {
-    return res.status(403).json({ error: 'Only Owner can delete App Links.' });
+  const role = normRole(req.sessionUser.role);
+  if (role !== 'owner' && role !== 'agent') {
+    return res.status(403).json({ error: 'Only Owner or Agent can delete App Links.' });
   }
   const id = Number(req.params.id);
   const list = readDb('app_links') || [];
   const idx = list.findIndex(x => Number(x.id) === id);
   if (idx === -1) return res.status(404).json({ error: 'App link not found.' });
+  if (role === 'agent' && Number(list[idx].agent_id) !== Number(req.sessionUser.id)) {
+    return res.status(403).json({ error: 'Agents can only delete their own App Links.' });
+  }
   const [removed] = list.splice(idx, 1);
   writeDb('app_links', sortAppLinksList(list));
-  logAudit('Admin', 'App Link Deleted', `Deleted app link "${removed.name}"`, 'Apps Links');
+  logAudit(req.sessionUser.username || 'Admin', 'App Link Deleted', `Deleted app link "${removed.name}"`, 'Apps Links');
   res.json({ success: true, id });
 });
 
@@ -17697,39 +17821,28 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     list = list.filter(s => extractDateStr(s) >= yearStartStr);
   }
 
-  // Timezone-safe date comparison (handles UTC and PKT UTC+5 day boundaries cleanly)
-  const getSmsUtcAndPktTs = (s) => {
-    const rawTs = String(s.timestamp || '').replace('T', ' ').replace(/Z$/i, '').slice(0, 19);
-    const ms = Date.parse(s.timestamp || s.date || '');
-    const pktTs = Number.isFinite(ms) ? new Date(ms + 5 * 3600000).toISOString().replace('T', ' ').slice(0, 19) : rawTs;
-    const ds = extractDateStr(s);
-    return { rawTs, pktTs, ds };
+  // Strict UTC date comparison (00:00:00 UTC to 23:59:59 UTC — no PKT +5h day bleed)
+  const getSmsStrictUtcTs = (s) => {
+    const iso = normalizeIsoTimestamp(s.timestamp || s.date || '');
+    const utcTs = iso.replace('T', ' ').slice(0, 19);
+    const ds = utcTs.slice(0, 10);
+    return { utcTs, ds };
   };
 
   if (date_from) {
-    let df = String(date_from).trim().replace('T', ' ');
-    const isFullDayStart = df.length === 10 || df.endsWith('00:00:00');
+    let df = String(date_from).trim().replace('T', ' ').replace(/Z$/i, '');
     if (df.length === 10) df = df + ' 00:00:00';
-    const dfDate = df.slice(0, 10);
     list = list.filter(s => {
-      const { rawTs, pktTs, ds } = getSmsUtcAndPktTs(s);
-      if (isFullDayStart) {
-        return rawTs >= df || pktTs >= df || (ds && ds >= dfDate);
-      }
-      return (rawTs && rawTs >= df) || (pktTs && pktTs >= df);
+      const { utcTs } = getSmsStrictUtcTs(s);
+      return Boolean(utcTs && utcTs >= df);
     });
   }
   if (date_to) {
-    let dt = String(date_to).trim().replace('T', ' ');
-    const isFullDayEnd = dt.length === 10 || dt.endsWith('23:59:59');
+    let dt = String(date_to).trim().replace('T', ' ').replace(/Z$/i, '');
     if (dt.length === 10) dt = dt + ' 23:59:59';
-    const dtDate = dt.slice(0, 10);
     list = list.filter(s => {
-      const { rawTs, pktTs, ds } = getSmsUtcAndPktTs(s);
-      if (isFullDayEnd) {
-        return (rawTs && rawTs <= dt) || (pktTs && pktTs <= dt) || (ds && ds <= dtDate);
-      }
-      return (rawTs && rawTs <= dt) || (pktTs && pktTs <= dt);
+      const { utcTs } = getSmsStrictUtcTs(s);
+      return Boolean(utcTs && utcTs <= dt);
     });
   }
   if (range) {
@@ -18426,10 +18539,14 @@ app.post('/api/cdr2/accept-terms', requireAuth, (req, res) => {
   });
 });
 
-// ── Owner-Only Original Whitenoise Portal Quick Credentials ────────────────
+// ── Agent-Managed CDR 2 Panel Access (Shared with Agent's Own Clients) ────
 function sanitizePortalHttpUrl(rawUrl) {
-  const s = String(rawUrl || '').trim();
+  let s = String(rawUrl || '').trim();
   if (!s) return '';
+  // Allow bare hostnames like panel.example.com by prefixing https:// (never auto-prefix explicit dangerous schemes)
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s) && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s) && /\./.test(s)) {
+    s = `https://${s}`;
+  }
   try {
     const u = new URL(s);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
@@ -18438,6 +18555,69 @@ function sanitizePortalHttpUrl(rawUrl) {
     return null;
   }
 }
+
+app.get('/api/cdr2/panel-access', requireAuth, (req, res) => {
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  const scopedAgentId = resolveSessionAgentId(req.sessionUser);
+  if (!scopedAgentId) {
+    return res.json({
+      success: true,
+      panel: { url: '', username: '', password: '', updated_at: null }
+    });
+  }
+  const agents = readDb('agents') || [];
+  const ag = agents.find(a => Number(a.id) === Number(scopedAgentId));
+  const raw = (ag && typeof ag.cdr2_panel_access === 'object' && ag.cdr2_panel_access)
+    ? ag.cdr2_panel_access
+    : {};
+  res.json({
+    success: true,
+    panel: {
+      url: String(raw.url || ''),
+      username: String(raw.username || ''),
+      password: String(raw.password || ''),
+      updated_at: raw.updated_at || null
+    }
+  });
+});
+
+app.put('/api/cdr2/panel-access', requireAuth, (req, res) => {
+  const sRole = normRole(req.sessionUser?.role);
+  if (sRole !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Only Agents can update CDR 2 panel access for their clients.' });
+  }
+  if (!hasWhitenoiseAccess(req.sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
+  }
+  const body = req.body || {};
+  const rawUrl = String(body.url || '').trim();
+  const safeUrl = sanitizePortalHttpUrl(rawUrl);
+  if (rawUrl && safeUrl === null) {
+    return res.status(400).json({ error: 'Please enter a valid panel link starting with https:// or http://.' });
+  }
+  const username = String(body.username || '').trim().slice(0, 160);
+  const password = String(body.password || '').slice(0, 200);
+
+  const agents = readDb('agents') || [];
+  const idx = agents.findIndex(a => Number(a.id) === Number(req.sessionUser.id));
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Agent account not found.' });
+  }
+  const panelObj = {
+    url: safeUrl || '',
+    username,
+    password,
+    updated_at: new Date().toISOString()
+  };
+  agents[idx].cdr2_panel_access = panelObj;
+  writeDb('agents', agents);
+  logAudit(req.sessionUser.username, 'CDR 2 Panel Access Updated', `Panel link ${panelObj.url ? 'configured' : 'cleared'} for clients`, 'CDR2');
+  res.json({ success: true, panel: panelObj });
+});
+
+// ── Owner-Only Original Whitenoise Portal Quick Credentials ────────────────
 
 app.get('/api/owner/whitenoise-portal', requireAuth, (req, res) => {
   if (normRole(req.sessionUser?.role) !== 'owner') {
@@ -18702,8 +18882,9 @@ app.get('/api/numbers/blocked', requireAuth, (req, res) => {
   const sRole = normRole(sessionUser && sessionUser.role);
   const isOwner = sRole === 'owner';
   const isAgent = sRole === 'agent';
-  if (!isOwner && !isAgent) {
-    return res.status(403).json({ error: 'Forbidden. Owner or Agent permissions required.' });
+  const isClient = sRole === 'client';
+  if (!isOwner && !isAgent && !isClient) {
+    return res.status(403).json({ error: 'Forbidden.' });
   }
 
   const scanStats = scanInactiveNumbers();
@@ -18721,6 +18902,8 @@ app.get('/api/numbers/blocked', requireAuth, (req, res) => {
   let list = allNumbers.filter(n => n && (String(n.status || '').toLowerCase() === 'blocked' || n.inactivity_flagged === true));
   if (isAgent) {
     list = list.filter(n => Number(n.agent_id) === Number(sessionUser.id));
+  } else if (isClient) {
+    list = list.filter(n => Number(n.client_id) === Number(sessionUser.id));
   }
 
   const mapped = list.map(n => {
@@ -20517,6 +20700,18 @@ function projectMessageForActor(msg, actor, conv) {
   delete out.deleted_preview_body;
   delete out.deleted_preview_image;
 
+  // Strict Client Group Privacy: Clients in agent_group never see peer client usernames or IDs
+  if (actor && actor.role === 'client' && conv && conv.type === 'agent_group') {
+    if (out.sender_role === 'client' && out.sender_key !== actor.key) {
+      out.sender_name = 'Member';
+      out.sender_key = 'client:hidden';
+      out.sender_username = '';
+    }
+    if (out.reply_to && out.reply_to.sender_key && out.reply_to.sender_key !== actor.key && String(out.reply_to.sender_key).startsWith('client:')) {
+      out.reply_to = { ...out.reply_to, sender_name: 'Member', sender_key: 'client:hidden' };
+    }
+  }
+
   if (canActorPreviewDeletedMessage(actor, conv, msg)) {
     out.can_preview_deleted = true;
     out.deleted_preview_body = typeof msg.deleted_original_body === 'string' ? msg.deleted_original_body : '';
@@ -20940,7 +21135,8 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     title = (peer && (peer.display_name || peer.username)) || otherKey || 'Direct Chat';
   }
 
-  const members = conv.type === 'agent_group'
+  const hideGroupMembersForClient = Boolean(conv.type === 'agent_group' && actor.role === 'client');
+  const members = (conv.type === 'agent_group' && !hideGroupMembersForClient)
     ? (conv.participants || []).map(k => resolveActorSummaryByKey(k)).filter(Boolean)
     : [];
 
@@ -20949,14 +21145,25 @@ function hydrateConversationForActor(conv, actor, allMessages) {
   const closedForMember = Boolean(conv.type === 'agent_group' && scheduleState && scheduleState.is_closed && actor.role !== 'agent');
   const adminOnlyLocked = Boolean(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent');
 
+  const safePinnedSender = pinnedMsg
+    ? ((hideGroupMembersForClient && pinnedMsg.sender_role === 'client' && pinnedMsg.sender_key !== actor.key) ? 'Member' : pinnedMsg.sender_name)
+    : '';
+  const safeLastSenderName = visibleLastMsg
+    ? ((hideGroupMembersForClient && visibleLastMsg.sender_role === 'client' && visibleLastMsg.sender_key !== actor.key) ? 'Member' : (visibleLastMsg.sender_name || ''))
+    : '';
+  const safeLastSenderKey = visibleLastMsg
+    ? ((hideGroupMembersForClient && visibleLastMsg.sender_role === 'client' && visibleLastMsg.sender_key !== actor.key) ? 'client:hidden' : (visibleLastMsg.sender_key || ''))
+    : '';
+
   return {
     id: Number(conv.id),
     type: conv.type,
     owner_agent_id: conv.owner_agent_id ? Number(conv.owner_agent_id) : null,
     title,
     description: conv.description || '',
-    participants: conv.participants || [],
+    participants: hideGroupMembersForClient ? [] : (conv.participants || []),
     members,
+    hide_members: hideGroupMembersForClient,
     peer,
     admin_only: Boolean(conv.admin_only),
     schedule: scheduleNorm ? {
@@ -20974,18 +21181,18 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     pinned_message_id: pinnedMsg ? Number(pinnedMsg.id) : null,
     pinned_message: pinnedMsg ? {
       id: Number(pinnedMsg.id),
-      sender_name: pinnedMsg.sender_name,
+      sender_name: safePinnedSender,
       sender_role: pinnedMsg.sender_role,
       body: pinnedMsg.image
         ? (pinnedMsg.body ? `📷 ${String(pinnedMsg.body).slice(0, 130)}` : '📷 Photo')
         : String(pinnedMsg.body || '').slice(0, 140),
       created_at: pinnedMsg.created_at
     } : null,
-    read_cursors: conv.read_cursors || {},
+    read_cursors: hideGroupMembersForClient ? {} : (conv.read_cursors || {}),
     last_message_id: visibleLastMsg ? Number(visibleLastMsg.id) : 0,
     last_message_preview: visibleLastMsg ? formatMessagePreviewText(visibleLastMsg) : '',
-    last_message_sender_key: visibleLastMsg ? (visibleLastMsg.sender_key || '') : '',
-    last_message_sender_name: visibleLastMsg ? (visibleLastMsg.sender_name || '') : '',
+    last_message_sender_key: safeLastSenderKey,
+    last_message_sender_name: safeLastSenderName,
     last_message_at: (visibleLastMsg && visibleLastMsg.created_at) || conv.last_message_at || conv.updated_at || conv.created_at,
     unread_count: unread,
     created_at: conv.created_at,
@@ -21880,6 +22087,367 @@ function getReqIp(req) {
   return (req.socket && req.socket.remoteAddress) || '127.0.0.1';
 }
 
+// ── OWNER-ONLY VPS & SERVER HEALTH DASHBOARD API ──────────────────────────
+let _vpsPrevCpuSnapshot = null;
+let _vpsDiskBreakdownCache = { ts: 0, data: null };
+
+function sampleCpuPercent() {
+  const cpus = os.cpus() || [];
+  let idle = 0;
+  let total = 0;
+  for (const c of cpus) {
+    const t = c.times || {};
+    idle += (t.idle || 0);
+    total += (t.user || 0) + (t.nice || 0) + (t.sys || 0) + (t.irq || 0) + (t.idle || 0);
+  }
+  if (!_vpsPrevCpuSnapshot) {
+    _vpsPrevCpuSnapshot = { idle, total };
+    // Estimate initial utilization from 1m load average vs cores
+    const la1 = (os.loadavg && os.loadavg()[0]) || 0;
+    const cores = Math.max(1, cpus.length);
+    return Math.min(100, Math.max(0, Math.round((la1 / cores) * 1000) / 10));
+  }
+  const idleDiff = idle - _vpsPrevCpuSnapshot.idle;
+  const totalDiff = total - _vpsPrevCpuSnapshot.total;
+  _vpsPrevCpuSnapshot = { idle, total };
+  if (totalDiff <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round(((1 - idleDiff / totalDiff) * 100) * 10) / 10));
+}
+
+function readLinuxMemoryStats() {
+  const totalFallback = os.totalmem();
+  const freeFallback = os.freemem();
+  try {
+    if (process.platform === 'linux' && fs.existsSync('/proc/meminfo')) {
+      const raw = fs.readFileSync('/proc/meminfo', 'utf-8');
+      const map = {};
+      for (const line of raw.split('\n')) {
+        const m = line.match(/^([A-Za-z0-9_()]+):\s+(\d+)\s*kB/i);
+        if (m) map[m[1]] = Number(m[2]) * 1024;
+      }
+      const total = map.MemTotal || totalFallback;
+      const available = map.MemAvailable != null ? map.MemAvailable : (map.MemFree || freeFallback);
+      const used = Math.max(0, total - available);
+      return {
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: available,
+        used_pct: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
+        swap_total_bytes: map.SwapTotal || 0,
+        swap_used_bytes: Math.max(0, (map.SwapTotal || 0) - (map.SwapFree || 0))
+      };
+    }
+  } catch (_) {}
+  const used = Math.max(0, totalFallback - freeFallback);
+  return {
+    total_bytes: totalFallback,
+    used_bytes: used,
+    free_bytes: freeFallback,
+    used_pct: totalFallback > 0 ? Math.round((used / totalFallback) * 1000) / 10 : 0,
+    swap_total_bytes: 0,
+    swap_used_bytes: 0
+  };
+}
+
+function computeDirSizeBytes(dirPath, depth = 0) {
+  if (!dirPath || depth > 4) return { bytes: 0, files: 0 };
+  try {
+    if (!fs.existsSync(dirPath)) return { bytes: 0, files: 0 };
+    let bytes = 0;
+    let files = 0;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const ent of entries) {
+      const full = path.join(dirPath, ent.name);
+      try {
+        if (ent.isDirectory()) {
+          const sub = computeDirSizeBytes(full, depth + 1);
+          bytes += sub.bytes;
+          files += sub.files;
+        } else if (ent.isFile()) {
+          const st = fs.statSync(full);
+          bytes += st.size || 0;
+          files++;
+        }
+      } catch (_) {}
+    }
+    return { bytes, files };
+  } catch (_) {
+    return { bytes: 0, files: 0 };
+  }
+}
+
+function getVpsDiskAndFolders(force = false) {
+  const now = Date.now();
+  if (!force && _vpsDiskBreakdownCache.data && (now - _vpsDiskBreakdownCache.ts < 15000)) {
+    return _vpsDiskBreakdownCache.data;
+  }
+  let disk = { total_bytes: 0, used_bytes: 0, free_bytes: 0, used_pct: 0, path: DATA_DIR };
+  try {
+    if (typeof fs.statfsSync === 'function') {
+      const sf = fs.statfsSync(DATA_DIR);
+      const bsize = Number(sf.bsize || 4096);
+      const total = Number(sf.blocks || 0) * bsize;
+      const avail = Number(sf.bavail != null ? sf.bavail : (sf.bfree || 0)) * bsize;
+      const used = Math.max(0, total - avail);
+      disk = {
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: avail,
+        used_pct: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
+        path: DATA_DIR
+      };
+    }
+  } catch (_) {}
+
+  const dataStats = computeDirSizeBytes(DATA_DIR);
+  const archiveStats = computeDirSizeBytes(ARCHIVE_DIR);
+  const mediaStats = computeDirSizeBytes(CHAT_MEDIA_DIR);
+  const backupStats = computeDirSizeBytes(BACKUP_DIR);
+
+  let lastBackupAt = null;
+  try {
+    if (fs.existsSync(BACKUP_DIR)) {
+      const bEntries = fs.readdirSync(BACKUP_DIR).map(name => {
+        try {
+          const st = fs.statSync(path.join(BACKUP_DIR, name));
+          return st.mtimeMs || 0;
+        } catch (_) { return 0; }
+      }).filter(Boolean);
+      if (bEntries.length) lastBackupAt = new Date(Math.max(...bEntries)).toISOString();
+    }
+  } catch (_) {}
+
+  const result = {
+    disk,
+    folders: {
+      data_dir_bytes: dataStats.bytes,
+      archive_dir_bytes: archiveStats.bytes,
+      chat_media_bytes: mediaStats.bytes,
+      backup_dir_bytes: backupStats.bytes,
+      data_dir: { path: DATA_DIR, bytes: dataStats.bytes, files: dataStats.files },
+      archive_dir: { path: ARCHIVE_DIR, bytes: archiveStats.bytes, files: archiveStats.files },
+      chat_media_dir: { path: CHAT_MEDIA_DIR, bytes: mediaStats.bytes, files: mediaStats.files },
+      backup_dir: { path: BACKUP_DIR, bytes: backupStats.bytes, files: backupStats.files, last_backup_at: lastBackupAt }
+    }
+  };
+  _vpsDiskBreakdownCache = { ts: now, data: result };
+  return result;
+}
+
+app.get('/api/owner/vps-health', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const t0 = process.hrtime.bigint();
+  setImmediate(() => {
+    try {
+      const eventLoopLagMs = Math.round((Number(process.hrtime.bigint() - t0) / 1e6) * 100) / 100;
+      const cpuPct = sampleCpuPercent();
+      const cpus = os.cpus() || [];
+      const loadAvg = os.loadavg ? os.loadavg().map(v => Math.round(v * 100) / 100) : [0, 0, 0];
+      const memory = readLinuxMemoryStats();
+      const procMem = process.memoryUsage();
+      const forceDisk = String(req.query.fresh || '') === '1';
+      const storage = getVpsDiskAndFolders(forceDisk);
+
+      // Active sessions by role
+      const sessionCounts = { total: 0, owner: 0, agent: 0, client: 0 };
+      const nowMs = Date.now();
+      for (const s of activeSessions.values()) {
+        if (!s || (nowMs - (s.lastActive || s.created || 0)) > 24 * 60 * 60 * 1000) continue;
+        sessionCounts.total++;
+        const r = normRole(s.role);
+        if (r === 'owner') sessionCounts.owner++;
+        else if (r === 'agent') sessionCounts.agent++;
+        else if (r === 'client') sessionCounts.client++;
+      }
+
+      // Active WebSocket count
+      let wsCount = 0;
+      if (wss && wss.clients) {
+        for (const client of wss.clients) {
+          if (client.readyState === 1) wsCount++;
+        }
+      }
+
+      // Providers & Pollers health
+      const crConns = readDb('cr_api_connections') || [];
+      const loginPanels = readDb('login_panels') || [];
+      const wnConns = readDb('whitenoise_connections') || [];
+
+      const crActive = crConns.filter(c => c && c.active).length;
+      const crErrors = crConns.filter(c => c && c.active && (crApiBackoff.has(c.id) || /^error/i.test(String(c.last_status || '')))).length;
+      const crLatestPull = crConns.map(c => c && c.last_pulled_at).filter(Boolean).sort().pop() || null;
+
+      const webActive = loginPanels.filter(p => p && p.active).length;
+      const webErrors = loginPanels.filter(p => p && p.active && /^error/i.test(String(p.last_status || ''))).length;
+
+      const wnActive = wnConns.filter(w => w && w.active).length;
+
+      // DB counts
+      const numbers = readDb('numbers') || [];
+      const smsLog = readDb('sms_log') || [];
+      const ranges = readDb('sms_ranges') || [];
+      const agents = readDb('agents') || [];
+      const clients = readDb('clients') || [];
+      const chatMessages = readDb('chat_messages') || [];
+      const numReqs = readDb('number_requests') || [];
+      const wnLedger = readDb('whitenoise_daily_stats') || [];
+      const crTotalPulled = crConns.reduce((s, c) => s + (Number(c && c.total_pulled) || 0), 0);
+      const blockedCount = numbers.filter(n => n && (String(n.status || '').toLowerCase() === 'blocked' || n.inactivity_flagged)).length;
+      const pendingNumReqs = numReqs.filter(r => r && String(r.status || '').toLowerCase() === 'pending').length;
+
+      // Latest backup file info
+      let lastBackup = null;
+      try {
+        if (fs.existsSync(BACKUP_DIR)) {
+          const files = fs.readdirSync(BACKUP_DIR)
+            .map(name => {
+              try {
+                const st = fs.statSync(path.join(BACKUP_DIR, name));
+                return st.isFile() ? { name, size_bytes: st.size, mtime: st.mtimeMs } : null;
+              } catch (_) { return null; }
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.mtime - a.mtime);
+          if (files.length) lastBackup = { name: files[0].name, size_bytes: files[0].size_bytes };
+        }
+      } catch (_) {}
+
+      // Health alerts & status
+      const alerts = [];
+      if (memory.used_pct >= 90) alerts.push({ level: 'critical', metric: 'RAM', message: `Critical RAM usage: ${memory.used_pct}%` });
+      else if (memory.used_pct >= 80) alerts.push({ level: 'warning', metric: 'RAM', message: `High RAM usage: ${memory.used_pct}%` });
+
+      if (storage.disk.used_pct >= 90) alerts.push({ level: 'critical', metric: 'Disk', message: `Critical Disk usage: ${storage.disk.used_pct}%` });
+      else if (storage.disk.used_pct >= 80) alerts.push({ level: 'warning', metric: 'Disk', message: `High Disk usage: ${storage.disk.used_pct}%` });
+
+      if (cpuPct >= 90) alerts.push({ level: 'critical', metric: 'CPU', message: `Critical CPU load: ${cpuPct}%` });
+      else if (cpuPct >= 80) alerts.push({ level: 'warning', metric: 'CPU', message: `High CPU load: ${cpuPct}%` });
+
+      if (crErrors > 0) alerts.push({ level: 'warning', metric: 'CR API', message: `${crErrors} active CR API connection(s) reporting errors/backoff` });
+
+      const overallStatus = alerts.some(a => a.level === 'critical')
+        ? 'critical'
+        : (alerts.length > 0 ? 'warning' : 'healthy');
+
+      const servicesPayload = {
+        cr_api: {
+          total: crConns.length,
+          active: crActive,
+          errors: crErrors,
+          total_pulled: crTotalPulled,
+          last_pull_at: crLatestPull,
+          items: crConns.slice(0, 12).map(c => ({
+            id: c.id,
+            name: c.panel_name || `CR #${c.id}`,
+            active: Boolean(c.active),
+            status: c.last_status || (c.active ? 'Active' : 'Paused'),
+            last_pulled_at: c.last_pulled_at || null,
+            total_pulled: Number(c.total_pulled || 0),
+            in_backoff: crApiBackoff.has(c.id)
+          }))
+        },
+        web_panels: { total: loginPanels.length, active: webActive, errors: webErrors },
+        whitenoise: { total: wnConns.length, active: wnActive, ledger_rows: wnLedger.length }
+      };
+
+      res.json({
+        success: true,
+        status: overallStatus,
+        server_time_utc: new Date().toISOString(),
+        system: {
+          hostname: os.hostname(),
+          platform: os.platform(),
+          os_type: os.type(),
+          release: os.release(),
+          arch: os.arch(),
+          node_version: process.version,
+          pid: process.pid,
+          os_uptime_sec: Math.floor(os.uptime()),
+          app_uptime_sec: Math.floor(process.uptime()),
+          cpu_model: (cpus[0] && cpus[0].model) || 'Virtual CPU',
+          cpu_cores: cpus.length || 1
+        },
+        cpu: {
+          usage_pct: cpuPct,
+          used_pct: cpuPct,
+          model: (cpus[0] && cpus[0].model) || 'Virtual CPU',
+          cores: cpus.length || 1,
+          load_avg: loadAvg
+        },
+        memory: {
+          ...memory,
+          process_rss_bytes: procMem.rss || 0,
+          process_heap_used_bytes: procMem.heapUsed || 0,
+          process_heap_total_bytes: procMem.heapTotal || 0,
+          process_external_bytes: procMem.external || 0
+        },
+        process: {
+          pid: process.pid,
+          uptime_sec: Math.floor(process.uptime()),
+          rss_bytes: procMem.rss || 0,
+          heap_used_bytes: procMem.heapUsed || 0,
+          heap_total_bytes: procMem.heapTotal || 0,
+          external_bytes: procMem.external || 0,
+          event_loop_lag_ms: eventLoopLagMs
+        },
+        disk: {
+          ...storage.disk,
+          folders: storage.folders,
+          last_backup: lastBackup
+        },
+        folders: storage.folders,
+        storage,
+        runtime: {
+          event_loop_lag_ms: eventLoopLagMs,
+          ws_clients: wsCount,
+          sessions: sessionCounts,
+          cache_entries: DB_CACHE.size
+        },
+        services: servicesPayload,
+        providers: servicesPayload,
+        database: {
+          hot_sms_logs: smsLog.length,
+          hot_sms_count: smsLog.length,
+          total_numbers: numbers.length,
+          numbers_count: numbers.length,
+          blocked_numbers: blockedCount,
+          blocked_numbers_count: blockedCount,
+          total_ranges: ranges.length,
+          ranges_count: ranges.length,
+          total_agents: agents.length,
+          agents_count: agents.length,
+          total_clients: clients.length,
+          clients_count: clients.length,
+          chat_messages: chatMessages.length,
+          pending_number_requests: pendingNumReqs
+        },
+        alerts
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message || 'Failed to read VPS health stats' });
+    }
+  });
+});
+
+app.post('/api/owner/vps-health/clear-cache', requireAuth, requireApiRole(['owner']), (req, res) => {
+  const now = Date.now();
+  let prunedSessions = 0;
+  for (const [tok, sess] of activeSessions.entries()) {
+    if (!sess || (now - (sess.lastActive || sess.created || 0)) > 24 * 60 * 60 * 1000) {
+      activeSessions.delete(tok);
+      prunedSessions++;
+    }
+  }
+  if (prunedSessions > 0) savePersistedSessions();
+  cleanExpiredCaptchas();
+  periodStatsCache.clear();
+  _vpsDiskBreakdownCache = { ts: 0, data: null };
+  res.json({
+    success: true,
+    pruned_sessions: prunedSessions,
+    message: `Cleared runtime caches and pruned ${prunedSessions} expired session(s).`
+  });
+});
+
 server.prependListener('upgrade', (req, socket) => {
   const ip = getReqIp(req);
   if (isIpBlocked(ip)) {
@@ -21951,7 +22519,10 @@ wss.on('connection', (ws, req) => {
         const conv = convs.find(c => Number(c.id) === convId);
         if (!conv || !canAccessConversation(curActor, conv)) return;
         if (conv.type === 'agent_group' && conv.admin_only && curActor.role !== 'agent') return;
-        const others = (conv.participants || []).filter(k => k !== curActor.key);
+        // Privacy: Client typing in a group is only visible to the Agent admin, never to other Clients
+        const others = (conv.type === 'agent_group' && curActor.role === 'client')
+          ? [`agent:${conv.owner_agent_id}`]
+          : (conv.participants || []).filter(k => k !== curActor.key);
         sendChatWsEvent({
           type: 'chat:typing',
           conversation_id: convId,

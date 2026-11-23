@@ -43,12 +43,12 @@ const dir = makeFixture({
 const srv = await startServer(dir, PORT);
 
 try {
-  // 1. Captcha unconditional + login response hides token + no ?token= URL bypass
-  const missingCap = await srv.api('POST', '/api/auth/login', { body: { username: 'Kamran_Bhatti', password: 'ownerpass1' } });
-  check('Security: login rejected when captcha missing', missingCap.status === 400);
+  // 1. Captcha-free direct login + login response hides token + no ?token= URL bypass
+  const badCreds = await srv.api('POST', '/api/auth/login', { body: { username: 'Kamran_Bhatti', password: 'wrongpassword' } });
+  check('Security: login rejected with invalid password (401)', badCreds.status === 401);
 
   const ownerLogin = await srv.login('Kamran_Bhatti', 'ownerpass1');
-  check('Security: owner cookie login succeeds with solved captcha', ownerLogin.ok);
+  check('Security: owner cookie login succeeds without captcha', ownerLogin.ok);
   check('Security: token & session_token omitted from login JSON body', !ownerLogin.res.data?.token && !ownerLogin.res.data?.session_token);
 
   const rawCookieVal = ownerLogin.cookie.split('=')[1];
@@ -57,18 +57,14 @@ try {
 
   // 2. Per-account lockout across different X-Forwarded-For IPs
   for (let i = 0; i < 5; i++) {
-    const capRes = await srv.api('GET', '/api/auth/captcha');
-    const m = String(capRes.data.question || '').match(/(\d+)\s*\+\s*(\d+)/);
     await srv.api('POST', '/api/auth/login', {
       headers: { 'X-Forwarded-For': `10.0.0.${i + 10}` },
-      body: { username: 'client_two', password: 'wrongpass', captcha_id: capRes.data.id, captcha_answer: String(Number(m[1]) + Number(m[2])) }
+      body: { username: 'client_two', password: 'wrongpass' }
     });
   }
-  const capResLock = await srv.api('GET', '/api/auth/captcha');
-  const mLock = String(capResLock.data.question || '').match(/(\d+)\s*\+\s*(\d+)/);
   const lockedAttempt = await srv.api('POST', '/api/auth/login', {
     headers: { 'X-Forwarded-For': '10.0.0.99' },
-    body: { username: 'client_two', password: 'clientpass2', captcha_id: capResLock.data.id, captcha_answer: String(Number(mLock[1]) + Number(mLock[2])) }
+    body: { username: 'client_two', password: 'clientpass2' }
   });
   check('Security: per-account lockout enforces 429 even across IPs', lockedAttempt.status === 429);
 
@@ -162,6 +158,65 @@ try {
     [401, 404].includes(rmCrApiOut.status) &&
     [401, 404].includes(rmSmpp.status) &&
     [401, 404].includes(rmWebhook.status)
+  );
+
+  // 12. Owner-only VPS Health endpoint (200 for Owner, 403 for Agent & Client)
+  const vpsOwner = await srv.api('GET', '/api/owner/vps-health', { cookie: ownerLogin.cookie });
+  const vpsAgent = await srv.api('GET', '/api/owner/vps-health', { cookie: ag1Login.cookie });
+  const vpsClient = await srv.api('GET', '/api/owner/vps-health', { cookie: cl1Login.cookie });
+  check(
+    'VPS Health: Owner receives live metrics (200) and Agent/Client receive 403',
+    vpsOwner.status === 200 &&
+    typeof vpsOwner.data?.cpu?.usage_pct === 'number' &&
+    typeof vpsOwner.data?.memory?.total_bytes === 'number' &&
+    typeof vpsOwner.data?.folders?.data_dir_bytes === 'number' &&
+    vpsAgent.status === 403 &&
+    vpsClient.status === 403
+  );
+
+  // 13. Monthly (30/5) range & number persistence (must NOT auto-revert to Weekly)
+  const createMonthly = await srv.api('POST', '/api/numbers/sms-ranges', {
+    cookie: ownerLogin.cookie,
+    body: {
+      range_name: 'Spain Orange Direct',
+      country: 'Spain',
+      provider: 'DirectRoute',
+      prefix: '34',
+      company_cost: 0.05,
+      payterm: 'Monthly',
+      payout_schedule: 'monthly30_5',
+      active_payterms: ['Monthly'],
+      payterms: { Monthly: 0.03 }
+    }
+  });
+  const mRangeId = createMonthly.data?.id;
+  const impMonthly = mRangeId ? await srv.api('POST', '/api/numbers/import-to-range', {
+    cookie: ownerLogin.cookie,
+    body: { range_id: mRangeId, numbers: ['34600112233'], payterm: 'Monthly' }
+  }) : { status: 500 };
+  const allNums = await srv.api('GET', '/api/numbers?limit=200', { cookie: ownerLogin.cookie });
+  const importedNum = (allNums.data?.data || []).find(n => String(n.number || '').includes('34600112233'));
+  check(
+    'Monthly Persistence: range & imported number stay Monthly (30/5) without reverting to Weekly',
+    createMonthly.status === 200 &&
+    createMonthly.data?.payterm === 'Monthly' &&
+    createMonthly.data?.payout_schedule === 'monthly30_5' &&
+    impMonthly.status === 200 &&
+    importedNum?.payterm === 'Monthly' &&
+    importedNum?.payout_schedule === 'monthly30_5'
+  );
+
+  // 14. Client blocked numbers endpoint & Agent-scoped App Links
+  const clBlocked = await srv.api('GET', '/api/numbers/blocked', { cookie: cl1Login.cookie });
+  const agAppAdd = await srv.api('POST', '/api/app-links', {
+    cookie: ag1Login.cookie,
+    body: { name: 'Telegram Official', url: 'https://telegram.org', category: 'Messaging' }
+  });
+  const clAppList = await srv.api('GET', '/api/app-links?dashboard=1&limit=10', { cookie: cl1Login.cookie });
+  const clSeesAgApp = (clAppList.data?.data || []).some(a => a.name === 'Telegram Official');
+  check(
+    'Client Blocked & Agent App Links: Client fetches own blocked list and sees Agent-added App Link',
+    clBlocked.status === 200 && agAppAdd.status === 200 && clAppList.status === 200 && clSeesAgApp
   );
 } finally {
   await srv.stop();

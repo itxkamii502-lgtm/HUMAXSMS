@@ -32,7 +32,8 @@ async function pgSmsRanges() {
       typeof zyFetchAllocPolicy === 'function' ? zyFetchAllocPolicy() : Promise.resolve({ mode: 'request' })
     ]);
 
-    const list = Array.isArray(rateCardRes?.ranges) ? rateCardRes.ranges : [];
+    const list = (Array.isArray(rateCardRes?.ranges) ? rateCardRes.ranges : [])
+      .slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
     const fx = Number(rateCardRes?.usd_to_pkr_rate || window._zyClientFx || 280);
     window._zyClientFx = fx;
 
@@ -54,7 +55,7 @@ async function pgSmsRanges() {
     const rows = list.map((r, i) => {
       const rName = r.range_name || r.name || r.country || '—';
       const rId = r.range_id || r.id || null;
-      const countryPrefix = [r.country || '', r.prefix ? `+${String(r.prefix).replace(/^\+/, '')}` : ''].filter(Boolean).join(' · ') || '—';
+      const prefixOnly = r.prefix ? `+${String(r.prefix).trim().replace(/^\++/, '')}` : '—';
       const ptsPkr = r.payterms_pkr || {};
       const ptInfo = typeof zyResolveRangeActivePayterms === 'function'
         ? zyResolveRangeActivePayterms(r)
@@ -109,41 +110,30 @@ async function pgSmsRanges() {
         } else if (roomCount <= 0) {
           actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available from your Agent in this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
         } else {
-          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#059669;border-color:#a7f3d0;background:#ecfdf5;" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])" title="Self-Allocate Numbers (${roomCount.toLocaleString()} free)"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
+          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])" title="Self-Allocate Numbers (${roomCount.toLocaleString()} free)"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
         }
       } else if (reqBlocked) {
         const isPend = blockReason === 'pending_request';
         actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="${isPend ? 'color:#b45309;border-color:#fde68a;background:#fffbeb;' : 'color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;'}cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas ${isPend ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</button>`;
       } else {
-        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#2563eb;border-color:#bfdbfe;background:#eff6ff;font-weight:700;" onclick="zyOpenClientRateCardRequestModal(${i})" title="Request Numbers (up to ${maxReqNow} now)"><i class="fas fa-phone-volume"></i> Request</button>`;
+        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenClientRateCardRequestModal(${i})" title="Request Numbers (up to ${maxReqNow} now)"><i class="fas fa-phone-volume"></i> Request</button>`;
       }
 
       const returnBtnHtml = heldCount > 0
         ? (isWn
-            ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyShowWhitenoiseContactAgentNotice()" title="Contact your Agent to return Monthly Route numbers"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
-            : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`)
-        : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
-
-      const paytermHtml = isWn
-        ? `<span class="zy-payterm-badge zy-pt-monthly"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>`
-        : (typeof zyPaytermBadge === 'function'
-            ? zyPaytermBadge('Weekly')
-            : `<span class="badge badge-purple" style="font-size:10.5px;">Weekly (7/3)</span>`);
-      const routeColHtml = isWn
-        ? `<span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly Route</span>`
-        : `<span class="badge" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;font-size:10.5px;font-weight:700;">Standard Route</span>`;
+            ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyShowWhitenoiseContactAgentNotice()" title="Contact your Agent to return Monthly Route numbers"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+            : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`)
+        : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid is-disabled" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
       return [
-        { v: rName, h: `<div class="${isWn ? 'zy-wn-cell-accent' : ''}" style="min-width:120px;"><strong class="${isWn ? 'zy-wn-range-name' : ''}"${isWn ? '' : ' style="color:#0f172a;"'}>${i + 1}. ${zyEsc(rName)}</strong><div style="font-size:10.5px;margin-top:2px;"><span style="font-weight:700;color:#059669;">PKR</span> <span style="color:#94a3b8;">·</span> ${r.active !== false ? '<span style="color:#10b981;font-weight:700;">Active</span>' : '<span style="color:#dc2626;font-weight:700;">Blocked</span>'}</div></div>` },
-        { v: isWn ? '{W} Monthly Route' : 'Standard Route', h: routeColHtml },
-        { v: countryPrefix, h: `<span class="monospace" style="font-weight:600;color:#2563eb;">${zyEsc(countryPrefix)}</span>` },
-        paytermHtml,
+        { v: rName, h: `<strong class="${isWn ? 'zy-wn-range-name' : ''}"${isWn ? '' : ' style="color:#0f172a;"'}>${zyEsc(rName)}</strong>` },
+        { v: prefixOnly, h: `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(prefixOnly)}</span>` },
         weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
         monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
         `<span class="monospace" style="font-size:11.5px;" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> · <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
         `<span class="monospace" style="font-weight:700;color:#334155;">${zyEsc(displayBatch.join(' / '))} / day</span>`,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
-        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">
+        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
           ${actionBtnHtml}
           ${returnBtnHtml}
@@ -152,7 +142,7 @@ async function pgSmsRanges() {
     });
 
     host.innerHTML = zyDT2('dt-cl-ranges', {
-      cols: ['Range', 'Route', 'Country / Prefix', 'Payterm', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
+      cols: ['Range', 'Prefix', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
       rows
     });
     zy2Render('dt-cl-ranges');
@@ -478,7 +468,8 @@ async function pgMyNumbers() {
 
   const rangeSel = document.getElementById('num-range');
   if (rangeSel) {
-    const uniqueRanges = Array.from(new Set(window._zyClientRawNums.map(n => n.range_name || n.range || n.country || '').filter(Boolean)));
+    const uniqueRanges = Array.from(new Set(window._zyClientRawNums.map(n => n.range_name || n.range || n.country || '').filter(Boolean)))
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
     rangeSel.innerHTML = '<option value="">All Ranges</option>' +
       uniqueRanges.map(r => `<option value="${zyEsc(r)}">${zyEsc(r)}</option>`).join('');
   }
@@ -488,10 +479,12 @@ async function pgMyNumbers() {
 
 function zyClientIsWhitenoiseObj(obj) {
   if (!obj || typeof obj !== 'object') return false;
+  const pt = String(obj.payterm || obj.client_payterm || '').toLowerCase();
   return Boolean(
     obj.is_whitenoise ||
     String(obj.provider || '').toLowerCase().includes('whitenoise') ||
-    String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5'
+    String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
+    pt === 'monthly' || pt === '30/5' || pt === 'monthly30_5'
   );
 }
 
@@ -528,16 +521,16 @@ function zyRenderClientNumbers(list) {
     const cleanPrefix = String(n.prefix || '').trim().replace(/^\++/, '');
     const cleanNumber = String(n.number || '').trim().replace(/^\++/, '');
     const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
+    const isWn = zyClientIsWhitenoiseObj(n);
     const rawNumHtml = typeof zyRenderNumberCopyBox === 'function'
-      ? zyRenderNumberCopyBox(cleanNumber)
-      : (cleanNumber ? `<span style="font-family:monospace;font-weight:600;color:var(--sp-primary,#166534);">${zyEsc(cleanNumber)}</span>` : '—');
+      ? zyRenderNumberCopyBox(cleanNumber, { isWn })
+      : (cleanNumber ? `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--sp-primary,#166534);'}">${zyEsc(cleanNumber)}</span>` : '—');
     const numHtml = isBlockedNum
       ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${zyEsc(cleanNumber)}</span>`
       : rawNumHtml;
     const ratePkr = n.client_rate_pkr != null
       ? Number(n.client_rate_pkr)
       : (n.payout != null ? Number(n.payout) * fx : null);
-    const isWn = zyClientIsWhitenoiseObj(n);
     const rawTerm = isWn ? 'Monthly' : (n.client_payterm || n.payterm || 'Weekly');
     const termBadge = isWn
       ? `<span class="zy-payterm-badge zy-pt-monthly"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>`
@@ -1022,6 +1015,7 @@ async function pgCdr2() {
       </div>
     </div>
 
+    <div id="cdr2-client-panel-access" style="margin-bottom:12px;"></div>
     <div id="cdr2-daily-banner" style="margin-bottom:10px;"></div>
 
     <div class="zy-filter-grid" data-cdr-compact="1">
@@ -1086,10 +1080,14 @@ async function pgCdr2() {
       </div>
     </div>`;
 
-  const [rateCardRes, cdr2Status] = await Promise.all([
+  const [rateCardRes, cdr2Status, panelAccessRes] = await Promise.all([
     apiFetch('/api/client/rate-card').catch(() => ({ ranges: [] })),
-    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null)
+    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null),
+    apiFetch('/api/cdr2/panel-access', { silent: true }).catch(() => null)
   ]);
+  window._zyClientCdr2PanelCache = (panelAccessRes && panelAccessRes.panel) || { url: '', username: '', password: '' };
+  window.zyRenderClientCdr2PanelAccess(window._zyClientCdr2PanelCache);
+
   if (rateCardRes?.usd_to_pkr_rate) window._zyClientFx = Number(rateCardRes.usd_to_pkr_rate);
   const ranges = (Array.isArray(rateCardRes?.ranges) ? rateCardRes.ranges : []).filter(r => zyClientIsWhitenoiseObj(r));
   const rEl = document.getElementById('cdr2-range');
@@ -1109,6 +1107,66 @@ async function pgCdr2() {
     pgClientCdr2Load(1);
   }
 }
+
+window._zyClientCdr2PwdVisible = true;
+window.zyRenderClientCdr2PanelAccess = function(panel) {
+  const host = document.getElementById('cdr2-client-panel-access');
+  if (!host) return;
+  const p = panel || window._zyClientCdr2PanelCache || {};
+  const hasUrl = Boolean(p.url && /^https?:\/\//i.test(p.url));
+  const hasUser = Boolean(p.username);
+  const hasPwd = Boolean(p.password);
+  const pwdText = hasPwd
+    ? (window._zyClientCdr2PwdVisible ? zyEsc(p.password) : '••••••••••')
+    : '<span style="opacity:.6;">Not set</span>';
+
+  host.innerHTML = `
+    <div class="zy-wn-portal-bar">
+      <div class="zy-wn-portal-head">
+        <div class="zy-wn-portal-title">
+          <i class="fas fa-key" style="color:#2563eb;"></i>
+          <span>Panel Access</span>
+          <span class="zy-wn-portal-badge">1-Click Copy</span>
+        </div>
+      </div>
+      <div class="zy-wn-portal-grid">
+        <div class="zy-wn-portal-field">
+          <span class="zy-wn-portal-lbl">Panel Link</span>
+          <div class="zy-wn-portal-val-row">
+            ${hasUrl
+              ? `<a href="${zyEsc(p.url)}" target="_blank" rel="noopener noreferrer" class="zy-wn-portal-link" title="${zyEsc(p.url)}"><i class="fas fa-arrow-up-right-from-square"></i> ${zyEsc(p.url)}</a>`
+              : `<span class="zy-wn-portal-mono" style="opacity:.6;">Not set</span>`}
+            ${hasUrl
+              ? `<button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((window._zyClientCdr2PanelCache||{}).url, 'Panel link')" title="1-Click Copy Panel Link"><i class="far fa-copy"></i> Copy</button>`
+              : ''}
+          </div>
+        </div>
+        <div class="zy-wn-portal-field">
+          <span class="zy-wn-portal-lbl">Username</span>
+          <div class="zy-wn-portal-val-row">
+            <span class="zy-wn-portal-mono">${hasUser ? zyEsc(p.username) : '<span style="opacity:.6;">Not set</span>'}</span>
+            ${hasUser
+              ? `<button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((window._zyClientCdr2PanelCache||{}).username, 'Username')" title="1-Click Copy Username"><i class="far fa-copy"></i> Copy</button>`
+              : ''}
+          </div>
+        </div>
+        <div class="zy-wn-portal-field">
+          <span class="zy-wn-portal-lbl">Password</span>
+          <div class="zy-wn-portal-val-row">
+            <span class="zy-wn-portal-mono">${pwdText}</span>
+            ${hasPwd ? `
+              <button type="button" class="zy-wn-copy-btn" onclick="window._zyClientCdr2PwdVisible=!window._zyClientCdr2PwdVisible;window.zyRenderClientCdr2PanelAccess();" title="${window._zyClientCdr2PwdVisible ? 'Hide password' : 'Show password'}">
+                <i class="far ${window._zyClientCdr2PwdVisible ? 'fa-eye-slash' : 'fa-eye'}"></i>
+              </button>
+              <button type="button" class="zy-wn-copy-btn is-accent" onclick="window.zyCopyTextSafe((window._zyClientCdr2PanelCache||{}).password, 'Password')" title="1-Click Copy Password">
+                <i class="far fa-copy"></i> Copy
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      </div>
+    </div>`;
+};
 
 window.zyResetClientCdr2Filters = function() {
   const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
@@ -1196,9 +1254,11 @@ async function pgClientCdr2Load(page = 1) {
       const rows = data.map(g => {
         const gPkr = g.client_payout_pkr != null ? Number(g.client_payout_pkr) : (Number(g.client_payout || g.payout || 0) * fx);
         return [
-          ...checkedBoxes.map(k => k === 'range'
-            ? { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` }
-            : (g[k] || '—')),
+          ...checkedBoxes.map(k => {
+            if (k === 'range') return { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` };
+            if (k === 'number') return { v: g[k] || '—', h: g[k] ? `<span class="monospace zy-wn-number">${zyEsc(g[k])}</span>` : '—' };
+            return g[k] || '—';
+          }),
           { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
           'Monthly (30/5) {W}',
           { v: gPkr, h: `<span class="monospace" style="color:#059669;font-weight:700;">Rs. ${zyFmtMoney(gPkr, 2)}</span>` }
@@ -1246,7 +1306,7 @@ async function pgClientCdr2Load(page = 1) {
         return [
           { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
           { v: rngLbl, h: `<span class="zy-wn-range-name">${zyEsc(rngLbl)}</span>` },
-          { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
+          { v: numStr, h: numStr ? `<span class="monospace zy-wn-number">${zyEsc(numStr)}</span>` : '—' },
           { v: maskedCli, h: `<span class="monospace">${zyEsc(maskedCli)}</span>` },
           { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },
           { v: unitPkr, h: `<span class="monospace" style="color:#64748b;">Rs. ${zyFmtMoney(unitPkr, 2)}</span>` },

@@ -463,6 +463,40 @@ async function uploadExcel(base, endpoint, cookie, filename, buffer, extraFields
     const rbAgain = await srv.api('POST', `/api/whitenoise-excel/batches/${latestBatchId}/rollback`, { cookie: owner.cookie });
     check('Double rollback of same batch is rejected cleanly (400)', rbAgain.status === 400);
 
+    // ------------------------------------------------------------------
+    // TEST 10: CDR 2 3-Box Panel Access (Agent sets URL/User/Pass -> All Agent Clients see it)
+    // ------------------------------------------------------------------
+    const paBadUrl = await srv.api('PUT', '/api/cdr2/panel-access', {
+      cookie: agent.cookie,
+      body: { url: 'javascript:alert(1)', username: 'u1', password: 'p1' }
+    });
+    const paClientPut403 = await srv.api('PUT', '/api/cdr2/panel-access', {
+      cookie: client1.cookie,
+      body: { url: 'https://evil.example.com', username: 'x', password: 'y' }
+    });
+    const paSave = await srv.api('PUT', '/api/cdr2/panel-access', {
+      cookie: agent.cookie,
+      body: { url: 'panel.example.com/login', username: 'team_user', password: 'StrongPass#99' }
+    });
+    const paC1Get = await srv.api('GET', '/api/cdr2/panel-access', { cookie: client1.cookie });
+    const paC2Get = await srv.api('GET', '/api/cdr2/panel-access', { cookie: client2.cookie });
+    const paNoWn403 = await srv.api('GET', '/api/cdr2/panel-access', { cookie: client3.cookie });
+    check('CDR 2 Panel Access: Agent saves 3 boxes, all enabled Clients see exact URL/User/Pass, bad URL=400, Client PUT/disabled=403',
+      paBadUrl.status === 400 &&
+      paClientPut403.status === 403 &&
+      paSave.status === 200 &&
+      paSave.data?.panel?.url === 'https://panel.example.com/login' &&
+      paC1Get.status === 200 &&
+      paC1Get.data?.panel?.url === 'https://panel.example.com/login' &&
+      paC1Get.data?.panel?.username === 'team_user' &&
+      paC1Get.data?.panel?.password === 'StrongPass#99' &&
+      paC2Get.status === 200 &&
+      paC2Get.data?.panel?.username === 'team_user' &&
+      paC2Get.data?.panel?.password === 'StrongPass#99' &&
+      paNoWn403.status === 403,
+      JSON.stringify({ badUrl: paBadUrl.status, cPut: paClientPut403.status, save: paSave.data, c1: paC1Get.data, c2: paC2Get.data, noWn: paNoWn403.status })
+    );
+
     const ok = summary('Whitenoise Excel Daily Stats');
     await srv.stop();
     fs.rmSync(dir, { recursive: true, force: true });

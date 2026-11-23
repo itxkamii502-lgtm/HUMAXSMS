@@ -434,21 +434,7 @@ body {
         <i class="fas fa-shield-alt pill-icon" style="color: #2563eb;"></i>
         <input type="text" id="twoFaCode" name="two_fa_code" placeholder="Enter 6-digit 2FA code" autocomplete="one-time-code" maxlength="8">
       </div>
-      <div id="twoFaHint" style="font-size: 11.5px; color: #dc2626; font-weight: 600; margin-top: 4px; padding-left: 8px;">Enter your 2FA verification code.</div>
-    </div>
-
-    <!-- Inline Math Captcha -->
-    <div class="captcha-container">
-      <div class="captcha-label-wrap">
-        <i class="fas fa-calculator" style="color:#2563eb;margin-right:6px;font-size:12px;"></i>
-        <span class="captcha-question" id="captchaQuestion">Loading...</span>
-      </div>
-      <div class="captcha-box-wrap">
-        <input type="number" id="captchaInput" class="captcha-input" placeholder="?" autocomplete="off" required>
-        <button type="button" class="captcha-reload" id="reloadCaptcha" title="New Question" aria-label="New Captcha">
-          <i class="fas fa-sync-alt"></i>
-        </button>
-      </div>
+      <div id="twoFaHint" style="font-size: 11.5px; color: #1d4ed8; font-weight: 600; margin-top: 4px; padding-left: 8px;">Enter your 2FA code (trusted on this browser for 3 hours).</div>
     </div>
 
     <!-- Primary LOGIN Button -->
@@ -494,49 +480,6 @@ try {
   } catch (_) {}
 })();
 
-// Math Captcha Logic with Automatic Fresh Challenge
-let currentCaptchaId = '';
-let currentCaptchaAnswer = null;
-let captchaFetchPromise = null;
-
-async function generateCaptcha() {
-  if (captchaFetchPromise) return captchaFetchPromise;
-  captchaFetchPromise = (async () => {
-    const qEl = document.getElementById('captchaQuestion');
-    const inp = document.getElementById('captchaInput');
-    if (inp) {
-      inp.value = '';
-      inp.placeholder = '?';
-    }
-    try {
-      const res = await fetch('/api/auth/captcha?_=' + Date.now(), { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        currentCaptchaId = data.id || '';
-        if (qEl) qEl.textContent = data.question || '';
-        const match = String(data.question || '').match(/(\d+)\s*\+\s*(\d+)/);
-        currentCaptchaAnswer = match ? (parseInt(match[1], 10) + parseInt(match[2], 10)) : null;
-        return;
-      }
-    } catch (_) {}
-
-    // Local fallback challenge if offline
-    const n1 = Math.floor(Math.random() * 12) + 1;
-    const n2 = Math.floor(Math.random() * 12) + 1;
-    currentCaptchaAnswer = n1 + n2;
-    currentCaptchaId = 'local_' + Date.now();
-    if (qEl) qEl.textContent = 'What is ' + n1 + ' + ' + n2 + ' =';
-  })();
-
-  try {
-    await captchaFetchPromise;
-  } finally {
-    captchaFetchPromise = null;
-  }
-}
-
-const reloadBtn = document.getElementById('reloadCaptcha');
-if (reloadBtn) reloadBtn.addEventListener('click', () => generateCaptcha());
 (function cleanLoginLandingState() {
   try {
     ['admin_current_page', 'agent_current_page', 'client_current_page'].forEach(k => {
@@ -548,19 +491,14 @@ if (reloadBtn) reloadBtn.addEventListener('click', () => generateCaptcha());
     }
   } catch (_) {}
 })();
-generateCaptcha();
-window.addEventListener('pageshow', (e) => {
+window.addEventListener('pageshow', () => {
   try {
     ['admin_current_page', 'agent_current_page', 'client_current_page'].forEach(k => {
       sessionStorage.removeItem(k);
       localStorage.removeItem(k);
     });
   } catch (_) {}
-  if (e.persisted) generateCaptcha();
 });
-setInterval(() => {
-  if (document.visibilityState !== 'hidden') generateCaptcha();
-}, 8 * 60 * 1000);
 
 const loginForm = document.getElementById('loginForm');
 const username = document.getElementById('username');
@@ -606,27 +544,6 @@ loginForm.addEventListener('submit', async (e) => {
     return;
   }
 
-  // Ensure captcha is loaded before validating
-  if (!currentCaptchaId) {
-    await generateCaptcha();
-  }
-
-  // Strict math captcha validation
-  const captchaInp = document.getElementById('captchaInput');
-  const userAnsRaw = (captchaInp ? captchaInp.value : '').trim();
-  if (!userAnsRaw) {
-    showError('Please enter the answer to the math captcha.');
-    if (captchaInp) captchaInp.focus();
-    return;
-  }
-  const userAns = parseInt(userAnsRaw, 10);
-  if (isNaN(userAns) || (currentCaptchaAnswer !== null && userAns !== currentCaptchaAnswer)) {
-    showError('Incorrect captcha answer. A new question has been loaded.');
-    await generateCaptcha();
-    if (captchaInp) captchaInp.focus();
-    return;
-  }
-
   const twoFaInp = document.getElementById('twoFaCode');
   const twoFaCode = (twoFaInp ? twoFaInp.value : '').trim();
 
@@ -641,15 +558,12 @@ loginForm.addEventListener('submit', async (e) => {
       body: JSON.stringify({
         username: u,
         password: p,
-        two_fa_code: twoFaCode,
-        captcha_id: currentCaptchaId,
-        captcha_answer: userAns
+        two_fa_code: twoFaCode
       })
     });
 
     const data = await res.json().catch(() => ({}));
 
-    // Server consumes captcha on every POST /api/auth/login, so ALWAYS load a fresh challenge on 2FA or any failure
     if (data.require_2fa) {
       const wrap = document.getElementById('twoFaWrap');
       if (wrap) wrap.style.display = 'block';
@@ -658,7 +572,6 @@ loginForm.addEventListener('submit', async (e) => {
       } else {
         hideError();
       }
-      await generateCaptcha();
       if (twoFaInp) twoFaInp.focus();
       submitBtn.disabled = false;
       submitBtn.innerHTML = defaultBtnHtml;
@@ -667,7 +580,6 @@ loginForm.addEventListener('submit', async (e) => {
 
     if (!res.ok || !data.success) {
       showError(data.error || data.detail || 'Invalid username or password');
-      await generateCaptcha();
       submitBtn.disabled = false;
       submitBtn.innerHTML = defaultBtnHtml;
       return;
@@ -706,7 +618,6 @@ loginForm.addEventListener('submit', async (e) => {
     window.location.replace(targetUrl);
   } catch (err) {
     showError('Network error. Please try again.');
-    await generateCaptcha();
     submitBtn.disabled = false;
     submitBtn.innerHTML = defaultBtnHtml;
   }

@@ -81,13 +81,13 @@ const ZY_CLIENT_ICONS = {
 
 const ZY_CLIENT_MENU = [
   { label: 'Dashboard', page: 'dashboard', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
-  { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
-  { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
-  { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
-  { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'Ranges Rate Card', page: 'sms-overview', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'CDR & Statistics', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
   { label: 'CDR 2 (Monthly)', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
+  { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
+  { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
   { label: 'Notifications', page: 'news', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'Payment Requests', page: 'payout-requests', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'Credit Notes', page: 'my-earnings', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)' },
@@ -251,12 +251,13 @@ pgDashboard = async function () {
         CLIENT_USER = Object.assign({}, CLIENT_USER || {}, me);
       }
     }
-    const [numbersRes, daily, periodStats, rateCardRes, news, earnRes, meRes] = await Promise.all([
+    const [numbersRes, blockedRes, daily, periodStats, rateCardRes, appLinksRes, earnRes, meRes] = await Promise.all([
       apiFetch(`/api/numbers?client_id=${CLIENT_ID}&limit=1`, { silent: true }).catch(() => ({ total: 0, data: [] })),
+      apiFetch('/api/numbers/blocked', { silent: true }).catch(() => ({ count: 0, data: [] })),
       apiFetch(`/api/sms/daily-stats?client_id=${CLIENT_ID}`, { silent: true }),
       apiFetch(`/api/sms/period-stats?client_id=${CLIENT_ID}`, { silent: true }).catch(() => null),
       apiFetch('/api/client/rate-card', { silent: true }).catch(() => ({ ranges: [] })),
-      apiFetch('/api/notifications?limit=5', { silent: true }).catch(() => ({ data: [] })),
+      apiFetch('/api/app-links?dashboard=1&limit=10', { silent: true }).catch(() => ({ data: [] })),
       CLIENT_ID ? apiFetch(`/api/client/${CLIENT_ID}/earnings`, { silent: true }).catch(() => null) : Promise.resolve(null),
       apiFetch('/api/auth/me', { silent: true }).catch(() => null)
     ]);
@@ -264,6 +265,12 @@ pgDashboard = async function () {
       window.zyRefreshWhitenoiseNav(meRes);
     }
     const clientHasWn = Boolean((meRes && meRes.whitenoise_access) || window.ZY_WHITENOISE_ACCESS || (window.CLIENT_USER && CLIENT_USER.whitenoise_access));
+    const blockedCount = Number(
+      (blockedRes && blockedRes.count != null)
+        ? blockedRes.count
+        : (Array.isArray(blockedRes?.data) ? blockedRes.data.length : 0)
+    );
+    const appLinks = Array.isArray(appLinksRes?.data) ? appLinksRes.data.slice(0, 10) : [];
 
     const d = daily || {};
     const p = periodStats || {};
@@ -328,18 +335,6 @@ pgDashboard = async function () {
       };
     });
 
-    const maskedTopAccess = (p.top_access_today || []).slice(0, 5).map(row => ({
-      cli: (typeof zyMaskCli === 'function' && row.cli && row.cli !== '—') ? zyMaskCli(row.cli) : row.cli,
-      range: row.range,
-      total: row.total
-    }));
-
-    const newsList = Array.isArray(news) ? news : ((news && news.data) || []);
-    const notifications = newsList.slice(0, 5).map(n => ({
-      date: String(n.created || n.created_at || n.date || '').replace('T', ' ').slice(0, 10) || '—',
-      title: n.title || n.headline || n.message || 'Announcement'
-    }));
-
     const fmtPkr = v => `Rs. ${Number(v || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 
     if (typeof window.zyRenderUnifiedDashboard === 'function') {
@@ -350,20 +345,19 @@ pgDashboard = async function () {
         reportsRoute: 'my-sms',
         notificationsRoute: 'news',
         chartId: 'zy-client-week-chart',
-        chartTodayTotal: totalTodaySms,
+        chartTodayTotal: apiTodaySms,
         weeklyLabels,
         weeklyTraffic,
         hero: {
           label: 'Today SMS (API)',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS on your numbers today',
+          subtitle: 'API SMS on your numbers today (UTC)',
           icon: 'fa-check',
           page: 'my-sms'
         },
         moneyCards: [
-          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: clientHasWn ? 'Monthly {W} SMS today' : 'Monthly {W} route inactive', icon: 'fa-tower-cell', page: clientHasWn ? 'cdr2' : 'my-sms' },
-          { label: 'Today SMS Total', value: totalTodaySms.toLocaleString(), sub: 'API + Monthly {W} combined today', icon: 'fa-layer-group', page: 'my-sms' }
+          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: clientHasWn ? 'cdr2' : 'my-sms' }
         ],
         shortcuts: [
           { label: 'My Numbers', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
@@ -385,12 +379,11 @@ pgDashboard = async function () {
         summaryRows: [
           { label: 'My Balance (PKR)', value: fmtPkr(mainBalance), icon: 'fa-wallet', page: 'my-balance' },
           { label: 'My Numbers', value: numberCount.toLocaleString(), icon: 'fa-mobile-screen', page: 'my-numbers' },
-          { label: 'Earnings Today (PKR)', value: fmtPkr(earnToday), icon: 'fa-coins', page: 'my-earnings' },
+          { label: 'Blocked Numbers', value: blockedCount.toLocaleString(), icon: 'fa-ban', tone: 'red', page: 'my-numbers' },
           { label: 'SMS Last 7 Days', value: last7Val.toLocaleString(), icon: 'fa-comment-sms', page: 'my-sms' }
         ],
         latestRanges,
-        topAccess: maskedTopAccess,
-        notifications
+        appLinks
       });
     }
   } catch (err) {

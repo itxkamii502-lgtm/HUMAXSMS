@@ -229,13 +229,13 @@ pgDashboard = async function () {
     zyUpdateBreadcrumb('dashboard', 'Dashboard');
   }
   try {
-    const [clients, daily, periodStats, numbersRes, rangesRes, news, earnRes, clientRatesRes, meRes] = await Promise.all([
+    const [clients, daily, periodStats, numbersRes, rangesRes, appLinksRes, earnRes, clientRatesRes, meRes] = await Promise.all([
       apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=200`).catch(() => ({ data: [] })),
       apiFetch(`/api/sms/daily-stats?agent_id=${AGENT_ID}`),
       apiFetch(`/api/sms/period-stats?agent_id=${AGENT_ID}`).catch(() => null),
       apiFetch(`/api/numbers?agent_id=${AGENT_ID}&limit=1`).catch(() => ({ total: 0, data: [] })),
       apiFetch('/api/numbers/sms-ranges').catch(() => []),
-      apiFetch('/api/notifications?limit=5').catch(() => ({ data: [] })),
+      apiFetch('/api/app-links?dashboard=1&limit=10', { silent: true }).catch(() => ({ data: [] })),
       apiFetch(`/api/agent/${AGENT_ID}/earnings`).catch(() => null),
       apiFetch('/api/agent/client-rates', { silent: true }).catch(() => null),
       apiFetch('/api/auth/me', { silent: true }).catch(() => null)
@@ -244,6 +244,7 @@ pgDashboard = async function () {
       window.zyRefreshWhitenoiseNav(meRes);
     }
     const agentHasWn = Boolean((meRes && meRes.whitenoise_access) || window.ZY_WHITENOISE_ACCESS);
+    const appLinks = Array.isArray(appLinksRes?.data) ? appLinksRes.data.slice(0, 10) : [];
 
     const d = daily || {};
     const p = periodStats || {};
@@ -295,12 +296,6 @@ pgDashboard = async function () {
       };
     });
 
-    const newsList = Array.isArray(news) ? news : ((news && news.data) || []);
-    const notifications = newsList.slice(0, 5).map(n => ({
-      date: String(n.created || n.created_at || n.date || '').replace('T', ' ').slice(0, 10) || '—',
-      title: n.title || n.headline || n.message || 'Announcement'
-    }));
-
     const pendingRateCount = Number(clientRatesRes?.pending_count || 0);
     const dashFx = Number(clientRatesRes?.usd_to_pkr_rate || 280);
     const dashTarget = clientRatesRes?.weekly_target || null;
@@ -332,29 +327,28 @@ pgDashboard = async function () {
         reportsRoute: 'detailed-sms',
         notificationsRoute: 'notifications',
         chartId: 'zy-agent-week-chart',
-        chartTodayTotal: totalTodaySms,
+        chartTodayTotal: apiTodaySms,
         weeklyLabels,
         weeklyTraffic,
         hero: {
           label: 'Today SMS (API)',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS on your numbers today',
+          subtitle: 'API SMS on your numbers today (UTC)',
           icon: 'fa-check',
           page: 'detailed-sms'
         },
         moneyCards: [
-          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: agentHasWn ? 'Monthly {W} SMS today' : 'Monthly {W} route inactive', icon: 'fa-tower-cell', page: agentHasWn ? 'cdr2' : 'sms-ranges' },
-          { label: 'Today SMS Total', value: totalTodaySms.toLocaleString(), sub: 'API + Monthly {W} combined today', icon: 'fa-layer-group', page: 'detailed-sms' }
+          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: agentHasWn ? 'cdr2' : 'sms-ranges' }
         ],
         shortcuts: [
           { label: 'My Numbers', page: 'my-sms-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
-          { label: 'Ranges & Rates', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
+          { label: 'My Clients', page: 'my-clients', icon: 'fa-users', tone: 'green' },
           { label: 'Client Rate Set', page: 'client-rate-set', icon: 'fa-tags', tone: 'blue' },
           { label: 'CDR & Stats', page: 'detailed-sms', icon: 'fa-comment-sms', tone: 'green' },
           agentHasWn
             ? { label: 'CDR 2 (Monthly)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'blue' }
-            : { label: 'My Clients', page: 'my-clients', icon: 'fa-users', tone: 'blue' },
+            : { label: 'Live Chat', page: 'live-chat', icon: 'fa-comments', tone: 'blue' },
           { label: 'Client Payouts', page: 'client-payment-requests', icon: 'fa-money-bill-transfer', tone: 'green' }
         ],
         volumes: [
@@ -371,8 +365,7 @@ pgDashboard = async function () {
           { label: 'SMS Last 7 Days', value: last7Val.toLocaleString(), icon: 'fa-comment-sms', page: 'detailed-sms' }
         ],
         latestRanges,
-        topAccess: (p.top_access_today || []).slice(0, 5),
-        notifications
+        appLinks
       });
     }
   } catch (err) {

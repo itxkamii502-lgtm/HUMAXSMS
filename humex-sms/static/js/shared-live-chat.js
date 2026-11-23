@@ -1554,19 +1554,23 @@
       }
       if (!q) return true;
       return `${ct.display_name || ''} ${ct.username || ''}`.toLowerCase().includes(q);
-    });
+    }).sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
 
     let html = '';
 
+    const isClientActor = Boolean(state.me && state.me.role === 'client');
     if (filteredConvs.length) {
       html += filteredConvs.map(c => {
         const active = Number(c.id) === Number(state.activeConvId);
         const isGroup = c.type === 'agent_group';
+        const hideMembers = Boolean(isClientActor || c.hide_members);
         const isOnline = !isGroup && Boolean(c.peer && c.peer.online);
         const typingText = getTypingText(c.id);
         const schedClosed = isGroup && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
         const roleSub = isGroup
-          ? `Group · ${(c.members || []).length} members${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
+          ? (hideMembers
+              ? `Group${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
+              : `Group · ${(c.members || []).length} members${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`)
           : (c.peer && c.peer.role === 'owner' ? 'Owner' : (c.peer && c.peer.role === 'agent' ? 'Agent' : 'Client'));
 
         const previewHtml = typingText
@@ -1655,9 +1659,15 @@
       return;
     }
     if (conv.type === 'agent_group') {
-      const onlineCnt = (conv.members || []).filter(m => m.online).length;
-      const parts = [`${(conv.members || []).length} members`];
-      if (onlineCnt > 0) parts.push(`${onlineCnt} online`);
+      const hideMembers = Boolean((state.me && state.me.role === 'client') || conv.hide_members);
+      const parts = [];
+      if (!hideMembers) {
+        const onlineCnt = (conv.members || []).filter(m => m.online).length;
+        parts.push(`${(conv.members || []).length} members`);
+        if (onlineCnt > 0) parts.push(`${onlineCnt} online`);
+      } else {
+        parts.push('Group Chat');
+      }
       if (conv.schedule_state && conv.schedule_state.enabled && conv.schedule_state.is_closed) {
         parts.push(`🌙 Closed · Reopens ${formatTime12h(conv.schedule_state.open_time)} PKT`);
       } else if (conv.schedule && conv.schedule.enabled) {
@@ -1723,13 +1733,19 @@
       const canPreviewDeleted = Boolean(m.deleted && m.can_preview_deleted);
       const isPreviewOpen = canPreviewDeleted && state.expandedDeletedIds.has(Number(m.id));
 
+      const hidePeerClientIdentity = Boolean(isGroup && ((state.me && state.me.role === 'client') || conv.hide_members));
       const senderLabel = isGroup && !isMine
-        ? `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)}${m.sender_role === 'agent' ? ' · Admin' : ''}</div>`
+        ? (hidePeerClientIdentity && m.sender_role !== 'agent'
+            ? ''
+            : `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)}${m.sender_role === 'agent' ? ' · Admin' : ''}</div>`)
         : '';
 
+      const replyWho = (hidePeerClientIdentity && m.reply_to && m.reply_to.sender_role === 'client')
+        ? 'Member'
+        : (m.reply_to && m.reply_to.sender_name) || 'Message';
       const replyBlock = m.reply_to && !m.deleted
         ? `<div class="zy-chat-quote" data-jump-msg="${m.reply_to.id}">
-             <div class="zy-chat-quote-who">${esc(m.reply_to.sender_name || 'Message')}</div>
+             <div class="zy-chat-quote-who">${esc(replyWho)}</div>
              <div class="zy-chat-quote-txt">${esc(m.reply_to.body_snippet || '')}</div>
            </div>`
         : '';
@@ -1992,9 +2008,13 @@
   function renderGroupDrawerHtml(conv) {
     if (!state.drawerOpen || !conv || conv.type !== 'agent_group') return '';
     const isAdmin = Boolean(conv.can_manage);
+    const hideMembers = Boolean((state.me && state.me.role === 'client') || conv.hide_members);
+    if (hideMembers && !isAdmin) return '';
     const memberKeys = new Set(conv.participants || []);
     const addableClients = isAdmin
-      ? state.contacts.filter(c => c.role === 'client' && !memberKeys.has(c.key))
+      ? state.contacts
+          .filter(c => c.role === 'client' && !memberKeys.has(c.key))
+          .sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }))
       : [];
 
     return `
@@ -2109,7 +2129,9 @@
 
   function renderCreateGroupModalHtml() {
     if (!state.createModalOpen || !state.me || state.me.role !== 'agent') return '';
-    const myClients = state.contacts.filter(c => c.role === 'client');
+    const myClients = state.contacts
+      .filter(c => c.role === 'client')
+      .sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
     return `
       <div class="zy-chat-modal-backdrop" id="zy-cg-backdrop">
         <div class="zy-chat-modal" role="dialog" aria-modal="true" aria-label="Create Client Group">
@@ -2173,6 +2195,7 @@
     }
 
     const isGroup = conv.type === 'agent_group';
+    const hideGroupDrawer = Boolean(isGroup && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
     const isOnline = !isGroup && Boolean(conv.peer && conv.peer.online);
     const pinned = conv.pinned_message;
 
@@ -2184,7 +2207,7 @@
             ${isGroup ? '<i class="fas fa-users"></i>' : esc(initials(conv.title))}
             ${isOnline ? '<span class="zy-chat-dot-online"></span>' : ''}
           </div>
-          <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${isGroup ? 'role="button" tabindex="0"' : ''}>
+          <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${(isGroup && !hideGroupDrawer) ? 'role="button" tabindex="0"' : ''}>
             <div class="zy-chat-thread-name">${esc(conv.title)}</div>
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
@@ -2197,7 +2220,7 @@
               <i class="fas fa-eraser"></i>
               <span>Clear</span>
             </button>
-            ${isGroup ? `
+            ${(isGroup && !hideGroupDrawer) ? `
               <button type="button" class="zy-chat-head-btn" id="zy-chat-group-info-btn" title="${conv.can_manage ? 'Group Admin Settings' : 'Group Info'}">
                 <i class="fas ${conv.can_manage ? 'fa-sliders' : 'fa-circle-info'}"></i>
                 <span>${conv.can_manage ? 'Manage' : 'Info'}</span>
@@ -2307,7 +2330,7 @@
     const infoBtn = document.getElementById('zy-chat-group-info-btn');
     const headMeta = document.getElementById('zy-chat-head-meta');
     const toggleDrawer = () => {
-      if (!isGroup) return;
+      if (!isGroup || hideGroupDrawer) return;
       state.drawerOpen = !state.drawerOpen;
       state.confirmDeleteGroup = false;
       renderThreadArea(false);

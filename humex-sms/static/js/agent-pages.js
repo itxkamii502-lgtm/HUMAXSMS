@@ -6,7 +6,7 @@ let ZY_RANGES = [], ZY_CLIENTS = [], ZY_NUMROWS = [];
 
 async function zyFillClients(selectId, label) {
   const res = await apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=200`);
-  ZY_CLIENTS = zyList(res);
+  ZY_CLIENTS = zyList(res).slice().sort((a, b) => String(a.username || '').localeCompare(String(b.username || ''), undefined, { sensitivity: 'base' }));
   const el = document.getElementById(selectId);
   if (el) el.innerHTML = `<option value="">${label || 'Filter Client'}</option>` +
     ZY_CLIENTS.map(c => `<option value="${c.id}">${zyEsc(c.username)}</option>`).join('');
@@ -43,7 +43,7 @@ async function pgSmsRanges() {
       typeof zyFetchAllocPolicy === 'function' ? zyFetchAllocPolicy() : Promise.resolve({ mode: 'request' })
     ]);
 
-    const list = zyList(rangesRes);
+    const list = zyList(rangesRes).slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
     const myNums = zyList(myNumsRes);
     ZY_AGENT_RANGE_LIST = list;
     window._zyAgtPolicy = policy || { mode: 'request' };
@@ -92,8 +92,8 @@ async function pgSmsRanges() {
         : (r.provider || 'Direct');
 
       const returnBtnHtml = heldCount > 0
-        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" onclick="zyOpenRangeReturnModal(${r.id || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
-        : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-range" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
+        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyOpenRangeReturnModal(${r.id || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="Return numbers from ${zyEsc(rName)} by date"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+        : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid is-disabled" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
       let allocBtnHtml = '';
       if (isSelfAlloc) {
@@ -102,7 +102,7 @@ async function pgSmsRanges() {
         } else if (roomCount <= 0) {
           allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available in Owner pool for this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
         } else {
-          allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#059669;border-color:#a7f3d0;background:#ecfdf5;" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${r.id || 'null'}, window._zyAgtPolicy, pgSmsRanges, ZY_AGENT_RANGE_LIST[${i}])" title="Self-Allocate from ${roomCount.toLocaleString()} free pool numbers"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
+          allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${r.id || 'null'}, window._zyAgtPolicy, pgSmsRanges, ZY_AGENT_RANGE_LIST[${i}])" title="Self-Allocate from ${roomCount.toLocaleString()} free pool numbers"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
         }
       } else {
         if (hasPendingReq) {
@@ -112,29 +112,25 @@ async function pgSmsRanges() {
         } else if (roomCount <= 0) {
           allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available in Owner pool for this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
         } else {
-          allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#2563eb;border-color:#bfdbfe;background:#eff6ff;" onclick="zyOpenRequestNumbersModal('${zyEsc(rName)}', ${r.id || 'null'}, window._zyAgtPolicy, pgSmsRanges, ZY_AGENT_RANGE_LIST[${i}])" title="Request Numbers (${roomCount.toLocaleString()} free in Owner pool)"><i class="fas fa-phone-volume"></i> Request</button>`;
+          allocBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenRequestNumbersModal('${zyEsc(rName)}', ${r.id || 'null'}, window._zyAgtPolicy, pgSmsRanges, ZY_AGENT_RANGE_LIST[${i}])" title="Request Numbers (${roomCount.toLocaleString()} free in Owner pool)"><i class="fas fa-phone-volume"></i> Request</button>`;
         }
       }
 
-      const routeBadgeHtml = ptInfo.isWn
-        ? `<span class="zy-wn-route-tag"><i class="fas fa-calendar-check"></i> {W} Monthly Route</span>`
-        : `<span class="badge" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;font-size:10.5px;font-weight:700;">${zyEsc(safeProvider || 'Standard Route')}</span>`;
       const inactDays = Math.max(0, parseInt(r.inactivity_days, 10) || 0);
       const isBlockedRange = String(r.range_status || r.status || '').toLowerCase() === 'blocked' || r.active === false;
       const statusHtml = isBlockedRange
         ? `<span style="color:#dc2626;font-weight:700;"><i class="fas fa-ban"></i> Blocked</span>`
         : `<span style="color:#10b981;font-weight:700;">Active</span>${inactDays > 0 ? `<div style="font-size:10px;color:#b45309;font-weight:700;">Auto-Block: ${inactDays}d</div>` : ''}`;
+      const prefixDisplay = r.prefix ? `+${String(r.prefix).trim().replace(/^\++/, '')}` : '—';
 
       return [
-        { v: rName, h: `<div class="${ptInfo.isWn ? 'zy-wn-cell-accent' : ''}" style="min-width:120px;"><strong class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}"${ptInfo.isWn ? '' : ' style="color:#0f172a;"'}>${i + 1}. ${zyEsc(rName)}</strong><div style="font-size:10.5px;color:#64748b;margin-top:2px;"><b>${zyEsc(curr)}</b></div></div>` },
-        { v: ptInfo.isWn ? '{W} Monthly Route' : (safeProvider || 'Standard Route'), h: routeBadgeHtml },
-        `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(r.prefix || '—')}</span>`,
-        { v: ptInfo.primary, h: ptBadge },
+        { v: rName, h: `<strong class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}"${ptInfo.isWn ? '' : ' style="color:#0f172a;"'}>${zyEsc(rName)}</strong>` },
+        `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(prefixDisplay)}</span>`,
         weeklyRate !== null ? `<span style="font-family:monospace;font-weight:700;color:#16a34a;">${currSym} ${zyFmtMoney(weeklyRate, 4)}</span>` : naHtml,
         monthlyRate !== null ? `<span style="font-family:monospace;font-weight:700;color:#7c3aed;">${currSym} ${zyFmtMoney(monthlyRate, 4)}</span>` : naHtml,
         `<span style="font-family:monospace;font-size:11.5px;" title="Your Held: ${heldCount} (${agentFreePool} free in your pool) · Owner Free Pool: ${roomCount}"><b>${heldCount.toLocaleString()}</b> / <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
         { v: isBlockedRange ? 'Blocked' : 'Active', h: statusHtml },
-        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">
+        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewAgentRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
           ${allocBtnHtml}
           ${returnBtnHtml}
@@ -145,7 +141,7 @@ async function pgSmsRanges() {
     const host = document.getElementById('agt-ranges-table-host');
     if (host) {
       host.innerHTML = zyDT2('dt-ranges', {
-        cols: ['Range', 'Route', 'Prefix', 'Payterm', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Free Pool', 'Status', 'Actions'],
+        cols: ['Range', 'Prefix', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Free Pool', 'Status', 'Actions'],
         rows
       });
       zy2Render('dt-ranges');
@@ -899,8 +895,8 @@ async function pgMySmsNumbers() {
     window._zyAgentClientRatesCache = crsRes;
   }
   ZY_ALL_NUMS = zyList(nums);
-  ZY_RANGES = zyList(ranges);
-  ZY_CLIENTS = zyList(clientsRes);
+  ZY_RANGES = zyList(ranges).slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
+  ZY_CLIENTS = zyList(clientsRes).slice().sort((a, b) => String(a.username || '').localeCompare(String(b.username || ''), undefined, { sensitivity: 'base' }));
 
   ZY_RANGES_LOOKUP = {};
   ZY_RANGES.forEach(r => {
@@ -910,7 +906,7 @@ async function pgMySmsNumbers() {
     if (r.country && r.provider) ZY_RANGES_LOOKUP[`${r.country}|${r.provider}`] = r;
   });
 
-  // Populate Range dropdown
+  // Populate Range dropdown (A-Z)
   const rangeSel = document.getElementById('num-range');
   if (rangeSel) {
     const uniqueRanges = [];
@@ -922,11 +918,12 @@ async function pgMySmsNumbers() {
         uniqueRanges.push({ id: n.range_id || rName, name: rName });
       }
     });
+    uniqueRanges.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }));
     rangeSel.innerHTML = '<option value="">All Ranges</option>' +
       uniqueRanges.map(r => `<option value="${zyEsc(r.name)}">${zyEsc(r.name)}</option>`).join('');
   }
 
-  // Populate Client dropdown
+  // Populate Client dropdown (A-Z)
   const clientSel = document.getElementById('num-client');
   if (clientSel) {
     clientSel.innerHTML = '<option value="">All Clients</option>' +
@@ -975,10 +972,12 @@ window.zySyncSelectionBar = function(id) {
 
 function zyIsWhitenoiseObj(obj) {
   if (!obj || typeof obj !== 'object') return false;
+  const pt = String(obj.payterm || obj.client_payterm || obj.agent_payterm || '').toLowerCase();
   return Boolean(
     obj.is_whitenoise ||
     String(obj.provider || '').toLowerCase().includes('whitenoise') ||
-    String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5'
+    String(obj.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
+    pt === 'monthly' || pt === '30/5' || pt === 'monthly30_5'
   );
 }
 
@@ -1040,8 +1039,8 @@ function zyRenderNumbersTable(numsList) {
       : `<span style="color:#94a3b8;font-size:11px;">—</span>`;
 
     const rawNumberHtml = typeof zyRenderNumberCopyBox === 'function'
-      ? zyRenderNumberCopyBox(cleanNumber)
-      : `<span style="font-family:monospace;font-weight:600;color:var(--brand-primary,#166534);">${zyEsc(cleanNumber)}</span>`;
+      ? zyRenderNumberCopyBox(cleanNumber, { isWn })
+      : `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--brand-primary,#166534);'}">${zyEsc(cleanNumber)}</span>`;
     const numberHtml = isBlockedNum
       ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-circle-xmark" style="font-size:11px;"></i>${zyEsc(cleanNumber)}</span>`
       : rawNumberHtml;
@@ -2172,6 +2171,7 @@ async function pgCdr2() {
       </div>
     </div>
 
+    <div id="cdr2-agent-panel-access" style="margin-bottom:12px;"></div>
     <div id="cdr2-daily-banner" style="margin-bottom:10px;"></div>
 
     <div class="zy-filter-grid" data-cdr-compact="1">
@@ -2240,10 +2240,14 @@ async function pgCdr2() {
       </div>
     </div>`;
 
-  const [rangesRaw, cdr2Status] = await Promise.all([
+  const [rangesRaw, cdr2Status, panelAccessRes] = await Promise.all([
     apiFetch('/api/numbers/sms-ranges').catch(() => []),
-    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null)
+    apiFetch('/api/cdr2/status', { silent: true }).catch(() => null),
+    apiFetch('/api/cdr2/panel-access', { silent: true }).catch(() => null)
   ]);
+  window._zyAgentCdr2PanelCache = (panelAccessRes && panelAccessRes.panel) || { url: '', username: '', password: '' };
+  window.zyRenderAgentCdr2PanelAccess(window._zyAgentCdr2PanelCache);
+
   const ranges = zyList(rangesRaw).filter(r => zyIsWhitenoiseObj(r));
   const rEl = document.getElementById('cdr2-range');
   if (rEl) {
@@ -2263,6 +2267,80 @@ async function pgCdr2() {
     zyAgentCdr2Load(1);
   }
 }
+
+window.zyRenderAgentCdr2PanelAccess = function(panel) {
+  const host = document.getElementById('cdr2-agent-panel-access');
+  if (!host) return;
+  const p = panel || window._zyAgentCdr2PanelCache || { url: '', username: '', password: '' };
+  host.innerHTML = `
+    <div class="zy-wn-portal-bar">
+      <div class="zy-wn-portal-head">
+        <div class="zy-wn-portal-title">
+          <i class="fas fa-key" style="color:#2563eb;"></i>
+          <span>Client Panel Access</span>
+          <span class="zy-wn-portal-badge">Visible to All Your Clients</span>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-save-agent-cdr2-pa" onclick="window.zySaveAgentCdr2PanelAccess()">
+          <i class="fas fa-save"></i> Save Details
+        </button>
+      </div>
+      <div class="zy-wn-portal-grid">
+        <div class="zy-wn-portal-field">
+          <label class="zy-wn-portal-lbl" for="cdr2-pa-url">Panel Link</label>
+          <div class="zy-wn-portal-val-row">
+            <input type="url" id="cdr2-pa-url" class="zy-cdr2-pa-input" autocomplete="off" placeholder="https://panel.example.com" value="${zyEsc(p.url || '')}">
+            <button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((document.getElementById('cdr2-pa-url')?.value || '').trim(), 'Panel link')" title="Copy Panel Link">
+              <i class="far fa-copy"></i> Copy
+            </button>
+          </div>
+        </div>
+        <div class="zy-wn-portal-field">
+          <label class="zy-wn-portal-lbl" for="cdr2-pa-user">Username</label>
+          <div class="zy-wn-portal-val-row">
+            <input type="text" id="cdr2-pa-user" class="zy-cdr2-pa-input" autocomplete="off" placeholder="Enter client username" value="${zyEsc(p.username || '')}">
+            <button type="button" class="zy-wn-copy-btn" onclick="window.zyCopyTextSafe((document.getElementById('cdr2-pa-user')?.value || '').trim(), 'Username')" title="Copy Username">
+              <i class="far fa-copy"></i> Copy
+            </button>
+          </div>
+        </div>
+        <div class="zy-wn-portal-field">
+          <label class="zy-wn-portal-lbl" for="cdr2-pa-pass">Password</label>
+          <div class="zy-wn-portal-val-row">
+            <input type="text" id="cdr2-pa-pass" class="zy-cdr2-pa-input" autocomplete="off" placeholder="Enter client password" value="${zyEsc(p.password || '')}">
+            <button type="button" class="zy-wn-copy-btn is-accent" onclick="window.zyCopyTextSafe(document.getElementById('cdr2-pa-pass')?.value || '', 'Password')" title="Copy Password">
+              <i class="far fa-copy"></i> Copy
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+};
+
+window.zySaveAgentCdr2PanelAccess = async function() {
+  const url = (document.getElementById('cdr2-pa-url')?.value || '').trim();
+  const username = (document.getElementById('cdr2-pa-user')?.value || '').trim();
+  const password = document.getElementById('cdr2-pa-pass')?.value || '';
+  const btn = document.getElementById('btn-save-agent-cdr2-pa');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…'; }
+  try {
+    const res = await apiFetch('/api/cdr2/panel-access', {
+      method: 'PUT',
+      body: JSON.stringify({ url, username, password })
+    });
+    if (res && res.success) {
+      window._zyAgentCdr2PanelCache = res.panel || { url, username, password };
+      window.zyRenderAgentCdr2PanelAccess(window._zyAgentCdr2PanelCache);
+      toast('Panel access saved for all your clients', 'success');
+    } else if (res && res.error) {
+      toast(res.error, 'error');
+    }
+  } catch (err) {
+    toast(err?.message || 'Failed to save panel access', 'error');
+  } finally {
+    const b = document.getElementById('btn-save-agent-cdr2-pa');
+    if (b) { b.disabled = false; b.innerHTML = '<i class="fas fa-save"></i> Save Details'; }
+  }
+};
 
 window.zyResetAgentCdr2Filters = function() {
   const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
@@ -2363,6 +2441,10 @@ async function zyAgentCdr2Load(page = 1) {
             const rVal = g[k] || '—';
             return { v: rVal, h: `<span class="zy-wn-range-name">${zyEsc(rVal)}</span>` };
           }
+          if (k === 'number') {
+            const nVal = g[k] || '';
+            return { v: nVal || '—', h: nVal ? `<span class="monospace zy-wn-number">${zyEsc(nVal)}</span>` : '—' };
+          }
           return g[k] ? zyEsc(g[k]) : '—';
         }),
         { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
@@ -2423,7 +2505,7 @@ async function zyAgentCdr2Load(page = 1) {
         return [
           { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
           { v: rngLbl, h: `<span class="zy-wn-range-name">${zyEsc(rngLbl)}</span>` },
-          { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
+          { v: numStr, h: numStr ? `<span class="monospace zy-wn-number">${zyEsc(numStr)}</span>` : '—' },
           { v: maskedCli, h: `<span class="monospace">${zyEsc(maskedCli)}</span>` },
           { v: clDisplay || 'Agent Pool', h: clCellHtml },
           { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },
@@ -3796,12 +3878,15 @@ async function pgAppLinks(tabOverride) {
 
   c.innerHTML = `
     <div class="zy-card" style="padding:16px 18px;">
-      <div class="zy-applinks-tabbar">
+      <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
         <button type="button" class="zy-applinks-tab ${_agentAppLinksTab === 'links' ? 'active' : ''}" onclick="pgAppLinks('links')">
           <i class="fas fa-link"></i> Apps Links (${_agentAppLinksData.length})
         </button>
         <button type="button" class="zy-applinks-tab ${_agentAppLinksTab === 'clients' ? 'active' : ''}" onclick="pgAppLinks('clients')">
           <i class="fas fa-users"></i> Client Access (${enabledClients}/${_agentAppLinksClients.length})
+        </button>
+        <button type="button" class="zy-btn-blue-solid" style="height:34px;min-height:34px;padding:0 12px;font-size:12px;" onclick="zyAgentOpenAppLinkModal()">
+          <i class="fas fa-plus"></i> Add App Link
         </button>
         <div style="margin-left:auto;min-width:210px;">
           <input type="search" class="zy-input" placeholder="Search apps or clients…" value="${zyEsc(_agentAppLinksQuery)}" oninput="zyAgentFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
@@ -3819,13 +3904,76 @@ window.zyAgentFilterAppLinks = function(q) {
   zyRenderAgentAppLinksBody();
 };
 
+window.zyAgentOpenAppLinkModal = function(existingId) {
+  const item = existingId ? _agentAppLinksData.find(x => Number(x.id) === Number(existingId)) : null;
+  zyModal(item ? 'Edit App Link' : 'Add App Link for Your Clients', `
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div>
+        <label style="display:block;font-size:12px;font-weight:700;margin-bottom:4px;">App Name *</label>
+        <input type="text" id="ag-al-name" class="zy-input" placeholder="e.g. WhatsApp Business" value="${zyEsc(item ? item.name : '')}" maxlength="120">
+      </div>
+      <div>
+        <label style="display:block;font-size:12px;font-weight:700;margin-bottom:4px;">App URL *</label>
+        <input type="url" id="ag-al-url" class="zy-input" placeholder="https://..." value="${zyEsc(item ? item.url : '')}" maxlength="500">
+      </div>
+      <div>
+        <label style="display:block;font-size:12px;font-weight:700;margin-bottom:4px;">Category (Optional)</label>
+        <input type="text" id="ag-al-cat" class="zy-input" placeholder="e.g. Messaging, Finance, Social" value="${zyEsc(item ? (item.category || '') : '')}" maxlength="60">
+      </div>
+      <div>
+        <label style="display:block;font-size:12px;font-weight:700;margin-bottom:4px;">Notes (Optional)</label>
+        <input type="text" id="ag-al-notes" class="zy-input" placeholder="Short instructions for clients" value="${zyEsc(item ? (item.notes || '') : '')}" maxlength="240">
+      </div>
+      <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;cursor:pointer;">
+        <input type="checkbox" id="ag-al-pin" ${item && item.pinned_top ? 'checked' : ''}> Pin to Top (appears in Latest 10 Dashboard Apps)
+      </label>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="zy-btn-blue" onclick="zyAgentSaveAppLink(${item ? Number(item.id) : 'null'})"><i class="fas fa-save"></i> ${item ? 'Save Changes' : 'Add App Link'}</button>
+  `);
+};
+
+window.zyAgentSaveAppLink = async function(editId) {
+  const name = (document.getElementById('ag-al-name')?.value || '').trim();
+  const url = (document.getElementById('ag-al-url')?.value || '').trim();
+  const category = (document.getElementById('ag-al-cat')?.value || '').trim();
+  const notes = (document.getElementById('ag-al-notes')?.value || '').trim();
+  const pinned_top = Boolean(document.getElementById('ag-al-pin')?.checked);
+  if (!name || !url) {
+    toast('App Name and URL are required.', 'error');
+    return;
+  }
+  const endpoint = editId ? `/api/app-links/${editId}` : '/api/app-links';
+  const method = editId ? 'PATCH' : 'POST';
+  const res = await apiFetch(endpoint, {
+    method,
+    body: JSON.stringify({ name, url, category, notes, pinned_top })
+  });
+  if (res && (res.success || res.data || res.id)) {
+    closeModal();
+    toast(editId ? 'App link updated!' : 'App link added for your clients!', 'success');
+    pgAppLinks('links');
+  }
+};
+
+window.zyAgentDeleteAppLink = async function(id) {
+  const res = await apiFetch(`/api/app-links/${id}`, { method: 'DELETE' });
+  if (res && res.success) {
+    toast('App link deleted.', 'success');
+    pgAppLinks('links');
+  }
+};
+
 function zyRenderAgentAppLinksBody() {
   const host = document.getElementById('agent-applinks-body');
   if (!host) return;
   const q = _agentAppLinksQuery.trim().toLowerCase();
 
   if (_agentAppLinksTab === 'clients') {
-    const list = _agentAppLinksClients.filter(cl => !q || String(cl.username || '').toLowerCase().includes(q) || String(cl.full_name || '').toLowerCase().includes(q));
+    const list = _agentAppLinksClients
+      .filter(cl => !q || String(cl.username || '').toLowerCase().includes(q) || String(cl.full_name || '').toLowerCase().includes(q))
+      .sort((a, b) => String(a.username || '').localeCompare(String(b.username || ''), undefined, { sensitivity: 'base' }));
     if (!list.length) {
       host.innerHTML = `<div class="zy-empty" style="padding:30px;">No clients found.</div>`;
       return;
@@ -3860,30 +4008,40 @@ function zyRenderAgentAppLinksBody() {
 
   const items = _agentAppLinksData.filter(it => !q || String(it.name || '').toLowerCase().includes(q) || String(it.category || '').toLowerCase().includes(q));
   if (!items.length) {
-    host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now.</div>`;
+    host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now. Click <strong>Add App Link</strong> to add links for your clients.</div>`;
     return;
   }
   host.innerHTML = `
     <div class="zy-applinks-user-grid">
-      ${items.map((it, idx) => {
+      ${items.map((it) => {
         const href = _agentSafeUrl(it.url);
+        const isMine = it.agent_id != null && Number(it.agent_id) === Number(AGENT_ID);
         let domain = '';
         try { domain = new URL(href).hostname.replace(/^www\./, ''); } catch (_) {}
         return `
-          <a class="zy-applink-user-card" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer">
-            <div class="zy-applink-card-ic"><i class="fas fa-mobile-screen-button"></i></div>
-            <div class="zy-applink-card-info">
-              <div class="zy-applink-card-name">
-                <span>${zyEsc(it.name)}</span>
-                ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+          <div class="zy-applink-user-card" style="position:relative;">
+            <a href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-decoration:none;color:inherit;">
+              <div class="zy-applink-card-ic"><i class="fas fa-mobile-screen-button"></i></div>
+              <div class="zy-applink-card-info">
+                <div class="zy-applink-card-name">
+                  <span>${zyEsc(it.name)}</span>
+                  ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+                  ${isMine ? `<span class="badge badge-blue" style="font-size:9.5px;padding:1px 5px;">Mine</span>` : `<span class="badge" style="font-size:9.5px;padding:1px 5px;background:#f1f5f9;color:#475569;">Global</span>`}
+                </div>
+                <div class="zy-applink-card-meta">
+                  ${it.category ? `<span>${zyEsc(it.category)}</span> · ` : ''}<span>${zyEsc(domain || 'Open Link')}</span>
+                </div>
+                ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
               </div>
-              <div class="zy-applink-card-meta">
-                ${it.category ? `<span>${zyEsc(it.category)}</span> · ` : ''}<span>${zyEsc(domain || 'Open Link')}</span>
+              <span class="zy-applink-card-open"><i class="fas fa-arrow-up-right-from-square"></i></span>
+            </a>
+            ${isMine ? `
+              <div style="display:inline-flex;gap:4px;margin-left:6px;">
+                <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyAgentOpenAppLinkModal(${Number(it.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+                <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#dc2626;" onclick="zyAgentDeleteAppLink(${Number(it.id)})" title="Delete"><i class="fas fa-trash"></i></button>
               </div>
-              ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
-            </div>
-            <span class="zy-applink-card-open"><i class="fas fa-arrow-up-right-from-square"></i></span>
-          </a>
+            ` : ''}
+          </div>
         `;
       }).join('')}
     </div>

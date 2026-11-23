@@ -1345,16 +1345,17 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   assertCheck('F4: server.js CLIENT_ALLOW includes period-stats', serverJs.includes('period-stats|client-stats'));
   assertCheck('F4: server.js removed TEST_ALLOW', !serverJs.includes('TEST_ALLOW'));
 
-  // 2. Check unified volume stats order (Today SMS (API), Today SMS Total, Yesterday SMS, SMS Last 7 Days, SMS Last 30 Days, Yearly SMS) across all 3 active panels
+  // 2. Check unified volume stats order (Today SMS (API), Yesterday SMS, SMS Last 7 Days, SMS Last 30 Days, Yearly SMS) + no combined Today SMS Total + 12:00 PM PKT Monthly subtitle
   function checkUnifiedDashConfig(code) {
     const idxHero = code.indexOf("label: 'Today SMS (API)'");
-    const idxTotal = code.indexOf("label: 'Today SMS Total'");
+    const hasCombinedTotal = code.includes("label: 'Today SMS Total'");
     const idxYest = code.indexOf("label: 'Yesterday SMS'");
     const idx7 = code.indexOf("label: 'SMS Last 7 Days'");
     const idx30 = code.indexOf("label: 'SMS Last 30 Days'");
     const idxYear = code.indexOf("label: 'Yearly SMS'");
-    return idxHero !== -1 && idxTotal !== -1 && idxYest !== -1 && idx7 !== -1 && idx30 !== -1 && idxYear !== -1 &&
-      idxHero < idxTotal && idxTotal < idxYest && idxYest < idx7 && idx7 < idx30 && idx30 < idxYear;
+    return idxHero !== -1 && !hasCombinedTotal && idxYest !== -1 && idx7 !== -1 && idx30 !== -1 && idxYear !== -1 &&
+      idxHero < idxYest && idxYest < idx7 && idx7 < idx30 && idx30 < idxYear &&
+      code.includes('Daily file update: 12:00 PM PKT');
   }
 
   assertCheck('F4: owner-shell.js configures unified dashboard hero + volume cards in exact order', checkUnifiedDashConfig(speedAdminJs) && speedAdminJs.includes("label: 'Whitenoise SMS'"));
@@ -1847,6 +1848,44 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     brandThemeJs.includes("font_family: 'jakarta'") &&
     brandThemeJs.includes('color: var(--sp-text-primary, #0f172a) !important;') &&
     panelCssSrc.includes('FINAL SYSTEM TYPOGRAPHY, LOCKED INK COLOR & BLUE-GREEN HARMONY')
+  );
+
+  // 19. 15-Item Audit Fixes & Owner VPS Health Dashboard
+  const liveChatJsSrc = fs.readFileSync(path.resolve('humex-sms/static/js/shared-live-chat.js'), 'utf8');
+  const clientPagesJsSrc = fs.readFileSync(path.resolve('humex-sms/static/js/client-pages.js'), 'utf8');
+  const agentPagesJsSrc = fs.readFileSync(path.resolve('humex-sms/static/js/agent-pages.js'), 'utf8');
+
+  assertCheck('Audit 19a: Login removes captcha UI & backend implements 3-hour 2FA trust cookie',
+    !loginHtmlSrc.includes('id="captchaAnswer"') &&
+    serverJsSrc.includes('TWO_FA_TRUST_WINDOW_SEC = 3 * 60 * 60') &&
+    serverJsSrc.includes('humex_2fa_trust')
+  );
+
+  assertCheck('Audit 19b: Client sidebar order, Blocked Numbers snapshot, Agent My Clients tile & Dashboard Live Access + Latest 10 App Links',
+    speedClientJs.indexOf("page: 'dashboard'") < speedClientJs.indexOf("page: 'sms-overview'") &&
+    speedClientJs.indexOf("page: 'sms-overview'") < speedClientJs.indexOf("page: 'my-numbers'") &&
+    speedClientJs.indexOf("page: 'my-numbers'") < speedClientJs.indexOf("page: 'my-sms'") &&
+    speedClientJs.indexOf("page: 'my-sms'") < speedClientJs.indexOf("page: 'cdr2'") &&
+    speedClientJs.indexOf("page: 'cdr2'") < speedClientJs.indexOf("page: 'live-chat'") &&
+    speedClientJs.includes("label: 'Blocked Numbers'") &&
+    speedAgentJs.includes("label: 'My Clients', page: 'my-clients'") &&
+    sharedKitJs.includes('zy-ud-live-access-wrap') &&
+    sharedKitJs.includes('zy-ud-applinks-list')
+  );
+
+  assertCheck('Audit 19c: Whitenoise dark blue numbers, solid Green/Red rate-card buttons, Client Live Chat privacy & Owner VPS Health Dashboard',
+    panelCssSrc.includes('.zy-wn-number') &&
+    panelCssSrc.includes('.zy-btn-alloc-solid') &&
+    panelCssSrc.includes('.zy-btn-return-solid') &&
+    clientPagesJsSrc.includes('zy-btn-alloc-solid') &&
+    clientPagesJsSrc.includes('zy-btn-return-solid') &&
+    agentPagesJsSrc.includes('zy-btn-alloc-solid') &&
+    agentPagesJsSrc.includes('zy-btn-return-solid') &&
+    liveChatJsSrc.includes('hidePeerClientIdentity') &&
+    liveChatJsSrc.includes('hide_members') &&
+    serverJsSrc.includes("app.get('/api/owner/vps-health'") &&
+    speedAdminJs.includes('window.renderVpsHealth') &&
+    ownerEngineJs.includes("'vps-health'")
   );
 })();
 

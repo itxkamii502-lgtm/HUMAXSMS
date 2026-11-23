@@ -21,6 +21,9 @@ const ZY_ADMIN_MENU = [
   { t: null, c: '#10b981', items: [
       ['Live Access', 'live-access', 'fa-tower-broadcast'],
   ] },
+  { t: null, c: '#0f766e', items: [
+      ['VPS Health', 'vps-health', 'fa-server'],
+  ] },
   { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['Numbers Pool Hub', 'my-numbers', 'fa-mobile-screen'],
       ['Blocked Numbers', 'blocked-numbers', 'fa-ban'],
@@ -232,6 +235,7 @@ const ZY_ADMIN_LABELS = {
   'live-chat': 'Live Chat',
   'app-links': 'Apps Links',
   'live-access': 'Live Access',
+  'vps-health': 'VPS & Server Health',
   'smart-sheet-import': 'Smart Excel Import',
   'bulk-allocation': 'Bulk Allocation',
   'revoke-numbers': 'Blocked Numbers',
@@ -310,14 +314,15 @@ renderDashboard = async function () {
     zyUpdateBreadcrumb('dashboard', 'Dashboard');
   }
   try {
-    const [stats, daily, periodStats, ranges, agents, newsRes] = await Promise.all([
+    const [stats, daily, periodStats, ranges, agents, appLinksRes] = await Promise.all([
       apiFetch('/api/dashboard/stats'),
       apiFetch('/api/sms/daily-stats'),
       apiFetch('/api/sms/period-stats').catch(() => null),
       apiFetch('/api/numbers/sms-ranges'),
       apiFetch('/api/agents?limit=200').catch(() => ({ data: [] })),
-      apiFetch('/api/notifications?limit=5').catch(() => ({ data: [] }))
+      apiFetch('/api/app-links?dashboard=1&limit=10', { silent: true }).catch(() => ({ data: [] }))
     ]);
+    const appLinks = Array.isArray(appLinksRes?.data) ? appLinksRes.data.slice(0, 10) : [];
     if (!stats && !daily && !ranges && !agents) {
       return;
     }
@@ -371,12 +376,6 @@ renderDashboard = async function () {
       };
     });
 
-    const newsList = Array.isArray(newsRes) ? newsRes : ((newsRes && newsRes.data) || []);
-    const notifications = newsList.slice(0, 5).map(n => ({
-      date: String(n.created || n.created_at || n.date || '').replace('T', ' ').slice(0, 10) || '—',
-      title: n.title || n.headline || n.message || 'Announcement'
-    }));
-
     const alertHtml = '';
 
     if (typeof window.zyRenderUnifiedDashboard === 'function') {
@@ -388,20 +387,19 @@ renderDashboard = async function () {
         reportsRoute: 'my-sms',
         notificationsRoute: 'notifications',
         chartId: 'zy-owner-week-chart',
-        chartTodayTotal: totalTodaySms,
+        chartTodayTotal: apiTodaySms,
         weeklyLabels,
         weeklyTraffic,
         hero: {
           label: 'Today SMS (API)',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS traffic today',
+          subtitle: 'API SMS traffic today (UTC)',
           icon: 'fa-check',
           page: 'my-sms'
         },
         moneyCards: [
-          { label: 'Whitenoise SMS', value: wnTodaySms.toLocaleString(), sub: 'Whitenoise {W} SMS today', icon: 'fa-tower-cell', page: 'cdr2' },
-          { label: 'Today SMS Total', value: totalTodaySms.toLocaleString(), sub: 'API + Whitenoise combined today', icon: 'fa-layer-group', page: 'my-sms' }
+          { label: 'Whitenoise SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: 'cdr2' }
         ],
         shortcuts: [
           { label: 'CDR Reports', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
@@ -409,7 +407,7 @@ renderDashboard = async function () {
           { label: 'Numbers Pool', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
           { label: 'Ranges & Rates', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
           { label: 'Agent Requests', page: 'agent-requests', icon: 'fa-sim-card', tone: 'blue' },
-          { label: 'Payout Requests', page: 'payout-requests', icon: 'fa-hand-holding-dollar', tone: 'green' }
+          { label: 'VPS Health', page: 'vps-health', icon: 'fa-server', tone: 'green' }
         ],
         volumes: [
           { label: 'Yesterday SMS', value: yestSmsVal, page: 'my-sms' },
@@ -425,8 +423,7 @@ renderDashboard = async function () {
           { label: 'SMS Last 7 Days', value: last7Val.toLocaleString(), icon: 'fa-comment-sms', page: 'my-sms' }
         ],
         latestRanges,
-        topAccess: (p.top_access_today || []).slice(0, 5),
-        notifications
+        appLinks
       });
     }
   } catch (err) {
@@ -434,6 +431,368 @@ renderDashboard = async function () {
     c.innerHTML = `<div class="zy-panel"><div class="zy-panel-body" style="text-align:center;padding:30px;">
         Dashboard could not load. <button class="zy-gear" onclick="renderDashboard()">Retry</button></div></div>`;
   }
+};
+
+/* ═══ OWNER-ONLY VPS & SERVER HEALTH DASHBOARD ═════════════════ */
+window._vpsHealthTimer = null;
+window._vpsHealthAuto = true;
+window._vpsHealthHistory = [];
+
+window.zyVpsFmtBytes = function(bytes) {
+  const b = Number(bytes || 0);
+  if (!Number.isFinite(b) || b <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = b, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 ? v.toFixed(0) : (v >= 10 ? v.toFixed(1) : v.toFixed(2))} ${units[i]}`;
+};
+
+window.zyVpsFmtUptime = function(secs) {
+  const s = Math.max(0, Math.floor(Number(secs || 0)));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(' ');
+};
+
+window.zyVpsToggleAuto = function(btn) {
+  window._vpsHealthAuto = !window._vpsHealthAuto;
+  if (btn) {
+    btn.classList.toggle('is-active', window._vpsHealthAuto);
+    btn.innerHTML = `<i class="fas fa-${window._vpsHealthAuto ? 'pause' : 'play'}"></i> Auto 5s: ${window._vpsHealthAuto ? 'ON' : 'OFF'}`;
+  }
+  if (window._vpsHealthAuto) {
+    window.zyVpsRefreshNow(true);
+  }
+};
+
+window.zyVpsClearCache = async function(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch('/api/owner/vps-health/clear-cache', { method: 'POST', body: JSON.stringify({}) });
+    if (res && res.success) {
+      if (typeof toast === 'function') toast(res.message || 'Runtime caches cleared safely.', 'success');
+      window.zyVpsRefreshNow(true);
+    } else if (typeof toast === 'function') {
+      toast((res && res.error) || 'Failed to clear caches', 'error');
+    }
+  } catch (e) {
+    if (typeof toast === 'function') toast('Cache clear failed: ' + (e.message || 'error'), 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.zyVpsTriggerBackup = async function(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch('/api/backup/create', { method: 'POST', body: JSON.stringify({}) });
+    if (res && (res.success || res.file || res.filename)) {
+      if (typeof toast === 'function') toast('Manual backup created safely.', 'success');
+      window.zyVpsRefreshNow(true);
+    } else if (typeof toast === 'function') {
+      toast((res && res.error) || 'Backup could not be created', 'warning');
+    }
+  } catch (e) {
+    if (typeof toast === 'function') toast('Backup error: ' + (e.message || 'error'), 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+function zyVpsRenderTrendSvg(history) {
+  if (!history || history.length < 2) {
+    return `<div style="text-align:center;padding:28px 12px;color:var(--sp-text-muted);font-size:12.5px;font-weight:700;">Collecting live CPU &amp; RAM samples… (updates every 5 seconds)</div>`;
+  }
+  const W = 560, H = 135, L = 34, R = 12, T = 10, B = 22;
+  const cw = W - L - R, ch = H - T - B;
+  const n = history.length;
+  const pt = (idx, val) => {
+    const x = L + (cw * idx) / Math.max(1, n - 1);
+    const y = T + ch - (ch * Math.max(0, Math.min(100, Number(val) || 0))) / 100;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  };
+  const cpuPts = history.map((h, i) => pt(i, h.cpu)).join(' ');
+  const ramPts = history.map((h, i) => pt(i, h.ram)).join(' ');
+  const cpuArea = `${L},${T + ch} ${cpuPts} ${L + cw},${T + ch}`;
+  const gridLines = [0, 25, 50, 75, 100].map(p => {
+    const y = (T + ch - (ch * p) / 100).toFixed(1);
+    return `<line x1="${L}" y1="${y}" x2="${L + cw}" y2="${y}" stroke="rgba(148,163,184,0.22)" stroke-dasharray="3,3"/>
+            <text x="${L - 6}" y="${Number(y) + 3}" text-anchor="end" font-size="9.5" fill="#64748b" font-weight="700">${p}%</text>`;
+  }).join('');
+  const lastSample = history[history.length - 1];
+  return `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:145px;display:block;" role="img" aria-label="Live CPU and RAM usage chart">
+      ${gridLines}
+      <polygon points="${cpuArea}" fill="rgba(37,99,235,0.12)" />
+      <polyline points="${cpuPts}" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      <polyline points="${ramPts}" fill="none" stroke="#059669" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      <text x="${L}" y="${H - 4}" font-size="9.5" fill="#64748b" font-weight="700">${zyEsc(history[0].time || '')}</text>
+      <text x="${L + cw}" y="${H - 4}" text-anchor="end" font-size="9.5" fill="#64748b" font-weight="700">${zyEsc(lastSample.time || '')}</text>
+    </svg>
+    <div style="display:flex;gap:16px;align-items:center;justify-content:flex-end;font-size:11.5px;font-weight:700;margin-top:4px;">
+      <span style="color:#2563eb;"><i class="fas fa-circle" style="font-size:8px;margin-right:4px;"></i>CPU ${lastSample.cpu}%</span>
+      <span style="color:#059669;"><i class="fas fa-circle" style="font-size:8px;margin-right:4px;"></i>RAM ${lastSample.ram}%</span>
+    </div>
+  `;
+}
+
+window.zyVpsRefreshNow = async function(silent = false) {
+  const host = document.getElementById('vps-health-body');
+  if (!host) {
+    if (window._vpsHealthTimer) { clearInterval(window._vpsHealthTimer); window._vpsHealthTimer = null; }
+    return;
+  }
+  try {
+    const data = await apiFetch('/api/owner/vps-health', { silent: true });
+    if (!data || !document.getElementById('vps-health-body')) return;
+
+    const nowTime = String(data.timestamp_utc || new Date().toISOString()).slice(11, 19);
+    window._vpsHealthHistory.push({
+      time: nowTime,
+      cpu: Number(data.cpu?.usage_pct || 0),
+      ram: Number(data.memory?.used_pct || 0)
+    });
+    if (window._vpsHealthHistory.length > 30) window._vpsHealthHistory.shift();
+
+    const pctTone = (p) => p >= 85 ? 'crit' : (p >= 70 ? 'warn' : 'ok');
+    const st = data.status || 'healthy';
+    const stLabel = st === 'critical' ? 'Critical Load' : (st === 'warning' ? 'Warning' : 'All Systems Healthy');
+
+    const badgeEl = document.getElementById('vps-status-badge');
+    if (badgeEl) {
+      badgeEl.className = `zy-vps-status-pill is-${st}`;
+      badgeEl.innerHTML = `<span class="zy-live-pulse-dot"></span> ${zyEsc(stLabel)}`;
+    }
+    const tsEl = document.getElementById('vps-last-sync');
+    if (tsEl) tsEl.textContent = `Updated ${nowTime} UTC`;
+
+    const cpuPct = Number(data.cpu?.usage_pct || 0);
+    const ramPct = Number(data.memory?.used_pct || 0);
+    const diskPct = Number(data.disk?.used_pct || 0);
+    const lagMs = Number(data.process?.event_loop_lag_ms || 0);
+
+    const alertsHtml = (data.alerts || []).length ? `
+      <div class="zy-vps-alerts">
+        ${data.alerts.map(a => `
+          <div class="zy-vps-alert is-${zyEsc(a.level || 'warning')}">
+            <i class="fas fa-${a.level === 'critical' ? 'circle-exclamation' : 'triangle-exclamation'}"></i>
+            <span>${zyEsc(a.message)}</span>
+          </div>
+        `).join('')}
+      </div>` : '';
+
+    const folders = data.disk?.folders || {};
+    const sess = data.runtime?.sessions || {};
+    const cr = data.services?.cr_api || {};
+    const web = data.services?.web_panels || {};
+    const wn = data.services?.whitenoise || {};
+    const db = data.database || {};
+
+    host.innerHTML = `
+      ${alertsHtml}
+
+      <!-- Server Info Strip -->
+      <div class="zy-vps-meta-strip">
+        <div><span class="zy-vps-meta-k">Host</span><strong>${zyEsc(data.system?.hostname || '—')}</strong></div>
+        <div><span class="zy-vps-meta-k">OS / Arch</span><strong>${zyEsc(data.system?.platform || '')} ${zyEsc(data.system?.arch || '')} (${zyEsc(data.system?.release || '')})</strong></div>
+        <div><span class="zy-vps-meta-k">CPU</span><strong>${zyEsc(data.cpu?.cores || 0)} Cores · ${zyEsc(String(data.cpu?.model || '').slice(0, 38))}</strong></div>
+        <div><span class="zy-vps-meta-k">Node / PID</span><strong>${zyEsc(data.system?.node_version || '')} · PID ${zyEsc(data.process?.pid || 0)}</strong></div>
+        <div><span class="zy-vps-meta-k">Server Uptime</span><strong>${zyVpsFmtUptime(data.system?.os_uptime_sec)}</strong></div>
+        <div><span class="zy-vps-meta-k">App Uptime</span><strong>${zyVpsFmtUptime(data.process?.uptime_sec)}</strong></div>
+      </div>
+
+      <!-- 4 Resource Cards -->
+      <div class="zy-vps-kpi-grid">
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-microchip" style="color:#2563eb;"></i> CPU Usage</span>
+            <span class="zy-vps-pct is-${pctTone(cpuPct)}">${cpuPct}%</span>
+          </div>
+          <div class="zy-vps-bar"><div class="zy-vps-bar-fill is-${pctTone(cpuPct)}" style="width:${Math.min(100, cpuPct)}%;"></div></div>
+          <div class="zy-vps-sub-grid">
+            <span>Cores: <b>${data.cpu?.cores || 0}</b></span>
+            <span>Load 1m/5m/15m: <b>${(data.cpu?.load_avg || [0,0,0]).join(' / ')}</b></span>
+          </div>
+        </div>
+
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-memory" style="color:#059669;"></i> RAM Memory</span>
+            <span class="zy-vps-pct is-${pctTone(ramPct)}">${ramPct}%</span>
+          </div>
+          <div class="zy-vps-bar"><div class="zy-vps-bar-fill is-${pctTone(ramPct)}" style="width:${Math.min(100, ramPct)}%;"></div></div>
+          <div class="zy-vps-sub-grid">
+            <span>Used: <b>${zyVpsFmtBytes(data.memory?.used_bytes)} / ${zyVpsFmtBytes(data.memory?.total_bytes)}</b></span>
+            <span>Free: <b>${zyVpsFmtBytes(data.memory?.free_bytes)}</b> · Node RSS: <b>${zyVpsFmtBytes(data.process?.rss_bytes)}</b></span>
+          </div>
+        </div>
+
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-hard-drive" style="color:#0284c7;"></i> Disk Storage</span>
+            <span class="zy-vps-pct is-${pctTone(diskPct)}">${diskPct}%</span>
+          </div>
+          <div class="zy-vps-bar"><div class="zy-vps-bar-fill is-${pctTone(diskPct)}" style="width:${Math.min(100, diskPct)}%;"></div></div>
+          <div class="zy-vps-sub-grid">
+            <span>Used: <b>${zyVpsFmtBytes(data.disk?.used_bytes)} / ${zyVpsFmtBytes(data.disk?.total_bytes)}</b></span>
+            <span>Free: <b>${zyVpsFmtBytes(data.disk?.free_bytes)}</b></span>
+          </div>
+        </div>
+
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-bolt" style="color:#7c3aed;"></i> Live Traffic &amp; Runtime</span>
+            <span class="zy-vps-pct is-${lagMs > 150 ? 'warn' : 'ok'}">${lagMs} ms lag</span>
+          </div>
+          <div class="zy-vps-mini-stats">
+            <div><small>Sessions</small><b>${Number(sess.total || 0)}</b></div>
+            <div><small>WebSockets</small><b>${Number(data.runtime?.ws_clients || 0)}</b></div>
+            <div><small>Heap Used</small><b>${zyVpsFmtBytes(data.process?.heap_used_bytes)}</b></div>
+          </div>
+          <div class="zy-vps-sub-grid">
+            <span>Owner: <b>${sess.owner || 0}</b> · Agents: <b>${sess.agent || 0}</b> · Clients: <b>${sess.client || 0}</b></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Row 2: Live CPU/RAM Chart + Folder Storage Breakdown -->
+      <div class="zy-vps-two-col">
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-chart-line" style="color:#2563eb;"></i> Live CPU &amp; RAM Telemetry</span>
+            <span style="font-size:11px;color:var(--sp-text-muted);font-weight:700;">Last ${window._vpsHealthHistory.length} samples</span>
+          </div>
+          ${zyVpsRenderTrendSvg(window._vpsHealthHistory)}
+        </div>
+
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-hard-drive" style="color:#0284c7;"></i> Project Data &amp; Storage Breakdown</span>
+            <span style="font-size:11px;color:var(--sp-text-muted);font-weight:700;">Safe Persistent Storage</span>
+          </div>
+          <table class="zy-ud-table">
+            <tbody>
+              <tr><td><b>DATA_DIR (Database &amp; State)</b></td><td class="r zy-ud-num"><b>${zyVpsFmtBytes(folders.data_dir_bytes)}</b></td></tr>
+              <tr><td><b>SMS Archives</b></td><td class="r zy-ud-num"><b>${zyVpsFmtBytes(folders.archive_dir_bytes)}</b></td></tr>
+              <tr><td><b>Chat Media Uploads</b></td><td class="r zy-ud-num"><b>${zyVpsFmtBytes(folders.chat_media_bytes)}</b></td></tr>
+              <tr><td><b>Backups Folder</b></td><td class="r zy-ud-num"><b>${zyVpsFmtBytes(folders.backup_dir_bytes)}</b></td></tr>
+              <tr><td><b>Last Backup</b></td><td class="r" style="font-size:11.5px;"><b>${data.disk?.last_backup ? zyEsc(data.disk.last_backup.name) + ' (' + zyVpsFmtBytes(data.disk.last_backup.size_bytes) + ')' : 'None yet'}</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Row 3: Pollers/Services Health + Database Inventory -->
+      <div class="zy-vps-two-col">
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-plug-circle-bolt" style="color:#059669;"></i> Providers &amp; Background Services</span>
+            <span style="font-size:11px;color:var(--sp-text-muted);font-weight:700;">Pollers Status</span>
+          </div>
+          <table class="zy-ud-table">
+            <thead><tr><th>Service</th><th>Active / Total</th><th>Total Pulled</th><th class="r">Status</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><b>CR API Poller</b></td>
+                <td><b>${cr.active || 0} / ${cr.total || 0}</b></td>
+                <td class="zy-ud-num"><b>${Number(cr.total_pulled || 0).toLocaleString()}</b></td>
+                <td class="r">${cr.errors > 0 ? `<span class="badge badge-red">${cr.errors} Error(s)</span>` : `<span class="badge badge-green">Healthy</span>`}</td>
+              </tr>
+              <tr>
+                <td><b>Web Scraping Panels</b></td>
+                <td><b>${web.active || 0} / ${web.total || 0}</b></td>
+                <td class="zy-ud-num">—</td>
+                <td class="r"><span class="badge badge-green">Active</span></td>
+              </tr>
+              <tr>
+                <td><b>Whitenoise {W} Engine</b></td>
+                <td><b>${wn.active || 0} / ${wn.total || 0}</b></td>
+                <td class="zy-ud-num"><b>${Number(wn.ledger_rows || 0).toLocaleString()} rows</b></td>
+                <td class="r"><span class="badge badge-green">Ready</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="zy-vps-card">
+          <div class="zy-vps-card-head">
+            <span><i class="fas fa-database" style="color:#7c3aed;"></i> Live Database Inventory</span>
+            <span style="font-size:11px;color:var(--sp-text-muted);font-weight:700;">In-Memory + Disk Sync</span>
+          </div>
+          <div class="zy-vps-db-grid">
+            <div><small>Hot SMS Logs</small><b>${Number(db.hot_sms_logs || 0).toLocaleString()}</b></div>
+            <div><small>Total Numbers</small><b>${Number(db.total_numbers || 0).toLocaleString()}</b></div>
+            <div><small>Blocked Numbers</small><b style="color:#dc2626;">${Number(db.blocked_numbers || 0).toLocaleString()}</b></div>
+            <div><small>SMS Ranges</small><b>${Number(db.total_ranges || 0).toLocaleString()}</b></div>
+            <div><small>Agents</small><b>${Number(db.total_agents || 0).toLocaleString()}</b></div>
+            <div><small>Clients</small><b>${Number(db.total_clients || 0).toLocaleString()}</b></div>
+            <div><small>Chat Messages</small><b>${Number(db.chat_messages || 0).toLocaleString()}</b></div>
+            <div><small>Pending Requests</small><b>${Number(db.pending_number_requests || 0).toLocaleString()}</b></div>
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    if (!silent) {
+      host.innerHTML = `<div class="zy-empty" style="padding:32px;color:#dc2626;">Failed to load VPS health telemetry: ${zyEsc(err.message || 'error')}</div>`;
+    }
+  }
+};
+
+window.renderVpsHealth = async function() {
+  const c = document.getElementById('page-content');
+  if (!c) return;
+  if (window._vpsHealthTimer) { clearInterval(window._vpsHealthTimer); window._vpsHealthTimer = null; }
+  if (typeof zyCrumb === 'function') zyCrumb(['System', 'VPS & Server Health']);
+  const bc = document.getElementById('breadcrumb');
+  if (bc) bc.textContent = 'VPS & Server Health';
+
+  c.innerHTML = `
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+      <div>
+        <div class="page-title" style="display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-server" style="color:#0f766e;"></i>
+          <span>VPS &amp; Server Health Monitor</span>
+          <span id="vps-status-badge" class="zy-vps-status-pill is-healthy"><span class="zy-live-pulse-dot"></span> Checking…</span>
+        </div>
+        <div class="page-subtitle" style="margin-top:3px;">
+          Real-time server CPU, RAM, Disk, Folder Storage, Active Sessions, WebSockets &amp; Pollers telemetry · <span id="vps-last-sync">Syncing…</span>
+        </div>
+      </div>
+      <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button type="button" class="btn btn-outline btn-sm zy-vps-auto-btn ${window._vpsHealthAuto ? 'is-active' : ''}" onclick="zyVpsToggleAuto(this)">
+          <i class="fas fa-${window._vpsHealthAuto ? 'pause' : 'play'}"></i> Auto 5s: ${window._vpsHealthAuto ? 'ON' : 'OFF'}
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="zyVpsRefreshNow(false)">
+          <i class="fas fa-rotate"></i> Refresh Now
+        </button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="zyVpsClearCache(this)">
+          <i class="fas fa-broom"></i> Clear Cache
+        </button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="zyVpsTriggerBackup(this)">
+          <i class="fas fa-cloud-arrow-up"></i> Backup Now
+        </button>
+      </div>
+    </div>
+    <div id="vps-health-body">
+      <div class="zy-loading" style="padding:40px;text-align:center;">Loading live VPS telemetry…</div>
+    </div>
+  `;
+
+  await window.zyVpsRefreshNow(false);
+  window._vpsHealthTimer = setInterval(() => {
+    if (!document.getElementById('vps-health-body')) {
+      clearInterval(window._vpsHealthTimer);
+      window._vpsHealthTimer = null;
+      return;
+    }
+    if (window._vpsHealthAuto) window.zyVpsRefreshNow(true);
+  }, 5000);
 };
 
 /* ═══ SMS CDR STATS (My SMS) — HUMEX SMS layout ═════════════════ */
@@ -581,8 +940,10 @@ renderMySms = async function (summary = false) {
       apiFetch('/api/providers?limit=1000').catch(() => ({ data: [] }))
     ]);
 
-    const ranges = (Array.isArray(rangesRes) ? rangesRes : (rangesRes && rangesRes.data)) || [];
-    const agents = (agentsRes && agentsRes.data) || [];
+    const ranges = ((Array.isArray(rangesRes) ? rangesRes : (rangesRes && rangesRes.data)) || [])
+      .slice().sort((a, b) => String(a.range_name || a.name || a.country || '').localeCompare(String(b.range_name || b.name || b.country || ''), undefined, { sensitivity: 'base' }));
+    const agents = ((agentsRes && agentsRes.data) || [])
+      .slice().sort((a, b) => String(a.username || a.name || '').localeCompare(String(b.username || b.name || ''), undefined, { sensitivity: 'base' }));
     const providers = (providersRes && providersRes.data) || [];
 
     const pEl = document.getElementById('rp-provider');
@@ -1431,9 +1792,11 @@ async function renderOwnerCdr2Load(targetPage = 1) {
       const keyLabels = { date: 'Date', month: 'Month', range: 'Range', agent: 'Agent', client: 'Client', number: 'Number', cli: 'Service / CLI' };
       const cols = [...checkedBoxes.map(k => keyLabels[k] || k), 'SMS Count', 'Cycle', 'Owner Rev (USD)', 'Agent Pay (USD)', 'Owner Profit (USD)'];
       const rows = data.map(g => [
-        ...checkedBoxes.map(k => k === 'range'
-          ? { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` }
-          : (g[k] || '—')),
+        ...checkedBoxes.map(k => {
+          if (k === 'range') return { v: g[k] || '—', h: `<span class="zy-wn-range-name">${zyEsc(g[k] || '—')}</span>` };
+          if (k === 'number') return { v: g[k] || '—', h: g[k] ? `<span class="monospace zy-wn-number">${zyEsc(g[k])}</span>` : '—' };
+          return g[k] || '—';
+        }),
         { v: g.sms_count || 0, h: `<span class="monospace" style="font-weight:700;">${Number(g.sms_count || 0).toLocaleString()}</span>` },
         'Monthly (30/5) {W}',
         { v: Number(g.payout || 0), h: `<span class="monospace">$${zyFmtMoney(Number(g.payout || 0), 4)}</span>` },
@@ -1494,7 +1857,7 @@ async function renderOwnerCdr2Load(targetPage = 1) {
         return [
           { v: dStr, h: `<span class="monospace" style="font-weight:600;">${zyEsc(dStr)}</span>` },
           { v: rngLbl, h: `<span class="zy-wn-range-name">${zyEsc(rngLbl)}</span>` },
-          { v: numStr, h: numStr ? `<span class="monospace" style="font-weight:600;">${zyEsc(numStr)}</span>` : '—' },
+          { v: numStr, h: numStr ? `<span class="monospace zy-wn-number">${zyEsc(numStr)}</span>` : '—' },
           { v: cliStr, h: `<span class="monospace">${zyEsc(cliStr)}</span>` },
           agentVal ? zyEsc(agentVal) : '<span style="color:#94a3b8;">Unassigned</span>',
           { v: smsCnt, h: `<span class="monospace" style="font-weight:700;">${smsCnt.toLocaleString()}</span>` },

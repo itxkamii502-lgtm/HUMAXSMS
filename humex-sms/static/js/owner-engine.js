@@ -2553,7 +2553,7 @@ async function renderSmsRanges() {
       <div class="page-header" style="margin-bottom:14px;">
         <div>
           <div class="page-title" style="font-size:18px;font-weight:800;">
-            <i class="fas fa-table-list" style="margin-right:6px;"></i> Ranges &amp; Rate Card
+            <i class="fas fa-table-list" style="margin-right:6px;"></i> Ranges Add
           </div>
           <div class="page-subtitle" style="font-size:12.5px;">
             Unified telecom master catalog: Country prefixes, carrier costs &amp; active payterm rates — Weekly (7/3) for Standard · Monthly (30/5) {W} for Whitenoise

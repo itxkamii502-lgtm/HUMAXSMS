@@ -23,14 +23,14 @@ const ZY_AGENT_MENU = [
   ] },
   { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['My Numbers', 'my-sms-numbers', 'fa-mobile-screen'],
-      ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
+      ['Ranges Add', 'sms-ranges', 'fa-table-list'],
       ['Client Rate Set', 'client-rate-set', 'fa-tags'],
       ['Bulk Allocation', 'bulk-add', 'fa-cloud-arrow-up'],
       ['Blocked Numbers', 'blocked-numbers', 'fa-ban'],
   ] },
   { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#059669', items: [
-      ['CDR & Statistics', 'detailed-sms', 'fa-comment-sms'],
-      ['CDR 2 (Monthly)', 'cdr2', 'fa-tower-cell'],
+      ['Show Report', 'detailed-sms', 'fa-comment-sms'],
+      ['Whitenoise Reports', 'cdr2', 'fa-tower-cell'],
   ] },
   { t: "USERS & NOTIFICATIONS", i: 'fa-users', c: '#0284c7', items: [
       ['Clients', 'my-clients', 'fa-users'],
@@ -55,9 +55,9 @@ const ZY_LABELS = {
   'live-chat': 'Live Chat',
   'app-links': 'Apps Links',
   'live-access': 'Live Access',
-  'sms-ranges': 'Ranges & Rate Card',
-  'sms-overview': 'Ranges & Rate Card',
-  'sms-ratecard': 'Ranges & Rate Card',
+  'sms-ranges': 'Ranges Add',
+  'sms-overview': 'Ranges Add',
+  'sms-ratecard': 'Ranges Add',
   'client-rate-set': 'Client Rate Set',
   'my-sms-numbers': 'My Numbers',
   'bulk-add': 'Bulk Allocation',
@@ -67,8 +67,8 @@ const ZY_LABELS = {
   'my-clients': 'Clients',
   'notifications': 'Notifications',
   'news-clients': 'Notifications',
-  'detailed-sms': 'CDR & Statistics',
-  'cdr2': 'CDR 2 (Monthly)',
+  'detailed-sms': 'Show Report',
+  'cdr2': 'Whitenoise Reports',
   'transfer-history': 'Transfer History',
   'credit-notes': 'Credit Notes',
   'payment-requests': 'My Payment Requests',
@@ -345,9 +345,9 @@ pgDashboard = async function () {
           { label: 'My Numbers', page: 'my-sms-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
           { label: 'My Clients', page: 'my-clients', icon: 'fa-users', tone: 'green' },
           { label: 'Client Rate Set', page: 'client-rate-set', icon: 'fa-tags', tone: 'blue' },
-          { label: 'CDR & Stats', page: 'detailed-sms', icon: 'fa-comment-sms', tone: 'green' },
+          { label: 'Show Report', page: 'detailed-sms', icon: 'fa-comment-sms', tone: 'green' },
           agentHasWn
-            ? { label: 'CDR 2 (Monthly)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'blue' }
+            ? { label: 'Whitenoise Reports', page: 'cdr2', icon: 'fa-tower-cell', tone: 'blue' }
             : { label: 'Live Chat', page: 'live-chat', icon: 'fa-comments', tone: 'blue' },
           { label: 'Client Payouts', page: 'client-payment-requests', icon: 'fa-money-bill-transfer', tone: 'green' }
         ],

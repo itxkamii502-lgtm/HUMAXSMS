@@ -332,6 +332,16 @@
         document.body.classList.remove('dark', 'light');
         document.body.classList.add(effective, 'rmsui', 'adminui');
       }
+      try {
+        document.querySelectorAll('.zy-theme-toggle-btn').forEach(btn => {
+          btn.classList.toggle('is-dark', effective === 'dark');
+        });
+      } catch (_) {}
+      try {
+        if (typeof window.__reapplyBrandThemeOnToggle === 'function') {
+          window.__reapplyBrandThemeOnToggle();
+        }
+      } catch (_) {}
       return effective;
     }
 
@@ -581,7 +591,7 @@
       rootStyle.setProperty('--header-text-color', theme.structure_text);
     } catch (e) {}
 
-    // Update dark-mode adaptation rules (clear inline root overrides when dark mode active on light chrome)
+    // Update dark-mode adaptation rules (ensure ALL structure/header vars flip cleanly on dark mode)
     const isDarkDisplay = document.documentElement?.getAttribute('data-theme') === 'dark' || document.body?.classList.contains('dark');
     if (isLightChrome && isDarkDisplay) {
       try {
@@ -599,8 +609,13 @@
         rs.setProperty('--theme-struct-table-text', '#e2e8f0');
         rs.setProperty('--theme-struct-ctrl-bg', '#1e293b');
         rs.setProperty('--theme-struct-ctrl-border', '#334155');
+        rs.setProperty('--header-gradient', '#0f172a');
+        rs.setProperty('--header-text-color', '#f8fafc');
       } catch (e) {}
     }
+    window.__reapplyBrandThemeOnToggle = function () {
+      try { applyBrandSettings(_currentSettings); } catch (_) {}
+    };
 
     let styleTag = document.getElementById('dynamic-brand-styles');
     if (!styleTag) {

@@ -81,10 +81,10 @@ const ZY_CLIENT_ICONS = {
 
 const ZY_CLIENT_MENU = [
   { label: 'Dashboard', page: 'dashboard', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
-  { label: 'Ranges Rate Card', page: 'sms-overview', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
+  { label: 'Ranges Add', page: 'sms-overview', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
-  { label: 'CDR & Statistics', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
-  { label: 'CDR 2 (Monthly)', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
+  { label: 'Show Report', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
+  { label: 'Whitenoise Reports', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
   { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
   { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
@@ -99,13 +99,13 @@ const ZY_LABELS = {
   'app-links': 'Apps Links',
   'live-access': 'Live Access',
   'my-numbers': 'My Numbers',
-  'sms-overview': 'Ranges Rate Card',
-  'sms-ranges': 'Ranges Rate Card',
-  'sms-ratecard': 'Ranges Rate Card',
+  'sms-overview': 'Ranges Add',
+  'sms-ranges': 'Ranges Add',
+  'sms-ratecard': 'Ranges Add',
   'news': 'Notifications',
   'notifications': 'Notifications',
-  'my-sms': 'CDR & Statistics',
-  'cdr2': 'CDR 2 (Monthly)',
+  'my-sms': 'Show Report',
+  'cdr2': 'Whitenoise Reports',
   'my-earnings': 'Credit Notes',
   'payout-requests': 'Payment Requests',
   'profile': 'My Profile',
@@ -361,10 +361,10 @@ pgDashboard = async function () {
         ],
         shortcuts: [
           { label: 'My Numbers', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
-          { label: 'Ranges Rate Card', page: 'sms-overview', icon: 'fa-table-list', tone: 'green' },
-          { label: 'CDR & Stats', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
+          { label: 'Ranges Add', page: 'sms-overview', icon: 'fa-table-list', tone: 'green' },
+          { label: 'Show Report', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
           clientHasWn
-            ? { label: 'CDR 2 (Monthly)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' }
+            ? { label: 'Whitenoise Reports', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' }
             : { label: 'Live Chat', page: 'live-chat', icon: 'fa-comments', tone: 'green' },
           { label: 'Payment Requests', page: 'payout-requests', icon: 'fa-wallet', tone: 'blue' },
           { label: 'Credit Notes', page: 'my-earnings', icon: 'fa-receipt', tone: 'green' }

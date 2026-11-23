@@ -9,19 +9,19 @@ let ZY_CLIENT_RANGE_LIST = [];
 
 async function pgSmsRanges() {
   const c = document.getElementById('page-content');
-  zyCrumb(['SMS Module', 'Ranges & Rate Card']);
+  zyCrumb(['SMS Module', 'Ranges Add']);
   c.innerHTML = `
     <div class="page-header" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title" style="font-size:18px;font-weight:800;color:#0f172a;">
-          <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges &amp; Rate Card (PKR)
+        <div class="page-title" style="font-size:18px;font-weight:800;">
+          <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges Add (PKR)
         </div>
-        <div class="page-subtitle" style="font-size:12.5px;color:#64748b;">
+        <div class="page-subtitle" style="font-size:12.5px;">
           Agent-approved termination ranges priced in PKR. Unlimited ranges — per range limit: <b>25/day</b>, <b>50 max held</b>, <b>3x/week</b>.
         </div>
       </div>
     </div>
-    <div class="apx-card" style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <div class="apx-card zy-theme-card" style="border-radius:10px;overflow:hidden;">
       <div class="apx-card-body" id="cl-ranges-table-host" style="padding:14px;"><div class="zy-loading">Loading termination ranges…</div></div>
     </div>`;
 
@@ -126,12 +126,12 @@ async function pgSmsRanges() {
         : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid is-disabled" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
       return [
-        { v: rName, h: `<strong class="${isWn ? 'zy-wn-range-name' : ''}"${isWn ? '' : ' style="color:#0f172a;"'}>${zyEsc(rName)}</strong>` },
+        { v: rName, h: `<strong class="${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
         { v: prefixOnly, h: `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(prefixOnly)}</span>` },
         weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
         monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
         `<span class="monospace" style="font-size:11.5px;" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> · <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
-        `<span class="monospace" style="font-weight:700;color:#334155;">${zyEsc(displayBatch.join(' / '))} / day</span>`,
+        `<span class="monospace" style="font-weight:700;">${zyEsc(displayBatch.join(' / '))} / day</span>`,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
         { v: '', h: `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
@@ -655,7 +655,7 @@ window.zyClientReturnSelected = async function() {
 /* ═══ SMS CDR STATS (CDR & STATISTICS V5) ══════════════════════ */
 async function pgMySms() {
   const c = document.getElementById('page-content');
-  zyCrumb(['CDR & Statistics']);
+  zyCrumb(['Show Report']);
 
   const defaultFrom = typeof zyDefaultFromDateTime === 'function' ? zyDefaultFromDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 00:00:00`;
   const defaultTo = typeof zyDefaultToDateTime === 'function' ? zyDefaultToDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 23:59:59`;
@@ -680,7 +680,7 @@ async function pgMySms() {
   c.innerHTML = `
     <div class="page-header">
       <div>
-        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> CDR &amp; Statistics</div>
+        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> Show Report</div>
         <div class="page-subtitle">Here You can view all the call detail records, traffic stats, and export reports.</div>
       </div>
     </div>
@@ -966,7 +966,7 @@ async function pgMySmsLoad(page = 1) {
 /* ═══ CDR 2 (MONTHLY ROUTE — EXCEL DAILY STATS · PKR · MONTHLY 30/5 {W}) ═══ */
 async function pgCdr2() {
   const c = document.getElementById('page-content');
-  zyCrumb(['SMS & Analytics', 'CDR 2 (Monthly)']);
+  zyCrumb(['SMS & Analytics', 'Whitenoise Reports']);
 
   try {
     const me = await apiFetch('/api/auth/me', { silent: true });
@@ -977,9 +977,9 @@ async function pgCdr2() {
           <div style="width:48px;height:48px;border-radius:50%;background:#fef2f2;color:#ef4444;display:inline-flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:12px;">
             <i class="fas fa-lock"></i>
           </div>
-          <h3 style="margin:0 0 6px;font-size:16px;font-weight:700;color:#0f172a;">CDR 2 Access Not Enabled</h3>
+          <h3 style="margin:0 0 6px;font-size:16px;font-weight:700;color:#0f172a;">Whitenoise Reports Access Not Enabled</h3>
           <p style="max-width:460px;margin:0 auto;font-size:13px;color:#64748b;line-height:1.5;">
-            CDR 2 (Monthly 30/5 {W}) access is not enabled for your account. Please ask your Agent to enable CDR 2 Access for you.
+            Whitenoise Reports (Monthly 30/5 {W}) access is not enabled for your account. Please ask your Agent to enable Whitenoise Reports Access for you.
           </p>
         </div>`;
       return;
@@ -1007,7 +1007,7 @@ async function pgCdr2() {
   c.innerHTML = `
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> CDR 2 — Monthly Route Stats</div>
+        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> Whitenoise Reports</div>
         <div class="page-subtitle">Monthly (30/5) {W} · PKR Earnings · Updated daily from official report · Historical dates preserved</div>
       </div>
       <div>

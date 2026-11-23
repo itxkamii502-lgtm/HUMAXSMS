@@ -1582,7 +1582,7 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   // 12. Phase 4: Client Panel 100% PKR UI & Direct 25/50 Rate Card Requests
   assertCheck('Phase 4: client-shell.js uses /api/client/rate-card and Rs. PKR formatting on Dashboard',
     speedClientJs.includes('/api/client/rate-card') &&
-    speedClientJs.includes('Ranges Rate Card') &&
+    speedClientJs.includes('Ranges Add') &&
     speedClientJs.includes('Rs. ') &&
     !speedClientJs.includes("fmtM(earnToday, '$')") &&
     !speedClientJs.includes("fmtM(mainBalance, '$')")
@@ -1697,7 +1697,7 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   );
 
   assertCheck('Whitenoise 14d: Agent UI wires permission-gated Excel CDR 2, Client whitenoise_access toggle & Monthly Cycle Settlement Box',
-    speedAgentJs.includes("['CDR 2 (Monthly)', 'cdr2'") &&
+    speedAgentJs.includes("['Whitenoise Reports', 'cdr2'") &&
     !speedAgentJs.includes('CDR 2 (Whitenoise)') &&
     speedAgentJs.includes('zyRefreshWhitenoiseNav') &&
     speedAgentJs.includes('/api/auth/me') &&
@@ -1712,7 +1712,7 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   );
 
   assertCheck('Whitenoise 14e: Client UI wires permission-gated Excel CDR 2 (PKR) & Monthly Cycle Settlement Box',
-    speedClientJs.includes("label: 'CDR 2 (Monthly)', page: 'cdr2'") &&
+    speedClientJs.includes("label: 'Whitenoise Reports', page: 'cdr2'") &&
     !speedClientJs.includes('CDR 2 (Whitenoise)') &&
     speedClientJs.includes('zyRefreshWhitenoiseNav') &&
     speedClientJs.includes('/api/auth/me') &&
@@ -1803,11 +1803,11 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
   );
 
   assertCheck('Sidebar 17b: Owner, Agent & Client dashboards wire role-based Quick Access shortcut tiles and domain-specific sidebar icons',
-    speedAdminJs.includes("label: 'CDR Reports', page: 'my-sms'") &&
+    speedAdminJs.includes("label: 'Show Report', page: 'my-sms'") &&
     speedAdminJs.includes("label: 'Agent Requests', page: 'agent-requests'") &&
     speedAgentJs.includes("label: 'Client Rate Set', page: 'client-rate-set'") &&
     speedAgentJs.includes('agentHasWn') &&
-    speedClientJs.includes("label: 'Ranges Rate Card', page: 'sms-overview'") &&
+    speedClientJs.includes("label: 'Ranges Add', page: 'sms-overview'") &&
     speedClientJs.includes('clientHasWn') &&
     sharedKitJs.includes('zy-ud-qtile-${zyEsc(tone)}') &&
     speedAdminJs.includes('zy-sub-ic') &&

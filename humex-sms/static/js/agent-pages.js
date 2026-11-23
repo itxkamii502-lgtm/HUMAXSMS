@@ -20,19 +20,19 @@ let ZY_AGENT_RANGE_LIST = [];
 
 async function pgSmsRanges() {
   const c = document.getElementById('page-content');
-  zyCrumb(['SMS Module', 'Ranges & Rate Card']);
+  zyCrumb(['SMS Module', 'Ranges Add']);
   c.innerHTML = `
     <div class="page-header" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title" style="font-size:18px;font-weight:800;color:#0f172a;">
-          <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges &amp; Rate Card
+        <div class="page-title" style="font-size:18px;font-weight:800;">
+          <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges Add
         </div>
-        <div class="page-subtitle" style="font-size:12.5px;color:#64748b;">
+        <div class="page-subtitle" style="font-size:12.5px;">
           Master catalog of available termination ranges, payout rates, and real-time numbers room.
         </div>
       </div>
     </div>
-    <div class="apx-card" style="background:#ffffff;border:1.5px solid #cbd5e1;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+    <div class="apx-card zy-theme-card" style="border-radius:10px;overflow:hidden;">
       <div class="apx-card-body" id="agt-ranges-table-host" style="padding:14px;"><div class="zy-loading">Loading termination ranges…</div></div>
     </div>`;
 
@@ -124,7 +124,7 @@ async function pgSmsRanges() {
       const prefixDisplay = r.prefix ? `+${String(r.prefix).trim().replace(/^\++/, '')}` : '—';
 
       return [
-        { v: rName, h: `<strong class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}"${ptInfo.isWn ? '' : ' style="color:#0f172a;"'}>${zyEsc(rName)}</strong>` },
+        { v: rName, h: `<strong class="${ptInfo.isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
         `<span class="monospace" style="font-weight:700;color:#2563eb;">${zyEsc(prefixDisplay)}</span>`,
         weeklyRate !== null ? `<span style="font-family:monospace;font-weight:700;color:#16a34a;">${currSym} ${zyFmtMoney(weeklyRate, 4)}</span>` : naHtml,
         monthlyRate !== null ? `<span style="font-family:monospace;font-weight:700;color:#7c3aed;">${currSym} ${zyFmtMoney(monthlyRate, 4)}</span>` : naHtml,
@@ -1779,7 +1779,7 @@ async function pgDetailedSms(defaultGroup = null) { zyCdrPage(defaultGroup); }
 
 async function zyCdrPage(defaultGroup = null) {
   const c = document.getElementById('page-content');
-  zyCrumb(['SMS CDR Reports']);
+  zyCrumb(['Show Report']);
 
   const defaultFrom = typeof zyDefaultFromDateTime === 'function' ? zyDefaultFromDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 00:00:00`;
   const defaultTo = typeof zyDefaultToDateTime === 'function' ? zyDefaultToDateTime() : `${(typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10))} 23:59:59`;
@@ -2121,7 +2121,7 @@ async function zyCdrLoad(page = 1) {
 /* ═══ CDR 2 (MONTHLY ROUTE — EXCEL DAILY STATS · MONTHLY 30/5 {W}) ═══ */
 async function pgCdr2() {
   const c = document.getElementById('page-content');
-  zyCrumb(['SMS & Analytics', 'CDR 2 (Monthly)']);
+  zyCrumb(['SMS & Analytics', 'Whitenoise Reports']);
 
   try {
     const me = await apiFetch('/api/auth/me', { silent: true });
@@ -2132,9 +2132,9 @@ async function pgCdr2() {
           <div style="width:48px;height:48px;border-radius:50%;background:#fef2f2;color:#ef4444;display:inline-flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:12px;">
             <i class="fas fa-lock"></i>
           </div>
-          <h3 style="margin:0 0 6px;font-size:16px;font-weight:700;color:#0f172a;">CDR 2 Access Not Enabled</h3>
+          <h3 style="margin:0 0 6px;font-size:16px;font-weight:700;color:#0f172a;">Whitenoise Reports Access Not Enabled</h3>
           <p style="max-width:460px;margin:0 auto;font-size:13px;color:#64748b;line-height:1.5;">
-            Your Agent account does not currently have CDR 2 (Monthly 30/5 {W}) permission enabled. Contact Owner to enable CDR 2 Access for your account.
+            Your Agent account does not currently have Whitenoise Reports (Monthly 30/5 {W}) permission enabled. Contact Owner to enable Whitenoise Reports Access for your account.
           </p>
         </div>`;
       return;
@@ -2163,7 +2163,7 @@ async function pgCdr2() {
   c.innerHTML = `
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> CDR 2 — Monthly Route Stats</div>
+        <div class="page-title"><i class="fas fa-chart-column" style="color:#2563eb;"></i> Whitenoise Reports</div>
         <div class="page-subtitle">Monthly (30/5) {W} · 5-day hold · Updated daily from official company stats report</div>
       </div>
       <div>

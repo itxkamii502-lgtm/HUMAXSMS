@@ -27,14 +27,14 @@ const ZY_ADMIN_MENU = [
   { t: "NUMBERS & INVENTORY", i: 'fa-sim-card', c: '#1d4ed8', items: [
       ['Numbers Pool Hub', 'my-numbers', 'fa-mobile-screen'],
       ['Blocked Numbers', 'blocked-numbers', 'fa-ban'],
-      ['Ranges & Rate Card', 'sms-ranges', 'fa-table-list'],
+      ['Ranges Add', 'sms-ranges', 'fa-table-list'],
       ['Smart Excel Import', 'smart-sheet-import', 'fa-file-excel'],
       ['Upload & Blacklist', 'upload-numbers', 'fa-cloud-arrow-up'],
       ['Allocation & Transfer Log', 'allocation-history', 'fa-file-lines'],
   ] },
   { t: "SMS & ANALYTICS", i: 'fa-chart-line', c: '#059669', items: [
-      ['SMS CDR Reports', 'my-sms', 'fa-comment-sms'],
-      ['CDR 2 (Whitenoise)', 'cdr2', 'fa-tower-cell'],
+      ['Show Report', 'my-sms', 'fa-comment-sms'],
+      ['Whitenoise Reports', 'cdr2', 'fa-tower-cell'],
       ['Failed SMS', 'failed-sms', 'fa-triangle-exclamation'],
       ['Live Monitor', 'live-otp-feed', 'fa-signal'],
       ['Analytics & Reports', 'sms-analytics', 'fa-chart-pie'],
@@ -240,12 +240,14 @@ const ZY_ADMIN_LABELS = {
   'bulk-allocation': 'Bulk Allocation',
   'revoke-numbers': 'Blocked Numbers',
   'blocked-numbers': 'Blocked Numbers',
-  'sms-rate-card': 'Rate Card',
+  'sms-ranges': 'Ranges Add',
+  'sms-rate-card': 'Ranges Add',
   'bulk-range-import': 'Bulk Range Import',
   'blacklist-management': 'Blacklist Management',
   'number-transfers-log': 'Transfer Log',
+  'my-sms': 'Show Report',
   'failed-sms': 'Failed SMS',
-  'cdr2': 'CDR 2 (Whitenoise)',
+  'cdr2': 'Whitenoise Reports',
   'live-traffic': 'Live Traffic',
   'profit-stats': 'Profit Stats',
   'business-reports': 'Business Reports',
@@ -402,10 +404,10 @@ renderDashboard = async function () {
           { label: 'Whitenoise SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: 'cdr2' }
         ],
         shortcuts: [
-          { label: 'CDR Reports', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
-          { label: 'CDR 2 (Excel)', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' },
+          { label: 'Show Report', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
+          { label: 'Whitenoise Reports', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' },
           { label: 'Numbers Pool', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
-          { label: 'Ranges & Rates', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
+          { label: 'Ranges Add', page: 'sms-ranges', icon: 'fa-table-list', tone: 'green' },
           { label: 'Agent Requests', page: 'agent-requests', icon: 'fa-sim-card', tone: 'blue' },
           { label: 'VPS Health', page: 'vps-health', icon: 'fa-server', tone: 'green' }
         ],
@@ -799,10 +801,10 @@ window.renderVpsHealth = async function() {
 renderMySms = async function (summary = false) {
   const c = document.getElementById('page-content');
   if (typeof zyCrumb === 'function') {
-    zyCrumb(['SMS Stats & Reports']);
+    zyCrumb(['Show Report']);
   }
   const bc = document.getElementById('breadcrumb');
-  if (bc) bc.textContent = 'SMS Stats & Reports';
+  if (bc) bc.textContent = 'Show Report';
 
   const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
   const defaultFrom = `${today} 00:00:00`;
@@ -829,7 +831,7 @@ renderMySms = async function (summary = false) {
   c.innerHTML = `
     <div class="page-header">
       <div>
-        <div class="page-title"><i class="fas fa-file-invoice" style="color:#2563eb;"></i> SMS Stats &amp; Reports</div>
+        <div class="page-title"><i class="fas fa-file-invoice" style="color:#2563eb;"></i> Show Report</div>
         <div class="page-subtitle">Here you can view all call detail records, system traffic, and export reports.</div>
       </div>
     </div>
@@ -1257,10 +1259,10 @@ function zyMonthStartYmd() {
 async function renderOwnerCdr2() {
   const c = document.getElementById('page-content');
   if (typeof zyCrumb === 'function') {
-    zyCrumb(['SMS Stats & Reports', 'CDR 2 (Whitenoise)']);
+    zyCrumb(['Show Report', 'Whitenoise Reports']);
   }
   const bc = document.getElementById('breadcrumb');
-  if (bc) bc.textContent = 'CDR 2 (Whitenoise)';
+  if (bc) bc.textContent = 'Whitenoise Reports';
 
   const today = (typeof zyToday === 'function' ? zyToday() : new Date().toISOString().slice(0, 10));
   const defaultFrom = `${zyMonthStartYmd()} 00:00:00`;
@@ -1288,7 +1290,7 @@ async function renderOwnerCdr2() {
       <div>
         <div class="page-title" style="display:flex;align-items:center;gap:8px;">
           <i class="fas fa-file-excel" style="color:#2563eb;"></i>
-          <span>CDR 2 — Whitenoise Daily Stats</span>
+          <span>Whitenoise Reports</span>
         </div>
         <div class="page-subtitle" style="margin-top:3px;">
           Excel-Only Daily Stats · Monthly (30/5) {W} · 5-day hold · Cumulative 1–15 &amp; 16–End reconciliation

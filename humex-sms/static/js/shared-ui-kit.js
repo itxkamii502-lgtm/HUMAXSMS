@@ -4293,13 +4293,13 @@ window.zyRenderLiveAccessPager = function () {
   const hasNext = Boolean(window._zyLiveAccessHasNext);
 
   pager.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 14px;background:#f8fafc;border-top:1px solid #cbd5e1;">
+    <div class="zy-la-pager">
       <div style="display:flex;align-items:center;gap:8px;">
         <button type="button" class="btn btn-sm ${isLive ? 'btn-success' : 'btn-outline'}" onclick="zyGoLiveAccessLive()" style="font-weight:700;display:inline-flex;align-items:center;gap:6px;">
           <span style="width:8px;height:8px;border-radius:50%;background:${isLive ? '#ffffff' : '#10b981'};display:inline-block;"></span>
           Live
         </button>
-        <span style="font-size:12px;color:#64748b;font-weight:600;">${isLive ? 'Showing latest 25 live messages' : `Viewing page ${page} (25 per page)`}</span>
+        <span class="zy-la-pager-meta">${isLive ? 'Showing latest 25 live messages' : `Viewing page ${page} (25 per page)`}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <button type="button" class="btn btn-sm btn-outline" onclick="zyGoLiveAccessPage(${page - 1})" ${hasPrev ? '' : 'disabled'} style="min-width:86px;">
@@ -4349,11 +4349,11 @@ window.zyRenderLiveAccessTableBody = function () {
 
   tbody.innerHTML = rows.slice(0, window._zyLiveAccessLimit || 25).map(r => `
     <tr>
-      <td style="font-weight:600;color:#0f172a;white-space:nowrap;">${esc(r.range || 'International')}</td>
+      <td class="zy-la-range">${esc(r.range || 'International')}</td>
       <td style="white-space:nowrap;">
-        <span style="display:inline-flex;align-items:center;padding:3px 9px;border-radius:6px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;font-weight:700;font-size:12px;">${esc(r.cli || 'SMS')}</span>
+        <span class="zy-la-cli">${esc(r.cli || 'SMS')}</span>
       </td>
-      <td style="font-family:var(--font-mono,'JetBrains Mono',monospace);font-size:12.5px;color:#1e293b;word-break:break-word;line-height:1.45;">${esc(r.sms || '')}</td>
+      <td class="zy-la-sms">${esc(r.sms || '')}</td>
     </tr>`).join('');
   window.zyRenderLiveAccessPager();
 };
@@ -4470,17 +4470,17 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
 
   const ownerControls = isOwner ? `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:14px;">
-      <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:10px;background:#ffffff;border:1.5px solid #cbd5e1;cursor:pointer;">
+      <label class="zy-la-toggle-card">
         <div>
-          <div style="font-weight:700;font-size:13.5px;color:#0f172a;"><i class="fas fa-user-tie" style="color:#2563eb;margin-right:6px;"></i> Agent Live Access</div>
-          <div id="zy-la-agent-state" style="font-size:12px;color:#64748b;margin-top:2px;">Loading status…</div>
+          <div class="zy-la-toggle-title"><i class="fas fa-user-tie" style="color:#2563eb;margin-right:6px;"></i> Agent Live Access</div>
+          <div id="zy-la-agent-state" class="zy-la-toggle-sub">Loading status…</div>
         </div>
         <input type="checkbox" id="zy-la-toggle-agents" onchange="zySaveLiveAccessToggle('live_access_agents_enabled', this.checked)" style="width:20px;height:20px;accent-color:#2563eb;cursor:pointer;">
       </label>
-      <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:10px;background:#ffffff;border:1.5px solid #cbd5e1;cursor:pointer;">
+      <label class="zy-la-toggle-card">
         <div>
-          <div style="font-weight:700;font-size:13.5px;color:#0f172a;"><i class="fas fa-users" style="color:#059669;margin-right:6px;"></i> Client Live Access</div>
-          <div id="zy-la-client-state" style="font-size:12px;color:#64748b;margin-top:2px;">Loading status…</div>
+          <div class="zy-la-toggle-title"><i class="fas fa-users" style="color:#059669;margin-right:6px;"></i> Client Live Access</div>
+          <div id="zy-la-client-state" class="zy-la-toggle-sub">Loading status…</div>
         </div>
         <input type="checkbox" id="zy-la-toggle-clients" onchange="zySaveLiveAccessToggle('live_access_clients_enabled', this.checked)" style="width:20px;height:20px;accent-color:#059669;cursor:pointer;">
       </label>
@@ -4500,15 +4500,15 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
       </div>
     </div>
     ${ownerControls}
-    <div class="apx-card" style="border:1.5px solid #cbd5e1;border-radius:10px;background:#ffffff;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);">
-      <div class="apx-card-header" style="padding:10px 14px;background:#f8fafc;border-bottom:1px solid #cbd5e1;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <span style="font-weight:700;font-size:13px;color:#1e293b;">
+    <div class="apx-card zy-la-card">
+      <div class="apx-card-header zy-la-head">
+        <span class="zy-la-head-title">
           <i class="fas fa-shield-halved" style="color:#059669;margin-right:6px;"></i> Live API Messages (Masked OTP)
         </span>
-        <input type="text" id="zy-live-access-search" oninput="zyOnLiveAccessSearchInput()" placeholder="Search Range, CLI, or SMS…" style="padding:6px 11px;border:1px solid #cbd5e1;border-radius:7px;font-size:12.5px;min-width:220px;background:#ffffff;">
+        <input type="text" id="zy-live-access-search" class="zy-la-search" oninput="zyOnLiveAccessSearchInput()" placeholder="Search Range, CLI, or SMS…">
       </div>
       <div style="overflow-x:auto;">
-        <table class="data-table" style="width:100%;border-collapse:collapse;">
+        <table class="data-table zy-la-table" style="width:100%;border-collapse:collapse;">
           <thead>
             <tr>
               <th style="width:22%;text-align:left;">Range</th>
@@ -4517,7 +4517,7 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
             </tr>
           </thead>
           <tbody id="zy-live-access-tbody">
-            <tr><td colspan="3" style="text-align:center;padding:30px;color:#64748b;">Loading Live Access stream…</td></tr>
+            <tr><td colspan="3" style="text-align:center;padding:30px;color:var(--sp-text-muted,#64748b);">Loading Live Access stream…</td></tr>
           </tbody>
         </table>
       </div>

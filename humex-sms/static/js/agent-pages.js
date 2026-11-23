@@ -1573,7 +1573,7 @@ async function pgMyClients() {
         </button>
       </div>`;
     const r = [
-      `<b>${zyEsc(x.username || '')}</b>${hasWnBadge}${hasAppLinksBadge}`,
+      `<span class="zy-col-username"><b>${zyEsc(x.username || '')}</b>${hasWnBadge}${hasAppLinksBadge}</span>`,
       zyEsc(x.full_name || '—'),
       zyEsc(x.email || '—'),
       zyEsc(x.phone || x.contact_no || '—'),
@@ -1608,6 +1608,11 @@ function zyAddClientModal() {
       </label>
     </div>` : '';
   zyModal('Add New Client', `
+    <div class="zy-acct-search-box">
+      <label class="zy-lbl" for="nc-existing-search"><i class="fas fa-search" style="margin-right:5px;"></i>Search Existing Clients</label>
+      <input class="zy-input" id="nc-existing-search" type="text" placeholder="Search existing client username or name..." autocomplete="off" oninput="zyFilterExistingClientsModal(this.value)">
+      <div id="nc-existing-results" class="zy-acct-search-results"></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px;">
       <div><label class="zy-lbl">Username *</label><input class="zy-input" id="nc-user" placeholder="Minimum 6 Characters" autocomplete="off"></div>
       <div><label class="zy-lbl">Password *</label><input class="zy-input" id="nc-pass" type="password" placeholder="Minimum 6 Characters" autocomplete="new-password"></div>
@@ -1624,7 +1629,36 @@ function zyAddClientModal() {
     ${appLinksToggle}`,
     `<button class="zy-btn-grey" onclick="closeModal()">Close</button>
      <button class="zy-btn-blue" onclick="zySaveClient()"><i class="fas fa-user-plus" style="margin-right:4px;"></i> Create Client</button>`);
+  if (!Array.isArray(ZY_CLIENTS) || !ZY_CLIENTS.length) {
+    apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=500`).then(res => {
+      ZY_CLIENTS = zyList(res);
+      const inp = document.getElementById('nc-existing-search');
+      if (inp && inp.value) zyFilterExistingClientsModal(inp.value);
+    }).catch(() => {});
+  }
 }
+
+window.zyFilterExistingClientsModal = function(q) {
+  const box = document.getElementById('nc-existing-results');
+  if (!box) return;
+  const term = String(q || '').trim().toLowerCase();
+  if (!term) { box.innerHTML = ''; box.style.display = 'none'; return; }
+  const matches = (ZY_CLIENTS || []).filter(c =>
+    String(c.username || '').toLowerCase().includes(term) ||
+    String(c.full_name || '').toLowerCase().includes(term)
+  ).slice(0, 8);
+  box.style.display = 'block';
+  if (!matches.length) {
+    box.innerHTML = `<div class="zy-acct-search-empty">No existing client matches "${zyEsc(q)}" — username is available.</div>`;
+    return;
+  }
+  box.innerHTML = matches.map(c => `
+    <div class="zy-acct-search-row">
+      <span class="zy-col-username"><strong>${zyEsc(c.username || '')}</strong>${c.full_name ? ` <span class="text-muted">(${zyEsc(c.full_name)})</span>` : ''}</span>
+      <span class="badge ${c.status === 'active' ? 'badge-green' : 'badge-red'}" style="font-size:10px;">${c.status === 'active' ? 'Active' : 'Inactive'}</span>
+    </div>
+  `).join('');
+};
 
 async function zySaveClient() {
   const wnEl = document.getElementById('nc-wn-access');
@@ -1666,9 +1700,9 @@ window.zyToggleClientStatus = async function(id, currentStatus) {
 
 window.zyDeleteClient = async function(id) {
   const c = (ZY_CLIENTS || []).find(x => String(x.id) === String(id));
-  const label = c ? `${c.username} (#${c.id})` : `Client #${id}`;
+  const label = c && c.username ? c.username : 'this client';
   const ok = await zyConfirm(
-    `Delete client "${label}"?\n\n• Active numbers will return to your Agent pool and login will be revoked.\n• All historical CDR & SMS logs remain permanently saved under "${label}" (marked Deleted).\n• Creating a new client with the same username later will assign a brand-new unique ID with separate CDR rows.`,
+    `Delete client "${label}"?\n\n• Active numbers will return to your Agent pool and login will be revoked.\n• All historical CDR & SMS logs remain permanently saved under "${label}" (marked Deleted).\n• Creating a new client with the same username later will start fresh with separate CDR rows.`,
     { title: 'Delete Client', confirmLabel: 'Delete Client', danger: true }
   );
   if (!ok) return;
@@ -3256,8 +3290,7 @@ window.zyAgtRenderClientPayoutTable = function() {
       : `<span class="badge badge-blue" style="font-weight:700;">Weekly (API)</span>`;
 
     return [
-      `<span class="monospace">#${Number(r.id || 0)}</span>`,
-      `<strong>${zyEsc(r.username || r.user || 'Client')}</strong>`,
+      `<span class="zy-col-username"><strong>${zyEsc(r.username || r.user || 'Client')}</strong></span>`,
       { v: isMonthlyReq ? 'Monthly {W}' : 'Weekly (API)', h: cycleBadge },
       `<span class="badge badge-blue">${zyEsc(r.method || r.mode || 'Bank Transfer (IBAN)')}</span>`,
       { v: rawAmt, h: `<span class="zy-crs-num" style="font-weight:700;color:#059669;">${fmtPkr(rawAmt)}</span>` },
@@ -3279,9 +3312,9 @@ window.zyAgtRenderClientPayoutTable = function() {
   });
 
   body.innerHTML = zyDT2('dt-client-payreq', {
-    cols: ['#', 'Client', 'Cycle', 'Method', 'Amount (PKR)', 'Status', 'Account / IBAN / Wallet', 'Paid (PKR)', 'Transaction', 'Requested At', 'Actions'],
+    cols: ['Client', 'Cycle', 'Method', 'Amount (PKR)', 'Status', 'Account / IBAN / Wallet', 'Paid (PKR)', 'Transaction', 'Requested At', 'Actions'],
     rows,
-    sort: 9,
+    sort: 8,
     dir: -1
   });
   zy2Render('dt-client-payreq');
@@ -3755,9 +3788,8 @@ async function pgClientRequests() {
         ? `<span class="badge badge-blue" title="Allocated ${r.fulfilled_count} of ${reqQty} requested">${r.fulfilled_count} / ${reqQty}</span>`
         : `<span class="badge badge-blue">${reqQty}</span>`;
       return [
-        r.id || '—',
-        `<strong>${zyEsc(r.requester_username || r.client_username || r.agent_username || 'Client')}</strong> <span class="badge badge-blue" style="font-size:10px;">${zyEsc(r.requester_role || 'Client')}</span>`,
-        zyEsc(r.range_name || ('Range #' + (r.range_id || '—'))),
+        `<span class="zy-col-username"><strong>${zyEsc(r.requester_username || r.client_username || r.agent_username || 'Client')}</strong> <span class="badge badge-blue" style="font-size:10px;">${zyEsc(r.requester_role || 'Client')}</span></span>`,
+        zyEsc(r.range_name || 'Range'),
         zyEsc(r.app_name || r.service_name || 'General'),
         { v: freeCnt, h: `<span class="badge ${freeBadgeCls}" title="Available unassigned numbers in your Agent pool for this range">${freeCnt.toLocaleString()}</span>` },
         { v: reqQty, h: qtyHtml },
@@ -3777,7 +3809,7 @@ async function pgClientRequests() {
       ];
     });
     host.innerHTML = zyDT2('dt-agt-reqs', {
-      cols: ['#', 'Requester', 'Range', 'App', 'Free', 'Qty', 'Client Rate', 'Notes', 'Status', 'Date', 'Actions'],
+      cols: ['Requester', 'Range', 'App', 'Free', 'Qty', 'Client Rate', 'Notes', 'Status', 'Date', 'Actions'],
       rows
     });
     zy2Render('dt-agt-reqs');
@@ -4042,44 +4074,61 @@ function zyRenderAgentAppLinksBody() {
     return;
   }
 
-  const items = _agentAppLinksData.filter(it => !q || String(it.name || '').toLowerCase().includes(q) || String(it.category || '').toLowerCase().includes(q));
+  const items = _agentAppLinksData.filter(it =>
+    !q
+    || String(it.name || '').toLowerCase().includes(q)
+    || String(it.url || '').toLowerCase().includes(q)
+    || String(it.category || '').toLowerCase().includes(q)
+  );
   if (!items.length) {
     host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now. Click <strong>Add App Link</strong> to add links for your clients.</div>`;
     return;
   }
   host.innerHTML = `
-    <div class="zy-applinks-user-grid">
-      ${items.map((it) => {
-        const href = _agentSafeUrl(it.url);
-        const isMine = it.agent_id != null && Number(it.agent_id) === Number(AGENT_ID);
-        let domain = '';
-        try { domain = new URL(href).hostname.replace(/^www\./, ''); } catch (_) {}
-        return `
-          <div class="zy-applink-user-card" style="position:relative;">
-            <a href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-decoration:none;color:inherit;">
-              <div class="zy-applink-card-ic"><i class="fas fa-mobile-screen-button"></i></div>
-              <div class="zy-applink-card-info">
-                <div class="zy-applink-card-name">
-                  <span>${zyEsc(it.name)}</span>
-                  ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
-                  ${isMine ? `<span class="badge badge-blue" style="font-size:9.5px;padding:1px 5px;">Mine</span>` : `<span class="badge" style="font-size:9.5px;padding:1px 5px;background:#f1f5f9;color:#475569;">Global</span>`}
-                </div>
-                <div class="zy-applink-card-meta">
-                  ${it.category ? `<span>${zyEsc(it.category)}</span> · ` : ''}<span>${zyEsc(domain || 'Open Link')}</span>
-                </div>
-                ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
-              </div>
-              <span class="zy-applink-card-open"><i class="fas fa-arrow-up-right-from-square"></i></span>
-            </a>
-            ${isMine ? `
-              <div style="display:inline-flex;gap:4px;margin-left:6px;">
-                <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyAgentOpenAppLinkModal(${Number(it.id)})" title="Edit"><i class="fas fa-pen"></i></button>
-                <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#dc2626;" onclick="zyAgentDeleteAppLink(${Number(it.id)})" title="Delete"><i class="fas fa-trash"></i></button>
-              </div>
-            ` : ''}
-          </div>
-        `;
-      }).join('')}
+    <div class="zy-applinks-tbl-wrap">
+      <table class="zy-dt zy-applinks-tbl">
+        <thead>
+          <tr>
+            <th style="width:60px;text-align:center;">#</th>
+            <th style="width:32%;">App Name</th>
+            <th>App Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((it, idx) => {
+            const href = _agentSafeUrl(it.url);
+            const rawUrl = String(it.url || '').trim();
+            const isMine = it.agent_id != null && Number(it.agent_id) === Number(AGENT_ID);
+            return `
+              <tr>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-name-td">
+                  <div class="zy-applink-name-line">
+                    <span class="zy-applink-name-txt">${zyEsc(it.name || 'App Link')}</span>
+                    ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+                    ${isMine ? `<span class="badge badge-blue" style="font-size:9.5px;padding:1px 6px;">Mine</span>` : `<span class="zy-applink-cat-tag">Global</span>`}
+                    ${it.category ? `<span class="zy-applink-cat-tag">${zyEsc(it.category)}</span>` : ''}
+                  </div>
+                  ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
+                </td>
+                <td class="zy-applink-url-td">
+                  <div class="zy-applink-url-wrap">
+                    <a class="zy-applink-url-anchor" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="${zyEsc(rawUrl)}">${zyEsc(rawUrl || href)}</a>
+                    <div class="zy-applink-row-actions">
+                      <button type="button" class="zy-applink-copy-btn" data-url="${zyEsc(rawUrl || href)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
+                      <a class="zy-applink-open-btn" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i> Open</a>
+                      ${isMine ? `
+                        <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyAgentOpenAppLinkModal(${Number(it.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+                        <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#ef4444;" onclick="zyAgentDeleteAppLink(${Number(it.id)})" title="Delete"><i class="fas fa-trash"></i></button>
+                      ` : ''}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
     </div>
   `;
 }

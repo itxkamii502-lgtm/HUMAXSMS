@@ -193,19 +193,19 @@ window.zyOpenClientRateCardRequestModal = function(i) {
 
   zyModal(`Request Numbers: ${zyEsc(rName)}`, `
     <div id="cl-rc-err" class="zy-modal-alert is-error" style="display:none;"></div>
-    <div class="zy-modal-summary-card" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+    <div class="zy-modal-summary-card" style="background:var(--sp-bg-subtle);border:1px solid var(--sp-border);border-radius:10px;padding:12px 14px;margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <div>
-          <div style="font-weight:800;color:#0f172a;font-size:14.5px;">${zyEsc(rName)}</div>
-          <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Batch Size: <b>${batchSize}</b> · Max Hold: <b>${maxHoldNums}</b></div>
+          <div style="font-weight:800;color:var(--sp-text-primary);font-size:14.5px;">${zyEsc(rName)}</div>
+          <div style="font-size:11.5px;color:var(--sp-text-muted);margin-top:2px;">Batch Size: <b>${batchSize}</b> · Max Hold: <b>${maxHoldNums}</b></div>
         </div>
         <div style="text-align:right;">
-          <div style="font-size:11px;color:#64748b;font-weight:700;text-transform:uppercase;">Client Rate</div>
+          <div style="font-size:11px;color:var(--sp-text-muted);font-weight:700;text-transform:uppercase;">Client Rate</div>
           <div class="zy-cl-rc-rate" style="font-size:15px;">Rs. ${zyFmtMoney(clientRatePkr, 4)} / SMS</div>
         </div>
       </div>
-      <div style="margin-top:8px;padding-top:8px;border-top:1px dashed #cbd5e1;font-size:11.5px;color:#475569;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
-        <span>Agent Free Pool: <b style="color:${Number(r.available || 0) > 0 ? '#059669' : '#dc2626'};">${Number(r.available || 0).toLocaleString()}</b></span>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--sp-border-subtle);font-size:11.5px;color:var(--sp-text-secondary);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+        <span>Agent Free Pool: <b style="color:${Number(r.available || 0) > 0 ? '#10b981' : '#ef4444'};">${Number(r.available || 0).toLocaleString()}</b></span>
         <span>Held: <b>${heldCount}/${maxHoldNums}</b></span>
         <span>Daily Adds: <b>${todayAddsUsed}/${dailyAddsLimit}</b></span>
         <span>Today Nums: <b>${todayNums}/${dailyLimitNums}</b></span>
@@ -213,19 +213,19 @@ window.zyOpenClientRateCardRequestModal = function(i) {
     </div>
 
     <div style="margin-bottom:14px;">
-      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;">Allowed Number Batch (Max ${maxReqNow} now) *</label>
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--sp-text-secondary);margin-bottom:8px;">Allowed Number Batch (Max ${maxReqNow} now) *</label>
       <input type="hidden" id="cl-rc-qty" value="${Number(defaultQty)}">
       <div class="zy-qty-grid">${qtyButtonsHtml}</div>
     </div>
 
     <div style="margin-bottom:12px;">
-      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Payment Term</label>
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--sp-text-secondary);margin-bottom:6px;">Payment Term</label>
       <select id="cl-rc-payterm" class="zy-select-pill" ${isLockedPt ? 'disabled' : ''}>${ptOptionsHtml}</select>
-      ${isLockedPt ? `<div style="font-size:11px;color:#4338ca;font-weight:600;margin-top:4px;">Only <b>${zyEsc(ptInfo.primary)}</b> is active on this range.</div>` : ''}
+      ${isLockedPt ? `<div style="font-size:11px;color:var(--sp-primary);font-weight:600;margin-top:4px;">Only <b>${zyEsc(ptInfo.primary)}</b> is active on this range.</div>` : ''}
     </div>
 
     <div style="margin-bottom:6px;">
-      <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">Notes for Agent (Optional)</label>
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--sp-text-secondary);margin-bottom:6px;">Notes for Agent (Optional)</label>
       <input type="text" id="cl-rc-notes" class="zy-select-pill" placeholder="e.g. WhatsApp / OTP traffic batch">
     </div>
   `, `
@@ -1803,34 +1803,55 @@ function zyRenderClientAppLinksBody() {
   const host = document.getElementById('client-applinks-body');
   if (!host) return;
   const q = _clientAppLinksQuery.trim().toLowerCase();
-  const items = _clientAppLinksData.filter(it => !q || String(it.name || '').toLowerCase().includes(q) || String(it.category || '').toLowerCase().includes(q));
+  const items = _clientAppLinksData.filter(it =>
+    !q
+    || String(it.name || '').toLowerCase().includes(q)
+    || String(it.url || '').toLowerCase().includes(q)
+    || String(it.category || '').toLowerCase().includes(q)
+  );
   if (!items.length) {
     host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now.</div>`;
     return;
   }
   host.innerHTML = `
-    <div class="zy-applinks-user-grid">
-      ${items.map(it => {
-        const href = _clientSafeUrl(it.url);
-        let domain = '';
-        try { domain = new URL(href).hostname.replace(/^www\./, ''); } catch (_) {}
-        return `
-          <a class="zy-applink-user-card" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer">
-            <div class="zy-applink-card-ic"><i class="fas fa-mobile-screen-button"></i></div>
-            <div class="zy-applink-card-info">
-              <div class="zy-applink-card-name">
-                <span>${zyEsc(it.name)}</span>
-                ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
-              </div>
-              <div class="zy-applink-card-meta">
-                ${it.category ? `<span>${zyEsc(it.category)}</span> · ` : ''}<span>${zyEsc(domain || 'Open Link')}</span>
-              </div>
-              ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
-            </div>
-            <span class="zy-applink-card-open"><i class="fas fa-arrow-up-right-from-square"></i></span>
-          </a>
-        `;
-      }).join('')}
+    <div class="zy-applinks-tbl-wrap">
+      <table class="zy-dt zy-applinks-tbl">
+        <thead>
+          <tr>
+            <th style="width:60px;text-align:center;">#</th>
+            <th style="width:32%;">App Name</th>
+            <th>App Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((it, idx) => {
+            const href = _clientSafeUrl(it.url);
+            const rawUrl = String(it.url || '').trim();
+            return `
+              <tr>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-name-td">
+                  <div class="zy-applink-name-line">
+                    <span class="zy-applink-name-txt">${zyEsc(it.name || 'App Link')}</span>
+                    ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+                    ${it.category ? `<span class="zy-applink-cat-tag">${zyEsc(it.category)}</span>` : ''}
+                  </div>
+                  ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
+                </td>
+                <td class="zy-applink-url-td">
+                  <div class="zy-applink-url-wrap">
+                    <a class="zy-applink-url-anchor" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="${zyEsc(rawUrl)}">${zyEsc(rawUrl || href)}</a>
+                    <div class="zy-applink-row-actions">
+                      <button type="button" class="zy-applink-copy-btn" data-url="${zyEsc(rawUrl || href)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
+                      <a class="zy-applink-open-btn" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i> Open</a>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
     </div>
   `;
 }

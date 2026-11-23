@@ -144,6 +144,33 @@
 
       <div id="pro-tab-details" class="zy-pro-shell">
 
+        <!-- CARD 0: PROFILE PHOTO (LIVE CHAT DP) -->
+        <div class="zy-pro-card zy-pro-ava-card">
+          <div class="zy-pro-ava-layout">
+            <div class="zy-pro-ava-preview-wrap" onclick="window.HumexProfile.triggerAvatarPick()" title="Click to upload or change profile photo">
+              <div class="zy-pro-ava-ring" id="pro-ava-preview">
+                ${user.avatar_url
+                  ? `<img src="${escapeHtml(user.avatar_url)}" alt="Profile Photo" class="zy-pro-ava-img">`
+                  : `<span class="zy-pro-ava-initials">${escapeHtml(String(user.full_name || user.username || 'U').trim().slice(0, 2).toUpperCase())}</span>`}
+              </div>
+              <span class="zy-pro-ava-cam-badge"><i class="fas fa-camera"></i></span>
+            </div>
+            <div class="zy-pro-ava-info">
+              <div class="zy-pro-card-title">PROFILE PHOTO (LIVE CHAT DP)</div>
+              <div class="zy-pro-card-sub">Your profile picture appears automatically in Live Chat. Any photo size is cleanly auto-fitted &amp; cropped like WhatsApp.</div>
+              <div class="zy-pro-ava-actions">
+                <input type="file" id="pro-ava-file-input" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none;" onchange="window.HumexProfile.handleAvatarFile(this)">
+                <button type="button" class="zy-pro-btn zy-pro-btn-primary" onclick="window.HumexProfile.triggerAvatarPick()">
+                  <i class="fas fa-camera"></i> ${user.avatar_url ? 'Change Photo' : 'Upload Photo'}
+                </button>
+                <button type="button" id="pro-ava-remove-btn" class="zy-pro-btn zy-pro-btn-outline-danger" style="display:${user.avatar_url ? 'inline-flex' : 'none'};" onclick="window.HumexProfile.removeAvatar()">
+                  <i class="fas fa-trash-can"></i> Remove
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- CARD 1: PERSONAL DETAILS -->
         <div class="zy-pro-card">
           <div class="zy-pro-card-head">
@@ -431,16 +458,27 @@
 
   async function setThemePreference(mode) {
     const cleanMode = (mode === 'light' || mode === 'dark' || mode === 'system') ? mode : 'system';
-    try {
-      localStorage.setItem('theme', cleanMode);
-    } catch (e) {}
+    if (typeof window.setManualThemeOverride === 'function') {
+      window.setManualThemeOverride(cleanMode === 'system' ? null : cleanMode);
+    } else {
+      try {
+        if (cleanMode === 'light' || cleanMode === 'dark') {
+          const now = new Date();
+          const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+          localStorage.setItem('theme_manual_override', JSON.stringify({ mode: cleanMode, date: todayStr }));
+          localStorage.setItem('theme', cleanMode);
+        } else {
+          localStorage.removeItem('theme_manual_override');
+          localStorage.removeItem('theme');
+        }
+      } catch (e) {}
+    }
 
     if (typeof window.applyThemePreference === 'function') {
-      window.applyThemePreference(cleanMode);
+      window.applyThemePreference(cleanMode === 'system' ? undefined : cleanMode);
     } else {
-      const effective = cleanMode === 'system'
-        ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-        : cleanMode;
+      const h = new Date().getHours();
+      const effective = cleanMode === 'system' ? ((h >= 6 && h < 18) ? 'light' : 'dark') : cleanMode;
       document.documentElement.setAttribute('data-theme', effective);
       document.body.classList.remove('dark', 'light');
       document.body.classList.add(effective, 'rmsui');
@@ -460,7 +498,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ theme_mode: cleanMode })
       });
-      showToast(`Theme set to ${cleanMode.charAt(0).toUpperCase() + cleanMode.slice(1)}`, 'success');
+      const label = cleanMode === 'system' ? 'Auto (6 AM Light / 6 PM Dark)' : `${cleanMode.charAt(0).toUpperCase() + cleanMode.slice(1)} (Today — Auto resumes tomorrow)`;
+      showToast(`Theme set to ${label}`, 'success');
     } catch (e) {}
   }
 
@@ -811,6 +850,265 @@
     }
   }
 
+  // ── WHATSAPP-STYLE PROFILE PHOTO CROPPER & UPLOAD ───────────────
+  function triggerAvatarPick() {
+    const inp = document.getElementById('pro-ava-file-input');
+    if (inp) {
+      inp.value = '';
+      inp.click();
+    }
+  }
+
+  function handleAvatarFile(inputEl) {
+    const file = inputEl && inputEl.files && inputEl.files[0];
+    if (!file) return;
+    if (!/^image\/(jpeg|jpg|png|webp|gif)$/i.test(file.type || '')) {
+      showToast('Please select a JPG, PNG, WEBP, or GIF photo.', 'error');
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      showToast('Image is too large. Please choose a photo under 12 MB.', 'error');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => openAvatarCropperModal(img);
+      img.onerror = () => showToast('Could not read that image file.', 'error');
+      img.src = String(reader.result || '');
+    };
+    reader.onerror = () => showToast('Could not read that image file.', 'error');
+    reader.readAsDataURL(file);
+  }
+
+  function closeAvatarCropperModal() {
+    const old = document.getElementById('zy-ava-crop-backdrop');
+    if (old) old.remove();
+  }
+
+  function openAvatarCropperModal(img) {
+    closeAvatarCropperModal();
+
+    const STAGE = 260;
+    const natW = img.naturalWidth || img.width || 1;
+    const natH = img.naturalHeight || img.height || 1;
+    // Base scale covers the 260x260 circle completely (WhatsApp fit)
+    const baseScale = Math.max(STAGE / natW, STAGE / natH);
+    let zoom = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let dragging = false;
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let originX = 0;
+    let originY = 0;
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'zy-ava-crop-backdrop';
+    backdrop.className = 'zy-ava-crop-backdrop';
+    backdrop.innerHTML = `
+      <div class="zy-ava-crop-modal" role="dialog" aria-modal="true" aria-label="Adjust Profile Photo">
+        <div class="zy-ava-crop-head">
+          <div>
+            <div class="zy-ava-crop-title"><i class="fas fa-crop-simple"></i> Adjust Profile Photo</div>
+            <div class="zy-ava-crop-sub">Drag to position &amp; zoom — fits cleanly in Live Chat like WhatsApp</div>
+          </div>
+          <button type="button" class="zy-ava-crop-x" id="zy-ava-crop-close" aria-label="Close"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="zy-ava-crop-body">
+          <div class="zy-ava-crop-stage" id="zy-ava-crop-stage">
+            <canvas id="zy-ava-crop-canvas" width="${STAGE}" height="${STAGE}"></canvas>
+            <div class="zy-ava-crop-mask" aria-hidden="true"></div>
+          </div>
+          <div class="zy-ava-crop-zoom-row">
+            <i class="fas fa-magnifying-glass-minus"></i>
+            <input type="range" id="zy-ava-crop-zoom" min="1" max="3" step="0.02" value="1">
+            <i class="fas fa-magnifying-glass-plus"></i>
+            <button type="button" class="zy-ava-crop-reset" id="zy-ava-crop-reset" title="Reset Fit">Reset</button>
+          </div>
+        </div>
+        <div class="zy-ava-crop-foot">
+          <button type="button" class="zy-pro-btn zy-pro-btn-secondary" id="zy-ava-crop-cancel">Cancel</button>
+          <button type="button" class="zy-pro-btn zy-pro-btn-primary" id="zy-ava-crop-save">
+            <i class="fas fa-check"></i> Save Profile Photo
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+
+    const canvas = document.getElementById('zy-ava-crop-canvas');
+    const ctx = canvas.getContext('2d');
+    const zoomSlider = document.getElementById('zy-ava-crop-zoom');
+    const stage = document.getElementById('zy-ava-crop-stage');
+
+    function clampOffsets() {
+      const scale = baseScale * zoom;
+      const drawW = natW * scale;
+      const drawH = natH * scale;
+      const maxX = Math.max(0, (drawW - STAGE) / 2);
+      const maxY = Math.max(0, (drawH - STAGE) / 2);
+      if (offsetX > maxX) offsetX = maxX;
+      if (offsetX < -maxX) offsetX = -maxX;
+      if (offsetY > maxY) offsetY = maxY;
+      if (offsetY < -maxY) offsetY = -maxY;
+    }
+
+    function drawPreview() {
+      clampOffsets();
+      const scale = baseScale * zoom;
+      const drawW = natW * scale;
+      const drawH = natH * scale;
+      const x = (STAGE - drawW) / 2 + offsetX;
+      const y = (STAGE - drawH) / 2 + offsetY;
+      ctx.clearRect(0, 0, STAGE, STAGE);
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, STAGE, STAGE);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, x, y, drawW, drawH);
+    }
+
+    drawPreview();
+
+    zoomSlider.addEventListener('input', () => {
+      zoom = parseFloat(zoomSlider.value) || 1;
+      drawPreview();
+    });
+
+    document.getElementById('zy-ava-crop-reset').addEventListener('click', () => {
+      zoom = 1;
+      offsetX = 0;
+      offsetY = 0;
+      zoomSlider.value = '1';
+      drawPreview();
+    });
+
+    stage.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      originX = offsetX;
+      originY = offsetY;
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      offsetX = originX + (e.clientX - dragStartX);
+      offsetY = originY + (e.clientY - dragStartY);
+      drawPreview();
+    });
+    const stopDrag = () => { dragging = false; };
+    stage.addEventListener('pointerup', stopDrag);
+    stage.addEventListener('pointercancel', stopDrag);
+
+    document.getElementById('zy-ava-crop-close').addEventListener('click', closeAvatarCropperModal);
+    document.getElementById('zy-ava-crop-cancel').addEventListener('click', closeAvatarCropperModal);
+
+    document.getElementById('zy-ava-crop-save').addEventListener('click', async () => {
+      const saveBtn = document.getElementById('zy-ava-crop-save');
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+      }
+      try {
+        // Render crisp 384x384 high-res square DP for WhatsApp-quality sharpness
+        const OUT = 384;
+        const outCanvas = document.createElement('canvas');
+        outCanvas.width = OUT;
+        outCanvas.height = OUT;
+        const octx = outCanvas.getContext('2d');
+        octx.fillStyle = '#ffffff';
+        octx.fillRect(0, 0, OUT, OUT);
+        octx.imageSmoothingEnabled = true;
+        octx.imageSmoothingQuality = 'high';
+
+        const ratio = OUT / STAGE;
+        const scale = baseScale * zoom * ratio;
+        const drawW = natW * scale;
+        const drawH = natH * scale;
+        const x = (OUT - drawW) / 2 + offsetX * ratio;
+        const y = (OUT - drawH) / 2 + offsetY * ratio;
+        octx.drawImage(img, x, y, drawW, drawH);
+
+        const dataUrl = outCanvas.toDataURL('image/jpeg', 0.88);
+        const res = await fetch('/api/user/profile/avatar', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: dataUrl })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          showToast(data.error || 'Failed to save profile photo.', 'error');
+          if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="fas fa-check"></i> Save Profile Photo';
+          }
+          return;
+        }
+
+        const newUrl = data.avatar_url || '';
+        if (activeProfileUser) activeProfileUser.avatar_url = newUrl;
+        syncCachedUser({ avatar_url: newUrl });
+        updateProfileAvatarDom(newUrl);
+        if (window.HumexLiveChat && typeof window.HumexLiveChat.refreshBadge === 'function') {
+          window.HumexLiveChat.refreshBadge();
+        }
+        closeAvatarCropperModal();
+        showToast('Profile photo updated for Live Chat!', 'success');
+      } catch (err) {
+        showToast('Network error while uploading profile photo.', 'error');
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.innerHTML = '<i class="fas fa-check"></i> Save Profile Photo';
+        }
+      }
+    });
+  }
+
+  function updateProfileAvatarDom(avatarUrl) {
+    const ring = document.getElementById('pro-ava-preview');
+    const rmBtn = document.getElementById('pro-ava-remove-btn');
+    const user = activeProfileUser || getCachedUser();
+    if (ring) {
+      if (avatarUrl) {
+        ring.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="Profile Photo" class="zy-pro-ava-img">`;
+      } else {
+        const init = String((user && (user.full_name || user.username)) || 'U').trim().slice(0, 2).toUpperCase();
+        ring.innerHTML = `<span class="zy-pro-ava-initials">${escapeHtml(init)}</span>`;
+      }
+    }
+    if (rmBtn) rmBtn.style.display = avatarUrl ? 'inline-flex' : 'none';
+  }
+
+  async function removeAvatar() {
+    const rmBtn = document.getElementById('pro-ava-remove-btn');
+    if (rmBtn) rmBtn.disabled = true;
+    try {
+      const res = await fetch('/api/user/profile/avatar', {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (activeProfileUser) activeProfileUser.avatar_url = '';
+        syncCachedUser({ avatar_url: '' });
+        updateProfileAvatarDom('');
+        if (window.HumexLiveChat && typeof window.HumexLiveChat.refreshBadge === 'function') {
+          window.HumexLiveChat.refreshBadge();
+        }
+        showToast('Profile photo removed.', 'info');
+      } else {
+        showToast(data.error || 'Failed to remove profile photo.', 'error');
+      }
+    } catch (err) {
+      showToast('Network error while removing profile photo.', 'error');
+    } finally {
+      if (rmBtn) rmBtn.disabled = false;
+    }
+  }
+
   window.HumexProfile = {
     render: renderProfileView,
     switchTab: switchProfileTab,
@@ -825,7 +1123,10 @@
     changePassword,
     start2FASetup,
     confirmEnable2FA,
-    disable2FA
+    disable2FA,
+    triggerAvatarPick,
+    handleAvatarFile,
+    removeAvatar
   };
 
 })(window);

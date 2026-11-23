@@ -775,7 +775,16 @@
   function toggleDarkLight() {
     const isDark = getEffectiveThemeMode() === 'dark';
     const next = isDark ? 'light' : 'dark';
-    try { localStorage.setItem('theme', next); } catch (_) {}
+    if (typeof window.setManualThemeOverride === 'function') {
+      window.setManualThemeOverride(next);
+    } else {
+      try {
+        const now = new Date();
+        const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+        localStorage.setItem('theme_manual_override', JSON.stringify({ mode: next, date: todayStr }));
+        localStorage.setItem('theme', next);
+      } catch (_) {}
+    }
 
     if (typeof window.applyThemePreference === 'function') {
       window.applyThemePreference(next);

@@ -14,10 +14,20 @@
       if (c) s = JSON.parse(c);
     }
     var ut = window.__USER_THEME__ || {};
-    var savedMode = localStorage.getItem('theme') || ut.theme_mode || (s && s.theme_mode) || 'light';
-    var effectiveMode = savedMode === 'system'
-      ? ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')
-      : (savedMode === 'dark' ? 'dark' : 'light');
+    var now = new Date();
+    var todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    var effectiveMode = (now.getHours() >= 6 && now.getHours() < 18) ? 'light' : 'dark';
+    try {
+      var ovRaw = localStorage.getItem('theme_manual_override');
+      if (ovRaw) {
+        var ov = JSON.parse(ovRaw);
+        if (ov && ov.date === todayStr && (ov.mode === 'dark' || ov.mode === 'light')) {
+          effectiveMode = ov.mode;
+        } else {
+          localStorage.removeItem('theme_manual_override');
+        }
+      }
+    } catch(_ovErr) {}
     var r = document.documentElement;
     r.setAttribute('data-theme', effectiveMode);
     var cat = (s && Array.isArray(s.theme_catalog)) ? s.theme_catalog : [];

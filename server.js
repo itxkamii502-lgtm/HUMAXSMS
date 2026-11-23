@@ -7527,9 +7527,142 @@ app.get('/api/user/profile', (req, res) => {
       theme_key: validUserThemeKey,
       two_fa: !!u.two_fa,
       two_fa_backup_count: Array.isArray(u.two_fa_backup_codes) ? u.two_fa_backup_codes.length : 0,
-      status: u.status || 'active'
+      status: u.status || 'active',
+      avatar_url: u.avatar_url || ''
     }
   });
+});
+
+// ── USER PROFILE AVATAR (WHATSAPP-STYLE DP FOR LIVE CHAT) ───────
+const USER_AVATARS_DIR = path.join(uploadsDir, 'avatars');
+const USER_AVATAR_FILE_RE = /^avatar_(owner|agent|client)_\d+_\d+\.(jpg|png|webp|gif)$/;
+
+function safeUnlinkUserAvatar(avatarUrl) {
+  try {
+    const raw = String(avatarUrl || '').trim();
+    if (!raw.startsWith('/uploads/avatars/')) return;
+    const base = path.basename(raw.split('?')[0]);
+    if (!USER_AVATAR_FILE_RE.test(base)) return;
+    const target = path.resolve(USER_AVATARS_DIR, base);
+    if (target.startsWith(path.resolve(USER_AVATARS_DIR) + path.sep) && fs.existsSync(target)) {
+      fs.unlinkSync(target);
+    }
+  } catch (_) {}
+}
+
+function broadcastUserAvatarChange(sessionUser, avatarUrl) {
+  try {
+    const actor = resolveLiveChatActor(sessionUser);
+    if (!actor) return;
+    const targets = getPresenceAudienceKeys(actor);
+    targets.add(actor.key);
+    sendChatWsEvent({
+      type: 'chat:avatar_updated',
+      actor_key: actor.key,
+      avatar_url: avatarUrl || ''
+    }, targets);
+  } catch (_) {}
+}
+
+app.post('/api/user/profile/avatar', (req, res) => {
+  try {
+    const sessionUser = getSessionUser(req);
+    if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+    const found = findUserAnywhere(sessionUser.username);
+    if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+    const image = (req.body && (req.body.image || req.body.avatar || req.body.data)) || '';
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ success: false, error: 'No profile image provided.' });
+    }
+
+    let declaredExt = '';
+    let base64Payload = image.trim();
+    if (base64Payload.startsWith('data:')) {
+      const commaIdx = base64Payload.indexOf(',');
+      if (commaIdx === -1) {
+        return res.status(400).json({ success: false, error: 'Invalid image data URI.' });
+      }
+      const header = base64Payload.slice(0, commaIdx).toLowerCase();
+      if (header.includes('svg')) {
+        return res.status(400).json({ success: false, error: 'SVG images are not allowed. Use JPG, PNG, WEBP, or GIF.' });
+      }
+      if (header.includes('image/jpeg') || header.includes('image/jpg')) declaredExt = 'jpg';
+      else if (header.includes('image/png')) declaredExt = 'png';
+      else if (header.includes('image/webp')) declaredExt = 'webp';
+      else if (header.includes('image/gif')) declaredExt = 'gif';
+      else {
+        return res.status(400).json({ success: false, error: 'Unsupported image format. Use JPG, PNG, WEBP, or GIF.' });
+      }
+      base64Payload = base64Payload.slice(commaIdx + 1);
+    }
+
+    base64Payload = base64Payload.replace(/\s+/g, '');
+    const buffer = Buffer.from(base64Payload, 'base64');
+    if (!buffer || buffer.length < 12) {
+      return res.status(400).json({ success: false, error: 'Invalid image file.' });
+    }
+    if (buffer.length > 2 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: 'Profile image must be under 2 MB.' });
+    }
+
+    // Strict magic-byte verification
+    let detectedExt = null;
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) detectedExt = 'jpg';
+    else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) detectedExt = 'png';
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) detectedExt = 'gif';
+    else if (buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') detectedExt = 'webp';
+
+    if (!detectedExt || (declaredExt && declaredExt !== detectedExt)) {
+      return res.status(400).json({ success: false, error: 'Invalid image format. Use JPG, PNG, WEBP, or GIF.' });
+    }
+
+    if (!fs.existsSync(USER_AVATARS_DIR)) {
+      fs.mkdirSync(USER_AVATARS_DIR, { recursive: true });
+    }
+
+    const roleSlug = chatActorRole(found.role);
+    const filename = `avatar_${roleSlug}_${Number(found.user.id)}_${Date.now()}.${detectedExt}`;
+    const oldAvatarUrl = found.user.avatar_url || '';
+    fs.writeFileSync(path.join(USER_AVATARS_DIR, filename), buffer);
+
+    const avatarUrl = `/uploads/avatars/${filename}`;
+    updateUserRecord(found.table, found.user.id, { avatar_url: avatarUrl });
+    if (oldAvatarUrl && oldAvatarUrl !== avatarUrl) {
+      safeUnlinkUserAvatar(oldAvatarUrl);
+    }
+
+    logAudit(sessionUser.username, 'Profile Photo Updated', 'Updated Live Chat profile picture', 'Profile');
+    broadcastUserAvatarChange({ ...sessionUser, id: found.user.id, role: found.role }, avatarUrl);
+
+    return res.json({ success: true, avatar_url: avatarUrl, message: 'Profile photo updated.' });
+  } catch (err) {
+    console.error('Avatar upload error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save profile photo.' });
+  }
+});
+
+app.delete('/api/user/profile/avatar', (req, res) => {
+  try {
+    const sessionUser = getSessionUser(req);
+    if (!sessionUser) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+    const found = findUserAnywhere(sessionUser.username);
+    if (!found) return res.status(404).json({ success: false, error: 'User not found' });
+
+    const oldAvatarUrl = found.user.avatar_url || '';
+    updateUserRecord(found.table, found.user.id, { avatar_url: '' });
+    if (oldAvatarUrl) safeUnlinkUserAvatar(oldAvatarUrl);
+
+    logAudit(sessionUser.username, 'Profile Photo Removed', 'Removed Live Chat profile picture', 'Profile');
+    broadcastUserAvatarChange({ ...sessionUser, id: found.user.id, role: found.role }, '');
+
+    return res.json({ success: true, avatar_url: '', message: 'Profile photo removed.' });
+  } catch (err) {
+    console.error('Avatar delete error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to remove profile photo.' });
+  }
 });
 
 app.post('/api/user/profile/update', (req, res) => {
@@ -20665,6 +20798,7 @@ function resolveLiveChatActor(sessionUser) {
       id,
       username: rec.username || sessionUser.username || 'Owner',
       display_name: rec.name || rec.username || sessionUser.username || 'Owner',
+      avatar_url: rec.avatar_url || '',
       agent_id: null
     };
   }
@@ -20677,6 +20811,7 @@ function resolveLiveChatActor(sessionUser) {
       id,
       username: rec.username || sessionUser.username || `Agent #${id}`,
       display_name: rec.name || rec.username || sessionUser.username || `Agent #${id}`,
+      avatar_url: rec.avatar_url || '',
       agent_id: id
     };
   }
@@ -20690,6 +20825,7 @@ function resolveLiveChatActor(sessionUser) {
     id,
     username: (rec && rec.username) || sessionUser.username || `Client #${id}`,
     display_name: (rec && (rec.name || rec.username)) || sessionUser.username || `Client #${id}`,
+    avatar_url: (rec && rec.avatar_url) || '',
     agent_id: agentId > 0 ? agentId : null
   };
 }
@@ -20701,20 +20837,20 @@ function resolveActorSummaryByKey(actorKey) {
   if (role === 'owner') {
     const users = readDb('users') || [];
     const u = users.find(x => Number(x.id) === id);
-    if (!u) return { key: actorKey, role: 'owner', id, username: 'Owner', display_name: 'Owner', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
-    return { key: actorKey, role: 'owner', id, username: u.username || 'Owner', display_name: u.name || u.username || 'Owner', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    if (!u) return { key: actorKey, role: 'owner', id, username: 'Owner', display_name: 'Owner', avatar_url: '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    return { key: actorKey, role: 'owner', id, username: u.username || 'Owner', display_name: u.name || u.username || 'Owner', avatar_url: u.avatar_url || '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
   }
   if (role === 'agent') {
     const agents = readDb('agents') || [];
     const a = agents.find(x => Number(x.id) === id);
     if (!a) return null;
-    return { key: actorKey, role: 'agent', id, username: a.username || `Agent #${id}`, display_name: a.name || a.username || `Agent #${id}`, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    return { key: actorKey, role: 'agent', id, username: a.username || `Agent #${id}`, display_name: a.name || a.username || `Agent #${id}`, avatar_url: a.avatar_url || '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
   }
   if (role === 'client') {
     const clients = readDb('clients') || [];
     const c = clients.find(x => Number(x.id) === id);
     if (!c) return null;
-    return { key: actorKey, role: 'client', id, username: c.username || `Client #${id}`, display_name: c.name || c.username || `Client #${id}`, agent_id: Number(c.agent_id || 0) || null, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    return { key: actorKey, role: 'client', id, username: c.username || `Client #${id}`, display_name: c.name || c.username || `Client #${id}`, avatar_url: c.avatar_url || '', agent_id: Number(c.agent_id || 0) || null, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
   }
   return null;
 }
@@ -20732,6 +20868,7 @@ function getAllowedChatContacts(actor) {
         id: Number(a.id),
         username: a.username || `Agent #${a.id}`,
         display_name: a.name || a.username || `Agent #${a.id}`,
+        avatar_url: a.avatar_url || '',
         online: isActorOnline(key),
         last_seen: CHAT_LAST_SEEN.get(key) || null
       });
@@ -20753,6 +20890,7 @@ function getAllowedChatContacts(actor) {
         id: Number(o.id),
         username: o.username || 'Owner',
         display_name: o.name || o.username || 'Owner',
+        avatar_url: o.avatar_url || '',
         online: isActorOnline(key),
         last_seen: CHAT_LAST_SEEN.get(key) || null
       });
@@ -20766,6 +20904,7 @@ function getAllowedChatContacts(actor) {
         id: Number(c.id),
         username: c.username || `Client #${c.id}`,
         display_name: c.name || c.username || `Client #${c.id}`,
+        avatar_url: c.avatar_url || '',
         agent_id: actor.id,
         online: isActorOnline(key),
         last_seen: CHAT_LAST_SEEN.get(key) || null
@@ -20786,6 +20925,7 @@ function getAllowedChatContacts(actor) {
         id: Number(ag.id),
         username: ag.username || `Agent #${ag.id}`,
         display_name: ag.name || ag.username || `Agent #${ag.id}`,
+        avatar_url: ag.avatar_url || '',
         online: isActorOnline(key),
         last_seen: CHAT_LAST_SEEN.get(key) || null
       });

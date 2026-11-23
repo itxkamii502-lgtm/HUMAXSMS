@@ -517,22 +517,29 @@ async function runGlobalSearch() {
 }
 
 function toggleTheme() {
-  document.body.classList.toggle('light');
-  const icon = document.getElementById('theme-icon');
-  if (icon) {
-    icon.className = document.body.classList.contains('light') ? 'fas fa-moon' : 'fas fa-circle-half-stroke';
+  const cur = (document.documentElement && document.documentElement.getAttribute('data-theme')) ||
+    (document.body && document.body.classList.contains('dark') ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  if (typeof window.setManualThemeOverride === 'function') {
+    window.setManualThemeOverride(next);
+  } else {
+    try { localStorage.setItem('theme', next); } catch {}
   }
-  try {
-    localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark');
-  } catch {}
+  if (typeof window.applyThemePreference === 'function') {
+    window.applyThemePreference(next);
+  } else {
+    if (document.documentElement) document.documentElement.setAttribute('data-theme', next);
+    if (document.body) {
+      document.body.classList.remove('dark', 'light');
+      document.body.classList.add(next);
+    }
+  }
 }
 
 (function initTheme() {
   try {
-    if (localStorage.getItem('theme') === 'light') {
-      document.body.classList.add('light');
-      const icon = document.getElementById('theme-icon');
-      if (icon) icon.className = 'fas fa-moon';
+    if (typeof window.applyThemePreference === 'function') {
+      window.applyThemePreference();
     }
   } catch {}
 })();
@@ -4207,10 +4214,9 @@ async function renderRegistrationRequests() {
       </div>
       <div class="card">
         ${buildTable(
-          ['#', 'Username', 'Email', 'Role', 'Company', 'Status', 'Time', 'Actions'],
+          ['Username', 'Email', 'Role', 'Company', 'Status', 'Time', 'Actions'],
           data.map(r => [
-            r.id || '—',
-            r.username || '—',
+            `<span class="zy-col-username"><strong>${escapeHtml(r.username || '—')}</strong></span>`,
             r.email || '—',
             roleBadge(r.role),
             r.company || '—',
@@ -4321,7 +4327,7 @@ async function renderPayoutRequests(activeTab = 'all') {
         </div>
         <div class="zy-panel-body" style="padding:16px;">
           ${buildTable(
-            ['#', 'Requester', 'Cycle', 'Amount', 'Method', 'Wallet / IBAN', 'Status', 'Requested At', 'Actions'],
+            ['Requester', 'Cycle', 'Amount', 'Method', 'Wallet / IBAN', 'Status', 'Requested At', 'Actions'],
             filtered.map(r => {
               const stLow = String(r.status || 'pending').toLowerCase();
               const isPaid = stLow === 'paid' || stLow === 'completed';
@@ -4330,8 +4336,7 @@ async function renderPayoutRequests(activeTab = 'all') {
                 ? `<span class="badge" style="background:#ede9fe;color:#5b21b6;font-weight:700;">Monthly {W} (Whitenoise)</span>`
                 : `<span class="badge badge-blue" style="font-weight:700;">Weekly (API)</span>`;
               return [
-                `<span class="monospace fw-600">#${r.id || '—'}</span>`,
-                `<div><strong>${escapeHtml(r.user || r.username || '—')}</strong><div style="font-size:11px;color:var(--sp-text-muted);">${escapeHtml(r.role || 'Agent')}</div></div>`,
+                `<div class="zy-col-username"><strong>${escapeHtml(r.user || r.username || '—')}</strong><div style="font-size:11px;color:var(--sp-text-muted);">${escapeHtml(r.role || 'Agent')}</div></div>`,
                 cycleBadge,
                 `<strong style="color:#10b981;font-size:15px;">$${zyFmtMoney((Number(r.amount) || 0), 2)}</strong>`,
                 `<span class="badge badge-blue">${escapeHtml(r.method || 'Transfer')}</span>`,
@@ -4743,7 +4748,7 @@ async function renderCreditNotesHub() {
           ['Voucher #', 'Account', 'Role', 'Currency', 'Amount', 'Term', 'Reason', 'Date', 'Status', 'PDF'],
           notes.map(n => [
             `<span class="monospace fw-600">CN-${String(n.id).padStart(5, '0')}</span>`,
-            `<strong>${escapeHtml(n.username || (n.agent_id ? 'Agent #' + n.agent_id : 'Account Holder'))}</strong>`,
+            `<span class="zy-col-username"><strong>${escapeHtml(n.username || 'Account Holder')}</strong></span>`,
             roleBadge(n.role || 'Agent'),
             badge(n.currency || 'USD', 'blue'),
             `<strong class="text-success">$${zyFmtMoney(Number(n.amount || 0), 2)}</strong>`,
@@ -4785,6 +4790,11 @@ async function openAdminAddAgentModal() {
     return;
   }
   openModal('Add New Agent', `
+    <div class="zy-acct-search-box">
+      <label class="form-label" for="aa-existing-search"><i class="fas fa-search" style="margin-right:5px;"></i>Search Existing Agents</label>
+      <input id="aa-existing-search" type="text" placeholder="Search existing agent username or name..." autocomplete="off" oninput="zyOwnerFilterModalAccounts('agents', this.value, 'aa-existing-results')">
+      <div id="aa-existing-results" class="zy-acct-search-results"></div>
+    </div>
     <form id="admin-add-agent-form" onsubmit="submitAdminAddAgent(event)">
       <div class="form-row">
         <div class="form-group">
@@ -4818,7 +4828,48 @@ async function openAdminAddAgentModal() {
     </form>
   `);
   setTimeout(() => window.setupUsernameAvailabilityCheck('aa-user', 'aa-user-feedback', 'aa-submit-btn', 'agents'), 50);
+  if (!Array.isArray(window._zyAdminAgentsCache)) {
+    apiFetch('/api/agents?page=1&limit=100').then(r => { window._zyAdminAgentsCache = r?.data || []; }).catch(() => {});
+  }
 }
+
+window.zyOwnerFilterModalAccounts = async function(scope, q, resultsId) {
+  const box = document.getElementById(resultsId);
+  if (!box) return;
+  const term = String(q || '').trim().toLowerCase();
+  if (!term) { box.innerHTML = ''; box.style.display = 'none'; return; }
+  let list = [];
+  try {
+    if (scope === 'agents') {
+      if (!Array.isArray(window._zyAdminAgentsCache)) {
+        const res = await apiFetch('/api/agents?page=1&limit=100');
+        window._zyAdminAgentsCache = res?.data || [];
+      }
+      list = window._zyAdminAgentsCache;
+    } else {
+      if (!Array.isArray(window._zyAdminUsersCache)) {
+        const res = await apiFetch('/api/users?page=1&limit=200');
+        window._zyAdminUsersCache = (res?.data || []).filter(u => u.role !== 'Owner' && u.username !== 'Kamran_Bhatti');
+      }
+      list = window._zyAdminUsersCache;
+    }
+  } catch (_) {}
+  const matches = (list || []).filter(u =>
+    String(u.username || '').toLowerCase().includes(term) ||
+    String(u.full_name || '').toLowerCase().includes(term)
+  ).slice(0, 8);
+  box.style.display = 'block';
+  if (!matches.length) {
+    box.innerHTML = `<div class="zy-acct-search-empty">No existing account matches "${escapeHtml(q)}" — username is available.</div>`;
+    return;
+  }
+  box.innerHTML = matches.map(u => `
+    <div class="zy-acct-search-row">
+      <span class="zy-col-username"><strong>${escapeHtml(u.username || '')}</strong>${u.full_name ? ` <span class="text-muted">(${escapeHtml(u.full_name)})</span>` : ''}</span>
+      ${statusBadge(u.status || 'active')}
+    </div>
+  `).join('');
+};
 
 async function submitAdminAddAgent(event) {
   event.preventDefault();
@@ -4858,12 +4909,18 @@ async function submitAdminAddAgent(event) {
 }
 
 // ─── AGENTS ──────────────────────────────────────────────────────────
-async function renderAdminAgents(page = 1) {
+async function renderAdminAgents(page = 1, search = '') {
   try {
     const data = await apiFetch(`/api/agents?page=${page}&limit=25`);
+    const allAgents = data?.data || [];
+    window._zyAdminAgentsCache = allAgents;
     const totalAgents = Number(data?.total || 0);
     window._zyAdminAgentTotal = totalAgents;
     const limitReached = totalAgents >= 3;
+    const q = String(search || '').trim().toLowerCase();
+    const visibleAgents = q
+      ? allAgents.filter(a => String(a.username || '').toLowerCase().includes(q) || String(a.full_name || '').toLowerCase().includes(q))
+      : allAgents;
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
@@ -4880,11 +4937,15 @@ async function renderAdminAgents(page = 1) {
       </div>
       <div class="card">
         ${renderManagementTabs('agents')}
+        <div class="filters-bar" style="margin-bottom:12px;">
+          <input id="ag-dir-search" placeholder="Search agent username or full name…" value="${escapeHtml(search || '')}"
+            oninput="if(window._agSearchT)clearTimeout(window._agSearchT);window._agSearchT=setTimeout(()=>renderAdminAgents(1,this.value),180)">
+          ${search ? `<button class="btn btn-outline btn-sm" onclick="renderAdminAgents(1,'')"><i class="fas fa-times"></i> Clear</button>` : ''}
+        </div>
         ${buildTable(
-          ['#', 'Username', 'Full Name', 'Balance', 'Clients', 'Numbers', 'Today OTP', 'Commission', 'Status', 'Actions'],
-          (data?.data || []).map((a, idx) => [
-            `<strong class="monospace">#${(page - 1) * 25 + idx + 1}</strong>`,
-            `<strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.app_links_access ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-size:10px;" title="Apps Links Enabled">APPS</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}`,
+          ['Username', 'Full Name', 'Balance', 'Clients', 'Numbers', 'Today OTP', 'Commission', 'Status', 'Actions'],
+          visibleAgents.map(a => [
+            `<span class="zy-col-username"><strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.app_links_access ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-size:10px;" title="Apps Links Enabled">APPS</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}</span>`,
             escapeHtml(a.full_name || '—'),
             `<span class="text-success fw-600" title="Auto-earned from SMS traffic">$${zyFmtMoney((a.balance || 0), 4)}</span>`,
             `<span class="monospace fw-600">${Number(a.clients_count || 0).toLocaleString()}</span>`,
@@ -4901,7 +4962,7 @@ async function renderAdminAgents(page = 1) {
           ]),
           { id: 'tbl-agents', title: 'Agents List', toolbar: true }
         )}
-        ${pagination(page, totalAgents, 25, renderAdminAgents)}
+        ${pagination(page, totalAgents, 25, p => renderAdminAgents(p, search))}
       </div>
     `;
   } catch (err) {
@@ -5244,12 +5305,11 @@ async function renderUsers(page = 1, search = '', role = '') {
           <button class="btn btn-outline btn-sm" onclick="resetUserFilters()"><i class="fas fa-undo"></i> Reset</button>
         </div>
         ${buildTable(
-          ['#', 'Username', 'Role', 'Email', 'Balance', 'Numbers', 'Status', 'Created', 'Actions'],
-          filteredUsers.map((u, idx) => {
+          ['Username', 'Role', 'Email', 'Balance', 'Numbers', 'Status', 'Created', 'Actions'],
+          filteredUsers.map(u => {
             const isPrivateClient = u.privacy_redacted === true || String(u.role || '').toLowerCase() === 'client';
             return [
-              `<strong class="monospace">#${(page - 1) * 25 + idx + 1}</strong>`,
-              `<strong>${u.username || '—'}</strong>`,
+              `<span class="zy-col-username"><strong>${escapeHtml(u.username || '—')}</strong></span>`,
               roleBadge(u.role),
               isPrivateClient ? '<span class="text-muted"><i class="fas fa-lock" style="margin-right:4px;"></i>Private</span>' : (u.email || '—'),
               isPrivateClient ? '<span class="badge" style="background:#f1f5f9;color:#475569;"><i class="fas fa-lock" style="margin-right:4px;"></i>Agent PKR</span>' : `<span class="text-success fw-600">$${u.balance || 0}</span>`,
@@ -5288,6 +5348,11 @@ function resetUserFilters() {
 
 function openAddUserModal() {
   openModal('Add New Account', `
+    <div class="zy-acct-search-box">
+      <label class="form-label" for="au-existing-search"><i class="fas fa-search" style="margin-right:5px;"></i>Search Existing Accounts</label>
+      <input id="au-existing-search" type="text" placeholder="Search existing username or name..." autocomplete="off" oninput="zyOwnerFilterModalAccounts('users', this.value, 'au-existing-results')">
+      <div id="au-existing-results" class="zy-acct-search-results"></div>
+    </div>
     <form id="add-user-form" onsubmit="submitAddUser(event)" autocomplete="off">
       <div class="form-row">
         <div class="form-group">
@@ -5630,7 +5695,7 @@ async function openViewUserModal(id, role = 'user') {
             <div style="font-size:16px;font-weight:700;color:#0f172a;">${escapeHtml(u.username || '—')}</div>
             <div style="font-size:12px;color:#64748b;">
               ${isPrivacyRedacted
-                ? `Client Directory · Agent: ${escapeHtml(u.agent_username || (u.agent_id ? 'Agent #' + u.agent_id : '—'))}`
+                ? `Client Directory · Agent: ${escapeHtml(u.agent_username || 'Assigned Agent')}`
                 : escapeHtml(u.email || u.role || 'System Account')} · Created ${fmtShort(u.created || u.created_at)}
             </div>
           </div>
@@ -5645,7 +5710,7 @@ async function openViewUserModal(id, role = 'user') {
           ${isPrivacyRedacted ? `
             <div style="background:#f1f5f9;padding:10px;border-radius:6px;">
               <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:700;">Assigned Agent</div>
-              <div style="font-size:14px;font-weight:700;color:#2563eb;margin-top:2px;">${escapeHtml(u.agent_username || (u.agent_id ? 'Agent #' + u.agent_id : '—'))}</div>
+              <div style="font-size:14px;font-weight:700;color:#2563eb;margin-top:2px;">${escapeHtml(u.agent_username || 'Assigned Agent')}</div>
             </div>
             <div style="background:#f1f5f9;padding:10px;border-radius:6px;">
               <div style="font-size:11px;color:#64748b;text-transform:uppercase;font-weight:700;">Financial Ledger</div>
@@ -5791,10 +5856,9 @@ async function renderAccountBalances() {
       </div>
       <div class="card">
         ${buildTable(
-          ['#', 'Username', 'Role', 'Balance', 'Numbers', 'Status', 'Action'],
+          ['Username', 'Role', 'Balance', 'Numbers', 'Status', 'Action'],
           acctRows.map(u => [
-            u.id || '—',
-            u.username || '—',
+            `<span class="zy-col-username"><strong>${escapeHtml(u.username || '—')}</strong></span>`,
             roleBadge(u.role),
             `<strong class="text-${(u.balance || 0) > 500 ? 'success' : 'warning'}">$${zyFmtMoney(Number(u.balance || 0), 2)}</strong>`,
             u.numbers || 0,
@@ -9323,47 +9387,55 @@ function zyRenderOwnerAppLinksBody() {
   }
 
   host.innerHTML = `
-    <div class="zy-applinks-admin-list">
-      ${filtered.map((item, idx) => {
-        const vis = item.visible !== false;
-        const safeHref = _safeHttpUrlFrontend(item.url);
-        let hostLabel = item.url;
-        try { hostLabel = new URL(safeHref).hostname.replace(/^www\./, ''); } catch (_) {}
-        return `
-          <div class="zy-applink-admin-row ${vis ? '' : 'is-hidden'}">
-            <label class="zy-applink-vis-toggle" title="${vis ? 'Visible to authorized Users — click to hide' : 'Hidden from Users — click to show'}">
-              <input type="checkbox" ${vis ? 'checked' : ''} onchange="zyOwnerToggleAppLinkVisible(${Number(item.id)}, this.checked)">
-              <span>${vis ? 'Show' : 'Hide'}</span>
-            </label>
-            <div class="zy-applink-admin-main">
-              <div class="zy-applink-admin-title">
-                <span class="zy-applink-rank">#${idx + 1}</span>
-                <strong>${escapeHtml(item.name)}</strong>
-                ${item.pinned_top ? `<span class="badge badge-green" style="font-size:10px;"><i class="fas fa-thumbtack"></i> TOP</span>` : ''}
-                ${item.category ? `<span class="badge badge-blue" style="font-size:10px;">${escapeHtml(item.category)}</span>` : ''}
-                ${!vis ? `<span class="badge" style="font-size:10px;background:var(--bg-hover);color:var(--text-muted);">Hidden</span>` : ''}
-              </div>
-              <div class="zy-applink-admin-url">
-                <a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">
-                  <i class="fas fa-arrow-up-right-from-square"></i> ${escapeHtml(hostLabel)}
-                </a>
-                ${item.notes ? `<span class="text-muted"> · ${escapeHtml(item.notes)}</span>` : ''}
-              </div>
-            </div>
-            <div class="zy-applink-order-btns">
-              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'top')" title="Move to Top">Top</button>
-              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'up')" title="Move Up"><i class="fas fa-arrow-up"></i></button>
-              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'down')" title="Move Down"><i class="fas fa-arrow-down"></i></button>
-              <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'low')" title="Move to Bottom (Low)">Low</button>
-            </div>
-            <div class="zy-applink-crud-btns">
-              <a class="btn btn-outline btn-sm" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="Open Link in New Tab"><i class="fas fa-external-link-alt"></i></a>
-              <button type="button" class="btn btn-outline btn-sm" onclick="zyOpenAppLinkModal(${Number(item.id)})" title="Edit"><i class="fas fa-pen"></i></button>
-              <button type="button" class="btn btn-danger btn-sm" onclick="zyConfirmDeleteAppLink(${Number(item.id)})" title="Delete"><i class="fas fa-trash"></i></button>
-            </div>
-          </div>
-        `;
-      }).join('')}
+    <div class="zy-applinks-tbl-wrap">
+      <table class="zy-dt zy-applinks-tbl">
+        <thead>
+          <tr>
+            <th style="width:60px;text-align:center;">#</th>
+            <th style="width:30%;">App Name</th>
+            <th>App Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map((item, idx) => {
+            const vis = item.visible !== false;
+            const safeHref = _safeHttpUrlFrontend(item.url);
+            const rawUrl = String(item.url || '').trim();
+            return `
+              <tr class="${vis ? '' : 'is-hidden-row'}">
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-name-td">
+                  <div class="zy-applink-name-line">
+                    <span class="zy-applink-name-txt">${escapeHtml(item.name || 'App Link')}</span>
+                    ${item.pinned_top ? `<span class="zy-applink-top-tag"><i class="fas fa-thumbtack"></i> TOP</span>` : ''}
+                    ${item.category ? `<span class="zy-applink-cat-tag">${escapeHtml(item.category)}</span>` : ''}
+                    ${!vis ? `<span class="zy-applink-cat-tag">Hidden</span>` : ''}
+                  </div>
+                  ${item.notes ? `<div class="zy-applink-card-note">${escapeHtml(item.notes)}</div>` : ''}
+                </td>
+                <td class="zy-applink-url-td">
+                  <div class="zy-applink-url-wrap">
+                    <a class="zy-applink-url-anchor" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(rawUrl)}">${escapeHtml(rawUrl || safeHref)}</a>
+                    <div class="zy-applink-row-actions">
+                      <button type="button" class="zy-applink-copy-btn" data-url="${escapeHtml(rawUrl || safeHref)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
+                      <a class="zy-applink-open-btn" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i></a>
+                      <label class="zy-applink-vis-toggle" title="${vis ? 'Visible — click to hide' : 'Hidden — click to show'}">
+                        <input type="checkbox" ${vis ? 'checked' : ''} onchange="zyOwnerToggleAppLinkVisible(${Number(item.id)}, this.checked)">
+                        <span>${vis ? 'Show' : 'Hide'}</span>
+                      </label>
+                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'top')" title="Move to Top">Top</button>
+                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'up')" title="Move Up"><i class="fas fa-arrow-up"></i></button>
+                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'down')" title="Move Down"><i class="fas fa-arrow-down"></i></button>
+                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOpenAppLinkModal(${Number(item.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+                      <button type="button" class="btn btn-danger btn-sm" onclick="zyConfirmDeleteAppLink(${Number(item.id)})" title="Delete"><i class="fas fa-trash"></i></button>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
     </div>
   `;
 }

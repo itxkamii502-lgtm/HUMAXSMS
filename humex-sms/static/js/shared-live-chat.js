@@ -67,7 +67,9 @@
     scheduleExpiryRefreshing: false,
     selectMode: false,
     selectedMsgIds: new Set(),
-    expandedDeletedIds: new Set()
+    expandedDeletedIds: new Set(),
+    moreMenuOpen: false,
+    viewportCleanup: null
   };
 
   const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
@@ -155,6 +157,20 @@
     if (!parts.length) return '?';
     if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
     return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+
+  function renderAvatarInner(avatarUrl, label, isGroup, isOnline) {
+    if (isGroup) {
+      return `<i class="fas fa-users"></i>`;
+    }
+    const imgHtml = avatarUrl
+      ? `<img class="zy-chat-ava-img" src="${esc(avatarUrl)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`
+      : '';
+    return `
+      <span class="zy-chat-ava-fallback">${esc(initials(label))}</span>
+      ${imgHtml}
+      ${isOnline ? '<span class="zy-chat-dot-online" title="Online"></span>' : ''}
+    `;
   }
 
   function colorForKey(key) {
@@ -537,6 +553,31 @@
       if (state.mounted) {
         renderInboxList();
         if (Number(state.activeConvId) === convId) updateThreadHeaderSubtitle();
+      }
+      return;
+    }
+
+    if (ev.type === 'chat:avatar_updated') {
+      const newUrl = String(ev.avatar_url || '');
+      if (state.me && state.me.key === ev.actor_key) {
+        state.me.avatar_url = newUrl;
+      }
+      state.contacts.forEach(c => {
+        if (c.key === ev.actor_key) c.avatar_url = newUrl;
+      });
+      state.conversations.forEach(conv => {
+        if (conv.peer && conv.peer.key === ev.actor_key) {
+          conv.peer.avatar_url = newUrl;
+        }
+        if (Array.isArray(conv.members)) {
+          conv.members.forEach(m => {
+            if (m.key === ev.actor_key) m.avatar_url = newUrl;
+          });
+        }
+      });
+      if (state.mounted) {
+        renderInboxList();
+        renderThreadArea(false);
       }
       return;
     }
@@ -1571,8 +1612,7 @@
         if (state.filterTab === 'groups' && c.type !== 'agent_group') return false;
       }
       if (!q) return true;
-      const peerIdStr = c.peer && c.peer.id != null ? `#${c.peer.id} ${c.peer.id}` : '';
-      const hay = `${c.title || ''} ${c.last_message_preview || ''} ${(c.peer && c.peer.username) || ''} #${c.id} ${c.id} ${peerIdStr}`.toLowerCase();
+      const hay = `${c.title || ''} ${c.last_message_preview || ''} ${(c.peer && c.peer.username) || ''}`.toLowerCase();
       return hay.includes(q);
     });
 
@@ -1590,8 +1630,7 @@
         if (state.filterTab === 'groups') return false;
       }
       if (!q) return true;
-      const ctIdStr = ct.id != null ? `#${ct.id} ${ct.id}` : '';
-      return `${ct.display_name || ''} ${ct.username || ''} ${ctIdStr}`.toLowerCase().includes(q);
+      return `${ct.display_name || ''} ${ct.username || ''}`.toLowerCase().includes(q);
     }).sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
 
     let html = '';
@@ -1605,9 +1644,6 @@
         const isOnline = !isGroup && Boolean(c.peer && c.peer.online);
         const typingText = getTypingText(c.id);
         const schedClosed = isGroup && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
-        const idTag = isGroup
-          ? `Group #${c.id}`
-          : `ID #${(c.peer && c.peer.id != null) ? c.peer.id : c.id}`;
         const roleSub = isGroup
           ? (hideMembers
               ? `Group${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
@@ -1618,17 +1654,16 @@
           ? `<span class="zy-chat-typing-mini">${esc(typingText)}</span>`
           : esc(c.last_message_preview || 'No messages yet');
 
+        const peerAvatar = !isGroup && c.peer ? (c.peer.avatar_url || '') : '';
         return `
           <button type="button" class="zy-chat-row ${active ? 'is-active' : ''}" data-conv-id="${c.id}">
-            <div class="zy-chat-ava ${isGroup ? 'is-group' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(c.peer ? c.peer.key : c.id)};">
-              ${isGroup ? '<i class="fas fa-users"></i>' : esc(initials(c.title))}
-              ${isOnline ? '<span class="zy-chat-dot-online" title="Online"></span>' : ''}
+            <div class="zy-chat-ava ${isGroup ? 'is-group' : ''} ${peerAvatar ? 'has-img' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(c.peer ? c.peer.key : c.id)};">
+              ${renderAvatarInner(peerAvatar, c.title, isGroup, isOnline)}
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
                 <span class="zy-chat-row-name-wrap">
                   <span class="zy-chat-row-name">${esc(c.title)}</span>
-                  <span class="zy-chat-id-pill">${esc(idTag)}</span>
                 </span>
                 <span class="zy-chat-row-time">${esc(formatInboxTime(c.last_message_at))}</span>
               </div>
@@ -1650,18 +1685,16 @@
       html += `<div class="zy-chat-sec-label">${esc(heading)}</div>`;
       html += availableContacts.map(ct => {
         const roleLabel = ct.role === 'owner' ? 'Owner' : (ct.role === 'agent' ? 'Agent' : 'My Client');
-        const ctIdTag = ct.id != null ? `ID #${ct.id}` : '';
+        const ctAvatar = ct.avatar_url || '';
         return `
           <button type="button" class="zy-chat-row is-contact" data-contact-key="${esc(ct.key)}">
-            <div class="zy-chat-ava" style="--ava-bg:${colorForKey(ct.key)};">
-              ${esc(initials(ct.display_name || ct.username))}
-              ${ct.online ? '<span class="zy-chat-dot-online" title="Online"></span>' : ''}
+            <div class="zy-chat-ava ${ctAvatar ? 'has-img' : ''}" style="--ava-bg:${colorForKey(ct.key)};">
+              ${renderAvatarInner(ctAvatar, ct.display_name || ct.username, false, Boolean(ct.online))}
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
                 <span class="zy-chat-row-name-wrap">
                   <span class="zy-chat-row-name">${esc(ct.display_name || ct.username)}</span>
-                  ${ctIdTag ? `<span class="zy-chat-id-pill">${esc(ctIdTag)}</span>` : ''}
                 </span>
                 <span class="zy-chat-row-time">${ct.online ? 'Online' : ''}</span>
               </div>
@@ -2141,9 +2174,8 @@
             <div class="zy-gd-members">
               ${(conv.members || []).map(m => `
                 <div class="zy-gd-member-row">
-                  <div class="zy-chat-ava is-sm" style="--ava-bg:${colorForKey(m.key)};">
-                    ${esc(initials(m.display_name || m.username))}
-                    ${m.online ? '<span class="zy-chat-dot-online"></span>' : ''}
+                  <div class="zy-chat-ava is-sm ${m.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(m.key)};">
+                    ${renderAvatarInner(m.avatar_url || '', m.display_name || m.username, false, Boolean(m.online))}
                   </div>
                   <div class="zy-gd-member-info">
                     <div class="zy-gd-member-name">${esc(m.display_name || m.username)}</div>
@@ -2246,29 +2278,26 @@
     const hideGroupDrawer = Boolean(isGroup && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
     const isOnline = !isGroup && Boolean(conv.peer && conv.peer.online);
     const pinned = conv.pinned_message;
-    const profileIdTag = isGroup
-      ? `Group #${conv.id}`
-      : `ID #${(conv.peer && conv.peer.id != null) ? conv.peer.id : conv.id}`;
+    const peerAvatar = !isGroup && conv.peer ? (conv.peer.avatar_url || '') : '';
+    state.moreMenuOpen = false;
 
     rightEl.innerHTML = `
       <div class="zy-chat-thread-col">
         <div class="zy-chat-thread-head">
           <button type="button" class="zy-chat-back-btn zy-chat-back-profile" id="zy-chat-back" title="Back to Chats" aria-label="Back to chats">
             <i class="fas fa-arrow-left"></i>
-            <span>Chats</span>
+            <span class="zy-chat-back-txt">Chats</span>
           </button>
-          <div class="zy-chat-ava is-profile-ava ${isGroup ? 'is-group' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id)};">
-            ${isGroup ? '<i class="fas fa-users"></i>' : esc(initials(conv.title))}
-            ${isOnline ? '<span class="zy-chat-dot-online"></span>' : ''}
+          <div class="zy-chat-ava is-profile-ava ${isGroup ? 'is-group' : ''} ${peerAvatar ? 'has-img is-clickable' : ''}" id="zy-chat-head-ava" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id)};" ${peerAvatar ? 'role="button" tabindex="0" title="View Profile Photo"' : ''}>
+            ${renderAvatarInner(peerAvatar, conv.title, isGroup, isOnline)}
           </div>
           <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${(isGroup && !hideGroupDrawer) ? 'role="button" tabindex="0"' : ''}>
             <div class="zy-chat-thread-name-row">
               <span class="zy-chat-thread-name">${esc(conv.title)}</span>
-              <span class="zy-chat-id-pill is-head">${esc(profileIdTag)}</span>
             </div>
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
-          <div class="zy-chat-thread-actions">
+          <div class="zy-chat-thread-actions zy-chat-thread-actions-inline">
             <button type="button" class="zy-chat-head-btn ${state.selectMode ? 'is-active' : ''}" id="zy-chat-select-btn" title="${state.selectMode ? 'Exit Selection' : 'Select Messages to Delete'}">
               <i class="fas ${state.selectMode ? 'fa-times' : 'fa-check-double'}"></i>
               <span>${state.selectMode ? 'Cancel' : 'Select'}</span>
@@ -2287,6 +2316,31 @@
               <i class="fas fa-house"></i>
               <span>Panel</span>
             </button>
+          </div>
+          <div class="zy-chat-more-wrap">
+            <button type="button" class="zy-chat-more-btn" id="zy-chat-more-btn" aria-label="Chat options" title="Options">
+              <i class="fas fa-ellipsis-vertical"></i>
+            </button>
+            <div class="zy-chat-more-menu" id="zy-chat-more-menu" style="display:none;">
+              <button type="button" class="zy-chat-more-item ${state.selectMode ? 'is-active' : ''}" id="zy-chat-mob-select">
+                <i class="fas ${state.selectMode ? 'fa-times' : 'fa-check-double'}"></i>
+                <span>${state.selectMode ? 'Cancel Select' : 'Select Messages'}</span>
+              </button>
+              <button type="button" class="zy-chat-more-item is-danger" id="zy-chat-mob-clear">
+                <i class="fas fa-eraser"></i>
+                <span>Clear Chat</span>
+              </button>
+              ${(isGroup && !hideGroupDrawer) ? `
+                <button type="button" class="zy-chat-more-item" id="zy-chat-mob-group-info">
+                  <i class="fas ${conv.can_manage ? 'fa-sliders' : 'fa-circle-info'}"></i>
+                  <span>${conv.can_manage ? 'Group Manage' : 'Group Info'}</span>
+                </button>
+              ` : ''}
+              <button type="button" class="zy-chat-more-item" id="zy-chat-mob-exit-panel">
+                <i class="fas fa-house"></i>
+                <span>Back to Panel</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2402,19 +2456,45 @@
     };
     if (infoBtn) infoBtn.addEventListener('click', toggleDrawer);
     if (headMeta && isGroup) headMeta.addEventListener('click', toggleDrawer);
+    const headAva = document.getElementById('zy-chat-head-ava');
+    if (headAva && peerAvatar) {
+      headAva.addEventListener('click', () => openImageLightbox(peerAvatar, '', conv.title, 'Profile Photo'));
+    }
 
     const selectBtn = document.getElementById('zy-chat-select-btn');
-    if (selectBtn) {
-      selectBtn.addEventListener('click', () => {
-        state.selectMode = !state.selectMode;
-        state.selectedMsgIds.clear();
-        renderThreadArea(false);
-      });
-    }
+    const toggleSelectMode = () => {
+      state.selectMode = !state.selectMode;
+      state.selectedMsgIds.clear();
+      renderThreadArea(false);
+    };
+    if (selectBtn) selectBtn.addEventListener('click', toggleSelectMode);
     const clearBtn = document.getElementById('zy-chat-clear-btn');
     if (clearBtn) {
       clearBtn.addEventListener('click', () => clearChatHistory(conv.id));
     }
+
+    // Mobile 3-dot overflow menu wiring
+    const moreBtn = document.getElementById('zy-chat-more-btn');
+    const moreMenu = document.getElementById('zy-chat-more-menu');
+    const closeMoreMenu = () => {
+      state.moreMenuOpen = false;
+      if (moreMenu) moreMenu.style.display = 'none';
+    };
+    if (moreBtn && moreMenu) {
+      moreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.moreMenuOpen = !state.moreMenuOpen;
+        moreMenu.style.display = state.moreMenuOpen ? 'flex' : 'none';
+      });
+    }
+    const mobSel = document.getElementById('zy-chat-mob-select');
+    if (mobSel) mobSel.addEventListener('click', () => { closeMoreMenu(); toggleSelectMode(); });
+    const mobClr = document.getElementById('zy-chat-mob-clear');
+    if (mobClr) mobClr.addEventListener('click', () => { closeMoreMenu(); clearChatHistory(conv.id); });
+    const mobInfo = document.getElementById('zy-chat-mob-group-info');
+    if (mobInfo) mobInfo.addEventListener('click', () => { closeMoreMenu(); toggleDrawer(); });
+    const mobExit = document.getElementById('zy-chat-mob-exit-panel');
+    if (mobExit) mobExit.addEventListener('click', () => { closeMoreMenu(); exitLiveChatToPanel(); });
     const selAllBtn = document.getElementById('zy-chat-sel-all');
     if (selAllBtn) {
       selAllBtn.addEventListener('click', () => {
@@ -2506,6 +2586,14 @@
     const inp = document.getElementById('zy-chat-input');
     const sendBtn = document.getElementById('zy-chat-send');
     if (inp) {
+      inp.addEventListener('focus', () => {
+        // Keep header pinned at top when mobile virtual keyboard opens
+        setTimeout(() => {
+          syncChatViewport();
+          const feed = document.getElementById('zy-chat-feed');
+          if (feed) feed.scrollTop = feed.scrollHeight;
+        }, 120);
+      });
       inp.addEventListener('input', () => {
         inp.style.height = 'auto';
         inp.style.height = Math.min(84, inp.scrollHeight) + 'px';
@@ -2593,7 +2681,7 @@
           </div>
           <div class="zy-chat-search-wrap">
             <i class="fas fa-magnifying-glass"></i>
-            <input type="text" id="zy-chat-search" class="zy-chat-search" placeholder="Search chats, contacts, or #ID..." value="${esc(state.search)}">
+            <input type="text" id="zy-chat-search" class="zy-chat-search" placeholder="Search chats or contacts..." value="${esc(state.search)}">
           </div>
           ${isAgent ? `
             <div class="zy-chat-tabs" role="tablist">
@@ -2662,23 +2750,86 @@
     renderThreadArea(true);
   }
 
-  // Close emoji popover on outside click
+  // Close emoji popover & mobile more menu on outside click
   document.addEventListener('click', (e) => {
-    if (!state.emojiOpen) return;
-    const pop = document.getElementById('zy-chat-emoji-pop');
-    const btn = document.getElementById('zy-chat-emoji-toggle');
-    if (pop && !pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
-      state.emojiOpen = false;
-      renderEmojiPopover();
+    if (state.emojiOpen) {
+      const pop = document.getElementById('zy-chat-emoji-pop');
+      const btn = document.getElementById('zy-chat-emoji-toggle');
+      if (pop && !pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
+        state.emojiOpen = false;
+        renderEmojiPopover();
+      }
+    }
+    if (state.moreMenuOpen) {
+      const menu = document.getElementById('zy-chat-more-menu');
+      const mBtn = document.getElementById('zy-chat-more-btn');
+      if (menu && !menu.contains(e.target) && (!mBtn || !mBtn.contains(e.target))) {
+        state.moreMenuOpen = false;
+        menu.style.display = 'none';
+      }
     }
   });
+
+  // Pin Live Chat shell to visualViewport so mobile keyboard NEVER pushes top bar / username off-screen
+  function syncChatViewport() {
+    try {
+      const vv = window.visualViewport;
+      const h = vv ? Math.round(vv.height) : window.innerHeight;
+      const top = vv ? Math.max(0, Math.round(vv.offsetTop)) : 0;
+      const rootStyle = document.documentElement.style;
+      if (h > 180) rootStyle.setProperty('--zy-chat-vvh', `${h}px`);
+      rootStyle.setProperty('--zy-chat-vvt', `${top}px`);
+      if (state.mounted && window.innerWidth <= 768) {
+        if (window.scrollY !== 0) window.scrollTo(0, 0);
+      }
+    } catch (_) {}
+  }
+
+  function bindViewportPin() {
+    unbindViewportPin();
+    syncChatViewport();
+    const onVpChange = () => {
+      syncChatViewport();
+      const feed = document.getElementById('zy-chat-feed');
+      if (feed && document.activeElement && document.activeElement.id === 'zy-chat-input') {
+        feed.scrollTop = feed.scrollHeight;
+      }
+    };
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', onVpChange);
+      window.visualViewport.addEventListener('scroll', onVpChange);
+    }
+    window.addEventListener('resize', onVpChange);
+    state.viewportCleanup = () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', onVpChange);
+        window.visualViewport.removeEventListener('scroll', onVpChange);
+      }
+      window.removeEventListener('resize', onVpChange);
+      try {
+        document.documentElement.style.removeProperty('--zy-chat-vvh');
+        document.documentElement.style.removeProperty('--zy-chat-vvt');
+      } catch (_) {}
+    };
+  }
+
+  function unbindViewportPin() {
+    if (typeof state.viewportCleanup === 'function') {
+      try { state.viewportCleanup(); } catch (_) {}
+      state.viewportCleanup = null;
+    }
+  }
 
   // Public API
   const HumexLiveChat = {
     async renderPage(containerId = 'page-content') {
       state.containerId = containerId;
       state.mounted = true;
-      try { document.body.classList.add('zy-is-live-chat'); } catch (_) {}
+      try {
+        document.documentElement.classList.add('zy-is-live-chat-html');
+        document.body.classList.add('zy-is-live-chat');
+      } catch (_) {}
+      bindViewportPin();
       if (typeof window.zyUpdateBreadcrumb === 'function') {
         window.zyUpdateBreadcrumb('live-chat', 'Live Chat');
       }
@@ -2710,7 +2861,12 @@
     unmount() {
       state.mounted = false;
       state.emojiOpen = false;
-      try { document.body.classList.remove('zy-is-live-chat'); } catch (_) {}
+      state.moreMenuOpen = false;
+      unbindViewportPin();
+      try {
+        document.documentElement.classList.remove('zy-is-live-chat-html');
+        document.body.classList.remove('zy-is-live-chat');
+      } catch (_) {}
       stopScheduleCountdownTick();
     },
     refreshBadge: () => fetchBootstrap(true),

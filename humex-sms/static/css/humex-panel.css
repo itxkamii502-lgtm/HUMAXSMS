@@ -6,7 +6,13 @@
    44px touch targets on mobile.
    ══════════════════════════════════════════════════════════════ */
 
-:root, body.rmsui, body.adminui, [data-theme="light"], body.light {
+:root,
+[data-theme="light"],
+[data-theme="light"] body.rmsui,
+[data-theme="light"] body.adminui,
+body.light,
+body.rmsui.light,
+body.adminui.light {
   /* Unified Royal Blue & Emerald Design Tokens */
   --theme-primary: #1d4ed8;
   --theme-primary-hover: #1e40af;
@@ -27,6 +33,18 @@
   --theme-card-border: #e2e8f0;
   --theme-card-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
   --theme-page-bg: #f8fafc;
+
+  /* Global legacy bridges (Light) */
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-hover: #f1f5f9;
+  --border: #e2e8f0;
+  --border-color: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
 
   /* Colors - Locked Consistent Neutral Text + Blue/Green Accents */
   --sp-bg-canvas: #f8fafc;
@@ -103,23 +121,48 @@
   --zy-text:        var(--sp-text-primary);
 }
 
-/* ── Dark Theme Variables ────────────────────────────────────── */
-[data-theme="dark"], body.dark, body.rmsui.dark, body.adminui.dark {
+/* ── Dark Theme Variables (Full Symmetry Across ALL Token Families) ── */
+[data-theme="dark"],
+[data-theme="dark"] body,
+[data-theme="dark"] body.rmsui,
+[data-theme="dark"] body.adminui,
+body.dark,
+body.rmsui.dark,
+body.adminui.dark {
+  --theme-neutral-bg: #18253d;
+  --theme-neutral-border: #2c4060;
+  --theme-neutral-text: #e2e8f0;
+  --theme-card-bg: #111c30;
+  --theme-card-border: #22334f;
+  --theme-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --theme-page-bg: #0b1220;
+
+  --bg-primary: #0b1220;
+  --bg-secondary: #111c30;
+  --bg-tertiary: #18253d;
+  --bg-card: #111c30;
+  --bg-hover: #1f2f4d;
+  --border: #22334f;
+  --border-color: #22334f;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+
   --sp-bg-canvas: #0b1220;
   --sp-bg-surface: #111c30;
   --sp-bg-card: #111c30;
   --sp-bg-subtle: #18253d;
   --sp-bg-hover: #1f2f4d;
   --sp-border: #22334f;
-  --sp-border-subtle: #1a2840;
+  --sp-border-subtle: #2c4060;
   --sp-text-primary: #f1f5f9;
   --sp-text-secondary: #cbd5e1;
   --sp-text-muted: #94a3b8;
-  --sp-primary: var(--brand-primary, #3b82f6);
-  --sp-primary-hover: var(--brand-hover, #2563eb);
+  --sp-primary: #60a5fa;
+  --sp-primary-hover: #3b82f6;
   --sp-primary-contrast: #ffffff;
   --sp-secondary-bg: #18253d;
-  --sp-secondary-text: #cbd5e1;
+  --sp-secondary-text: #e2e8f0;
   --sp-secondary-border: #2c4060;
   --sp-danger: #ef4444;
   --sp-danger-hover: #dc2626;
@@ -138,6 +181,7 @@
   --sp-shadow-md: 0 10px 15px -3px rgba(0, 0, 0, 0.6);
   --sp-shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.7);
 
+  --zy-blue-dark: #f1f5f9;
   --zy-line: var(--sp-border);
   --zy-panel-head: var(--sp-bg-surface);
   --zy-text: var(--sp-text-primary);
@@ -2095,17 +2139,17 @@ table.zy-dt tfoot td { padding: 14px 10px; border: 1px solid var(--sp-border); f
 .zy-fb-btns { display: flex; gap: 10px; margin-top: 6px; }
 
 /* bulk allocation */
-.zy-lbl { display: block; font-size: 12px; font-weight: 700; color: #222; margin: 10px 0 5px; }
-.zy-note { font-style: italic; color: #444; font-size: 12px; margin-bottom: 6px; }
-.zy-input { width: 100%; padding: 6px 8px; border: 1px solid #c4c4c4; border-radius: 3px; font-size: 12px; color: #444; background: #fff; }
-.zy-input-focus { border: 2px solid #1c1c1c; }
-.zy-input-off { background: #ececec; }
+.zy-lbl { display: block; font-size: 12px; font-weight: 700; color: var(--sp-text-primary, #0f172a); margin: 10px 0 5px; }
+.zy-note { font-style: italic; color: var(--sp-text-secondary, #475569); font-size: 12px; margin-bottom: 6px; }
+.zy-input { width: 100%; padding: 6px 8px; border: 1px solid var(--sp-border-subtle, #cbd5e1); border-radius: 6px; font-size: 12px; color: var(--sp-text-primary, #0f172a); background: var(--sp-bg-surface, #ffffff); }
+.zy-input-focus { border: 2px solid var(--sp-primary, #1d4ed8); }
+.zy-input-off { background: var(--sp-bg-subtle, #f1f5f9); color: var(--sp-text-muted, #64748b); }
 .zy-input-sm { max-width: 165px; }
-.zy-rangebox { border: 1px solid #c4c4c4; border-top: none; max-height: 210px; overflow-y: auto; background: #fff; }
-.zy-ropt { padding: 8px 10px; font-size: 12px; color: #444; cursor: pointer; }
-.zy-ropt:hover { background: #eef5fb; }
+.zy-rangebox { border: 1px solid var(--sp-border-subtle, #cbd5e1); border-top: none; max-height: 210px; overflow-y: auto; background: var(--sp-bg-surface, #ffffff); }
+.zy-ropt { padding: 8px 10px; font-size: 12px; color: var(--sp-text-primary, #0f172a); cursor: pointer; }
+.zy-ropt:hover { background: var(--sp-bg-hover, #eef5fb); }
 .zy-ropt.on { background: #659A00; color: #fff; }
-.zy-muted { color: #999; cursor: default; }
+.zy-muted { color: var(--sp-text-muted, #64748b); cursor: default; }
 .zy-dl { border: none; border-radius: 3px; color: #fff; width: 35px; height: 23px; cursor: pointer;
   display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
 .zy-dl img { width: 14px; height: 14px; object-fit: contain; }
@@ -2323,7 +2367,7 @@ body.rmsui .zy-dt-wrap,
 .zy-modal-body { padding: 20px 22px 24px; }
 .zy-modal-body .zy-lbl { font-size: 13px; margin: 12px 0 6px; }
 .zy-modal-body .zy-lbl:first-child { margin-top: 0; }
-.zy-modal-body .zy-input { padding: 8px 10px; font-size: 12px; color: #666; }
+.zy-modal-body .zy-input { padding: 8px 10px; font-size: 12px; color: var(--sp-text-primary, #0f172a); background: var(--sp-bg-surface, #ffffff); border-color: var(--sp-border-subtle, #cbd5e1); }
 .zy-modal-foot { padding: 16px 20px; gap: 12px; }
 .zy-modal-foot button { padding: 7px 16px; font-size: 13px; }
 .zy-modal-foot .zy-btn-blue { background: #005fcc; }
@@ -14511,12 +14555,32 @@ body.zy-is-live-chat #page-content {
   }
 }
 @media (max-width: 768px) {
-  body.zy-is-live-chat #page-content {
-    zoom: 1.02 !important;
+  html.zy-is-live-chat-html,
+  body.zy-is-live-chat {
+    overflow: hidden !important;
+    height: 100% !important;
+    overscroll-behavior: none !important;
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
   }
-  body.zy-is-live-chat .zy-chat-shell {
-    height: calc(100dvh / 1.02) !important;
-    min-height: calc(100dvh / 1.02) !important;
+  body.zy-is-live-chat #page-content {
+    zoom: 1 !important;
+    height: 100% !important;
+    overflow: hidden !important;
+  }
+  body.zy-is-live-chat .zy-chat-shell,
+  body.zy-is-live-chat #zy-chat-shell {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    top: var(--zy-chat-vvt, 0px) !important;
+    height: var(--zy-chat-vvh, 100dvh) !important;
+    min-height: 0 !important;
+    max-height: var(--zy-chat-vvh, 100dvh) !important;
+    z-index: 1200 !important;
+    overflow: hidden !important;
+    font-size: 102% !important;
   }
 }
 
@@ -14649,9 +14713,1014 @@ body.dark .zy-chat-id-pill {
   border-color: rgba(96, 165, 250, 0.35) !important;
 }
 
+/* ==========================================================================
+   APP LINKS — CLEAN 3-COLUMN TABLE (# | App Name | Visible App Link)
+   Harmonized for Light & Dark Modes
+   ========================================================================== */
+.zy-applinks-tbl-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--sp-border, #e2e8f0);
+  border-radius: 10px;
+  background: var(--sp-bg-surface, #ffffff);
+}
+.zy-applinks-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 !important;
+}
+.zy-applinks-tbl thead th {
+  background: var(--sp-bg-subtle, #f1f5f9) !important;
+  color: var(--sp-text-primary, #0f172a) !important;
+  font-size: 12px !important;
+  font-weight: 800 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 11px 12px !important;
+  border-bottom: 1.5px solid var(--sp-border, #cbd5e1) !important;
+  white-space: nowrap;
+}
+.zy-applinks-tbl tbody td {
+  padding: 10px 12px !important;
+  border-bottom: 1px solid var(--sp-border, #e2e8f0) !important;
+  color: var(--sp-text-primary, #0f172a) !important;
+  vertical-align: middle;
+  background: var(--sp-bg-surface, #ffffff) !important;
+}
+.zy-applinks-tbl tbody tr:last-child td {
+  border-bottom: none !important;
+}
+.zy-applinks-tbl tbody tr:hover td {
+  background: var(--sp-bg-hover, #f8fafc) !important;
+}
+.zy-applinks-tbl tbody tr.is-hidden-row td {
+  opacity: 0.62;
+}
+.zy-applink-num-td {
+  text-align: center;
+  width: 56px;
+}
+.zy-applink-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 7px;
+  background: var(--sp-bg-subtle, #f1f5f9);
+  border: 1px solid var(--sp-border, #e2e8f0);
+  color: var(--sp-text-primary, #0f172a);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.zy-applink-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.zy-applink-name-txt {
+  font-weight: 800;
+  font-size: 13.5px;
+  color: var(--sp-text-primary, #0f172a);
+}
+.zy-applink-cat-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--sp-bg-subtle, #f1f5f9);
+  border: 1px solid var(--sp-border, #e2e8f0);
+  color: var(--sp-text-secondary, #475569);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.zy-applink-url-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.zy-applink-url-anchor {
+  color: #1d4ed8 !important;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+  flex: 1 1 200px;
+  min-width: 140px;
+}
+.zy-applink-url-anchor:hover {
+  color: #1e40af !important;
+}
+.zy-applink-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.zy-applink-copy-btn,
+.zy-applink-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none !important;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.zy-applink-copy-btn {
+  border: 1px solid var(--sp-border-subtle, #cbd5e1);
+  background: var(--sp-bg-subtle, #f8fafc);
+  color: var(--sp-text-primary, #0f172a) !important;
+}
+.zy-applink-copy-btn:hover {
+  border-color: #1d4ed8;
+  color: #1d4ed8 !important;
+}
+.zy-applink-copy-btn.is-copied {
+  border-color: #059669 !important;
+  background: rgba(5, 150, 105, 0.14) !important;
+  color: #047857 !important;
+}
+.zy-applink-open-btn {
+  border: 1px solid rgba(29, 78, 216, 0.28);
+  background: rgba(29, 78, 216, 0.08);
+  color: #1d4ed8 !important;
+}
+.zy-applink-open-btn:hover {
+  background: #1d4ed8;
+  color: #ffffff !important;
+}
+.zy-applinks-tbl-compact thead th {
+  padding: 8px 10px !important;
+  font-size: 11px !important;
+}
+.zy-applinks-tbl-compact tbody td {
+  padding: 7px 10px !important;
+}
+.zy-applinks-tbl-compact .zy-applink-url-anchor {
+  font-size: 11.5px;
+}
 
+/* Dark theme overrides for 3-column App Links Table */
+[data-theme="dark"] .zy-applink-url-anchor,
+body.dark .zy-applink-url-anchor {
+  color: #60a5fa !important;
+}
+[data-theme="dark"] .zy-applink-url-anchor:hover,
+body.dark .zy-applink-url-anchor:hover {
+  color: #93c5fd !important;
+}
+[data-theme="dark"] .zy-applink-copy-btn.is-copied,
+body.dark .zy-applink-copy-btn.is-copied {
+  background: rgba(16, 185, 129, 0.22) !important;
+  color: #6ee7b7 !important;
+  border-color: rgba(52, 211, 153, 0.45) !important;
+}
+[data-theme="dark"] .zy-applink-open-btn,
+body.dark .zy-applink-open-btn {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(96, 165, 250, 0.38);
+  color: #93c5fd !important;
+}
+[data-theme="dark"] .zy-applink-open-btn:hover,
+body.dark .zy-applink-open-btn:hover {
+  background: #2563eb;
+  color: #ffffff !important;
+}
 
+/* ==========================================================================
+   UNIVERSAL DAY & NIGHT FONT COLOR & SURFACE CONTRAST GUARDRAIL
+   Prevents unreadable white-on-white or dark-on-dark typography anywhere
+   ========================================================================== */
+[data-theme="dark"] body,
+[data-theme="dark"] .zy-main,
+[data-theme="dark"] .zy-body,
+[data-theme="dark"] #page-content,
+body.dark,
+body.dark .zy-main,
+body.dark .zy-body,
+body.dark #page-content {
+  background-color: var(--sp-bg-canvas, #0b1220) !important;
+  color: var(--sp-text-primary, #f1f5f9) !important;
+}
 
+/* Dark Mode: harmonize cards/panels even when legacy inline white backgrounds exist */
+[data-theme="dark"] .card,
+[data-theme="dark"] .zy-card,
+[data-theme="dark"] .zy-panel,
+[data-theme="dark"] .apx-card,
+[data-theme="dark"] .sp-card,
+[data-theme="dark"] .zy-num-card,
+[data-theme="dark"] .zy-filter-grid,
+[data-theme="dark"] .zy-ud-card,
+[data-theme="dark"] .zy-ud-panel,
+[data-theme="dark"] .zy-access-row,
+[data-theme="dark"] .zy-applink-user-card,
+[data-theme="dark"] .zy-applink-admin-row,
+body.dark .card,
+body.dark .zy-card,
+body.dark .zy-panel,
+body.dark .apx-card,
+body.dark .sp-card,
+body.dark .zy-num-card,
+body.dark .zy-filter-grid,
+body.dark .zy-ud-card,
+body.dark .zy-ud-panel,
+body.dark .zy-access-row,
+body.dark .zy-applink-user-card,
+body.dark .zy-applink-admin-row {
+  background-color: var(--sp-bg-surface, #111c30) !important;
+  border-color: var(--sp-border, #22334f) !important;
+  color: var(--sp-text-primary, #f1f5f9) !important;
+}
 
+/* Keep intentional Hero blue/green gradient cards white-text */
+[data-theme="dark"] .zy-ud-hero-card,
+body.dark .zy-ud-hero-card,
+[data-theme="dark"] .stat-card-ims.blue,
+body.dark .stat-card-ims.blue,
+[data-theme="dark"] .stat-card-ims.green,
+body.dark .stat-card-ims.green {
+  color: #ffffff !important;
+}
 
+[data-theme="dark"] .zy-panel-head,
+[data-theme="dark"] .apx-card-header,
+[data-theme="dark"] .card-header,
+[data-theme="dark"] .zy-modal-summary-card,
+body.dark .zy-panel-head,
+body.dark .apx-card-header,
+body.dark .card-header,
+body.dark .zy-modal-summary-card {
+  background-color: var(--sp-bg-subtle, #18253d) !important;
+  border-color: var(--sp-border, #22334f) !important;
+  color: var(--sp-text-primary, #f1f5f9) !important;
+}
+
+[data-theme="dark"] .zy-panel-head span,
+[data-theme="dark"] .apx-card-header span,
+[data-theme="dark"] .card-title,
+[data-theme="dark"] .page-title,
+[data-theme="dark"] h1,
+[data-theme="dark"] h2,
+[data-theme="dark"] h3,
+[data-theme="dark"] h4,
+[data-theme="dark"] h5,
+[data-theme="dark"] .zy-crs-num,
+[data-theme="dark"] .zy-ud-card-val,
+[data-theme="dark"] .zy-ud-money-val,
+[data-theme="dark"] .zy-ud-sum-val,
+[data-theme="dark"] .zy-ud-panel-title,
+[data-theme="dark"] .zy-modal-body h4,
+[data-theme="dark"] .zy-modal-body h5,
+[data-theme="dark"] .zy-modal-body label,
+[data-theme="dark"] .zy-modal-body .zy-lbl,
+body.dark .zy-panel-head span,
+body.dark .apx-card-header span,
+body.dark .card-title,
+body.dark .page-title,
+body.dark h1,
+body.dark h2,
+body.dark h3,
+body.dark h4,
+body.dark h5,
+body.dark .zy-crs-num,
+body.dark .zy-ud-card-val,
+body.dark .zy-ud-money-val,
+body.dark .zy-ud-sum-val,
+body.dark .zy-ud-panel-title,
+body.dark .zy-modal-body h4,
+body.dark .zy-modal-body h5,
+body.dark .zy-modal-body label,
+body.dark .zy-modal-body .zy-lbl {
+  color: #f1f5f9 !important;
+}
+
+/* Dark Mode: neutralize hardcoded light-slate inline text inside cards & modals */
+[data-theme="dark"] .sp-card [style*="color:#0f172a"],
+[data-theme="dark"] .sp-card [style*="color: #0f172a"],
+[data-theme="dark"] .sp-card [style*="color:#1e293b"],
+[data-theme="dark"] .sp-card [style*="color: #1e293b"],
+[data-theme="dark"] .zy-panel [style*="color:#0f172a"],
+[data-theme="dark"] .zy-panel [style*="color:#1e293b"],
+[data-theme="dark"] .zy-card [style*="color:#0f172a"],
+[data-theme="dark"] .zy-card [style*="color:#1e293b"],
+[data-theme="dark"] #page-content [style*="color:#0f172a"],
+[data-theme="dark"] #page-content [style*="color:#1e293b"],
+[data-theme="dark"] #page-content [style*="color:#334155"],
+[data-theme="dark"] #modal [style*="color:#0f172a"],
+[data-theme="dark"] #modal [style*="color:#1e293b"],
+[data-theme="dark"] #modal [style*="color:#334155"],
+body.dark .sp-card [style*="color:#0f172a"],
+body.dark .sp-card [style*="color:#1e293b"],
+body.dark #page-content [style*="color:#0f172a"],
+body.dark #page-content [style*="color:#1e293b"],
+body.dark #page-content [style*="color:#334155"],
+body.dark #modal [style*="color:#0f172a"],
+body.dark #modal [style*="color:#1e293b"],
+body.dark #modal [style*="color:#334155"] {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] #page-content [style*="background:#fff"],
+[data-theme="dark"] #page-content [style*="background: #fff"],
+[data-theme="dark"] #page-content [style*="background:#ffffff"],
+[data-theme="dark"] #page-content [style*="background: #ffffff"],
+[data-theme="dark"] #page-content [style*="background:#f8fafc"],
+[data-theme="dark"] #page-content [style*="background: #f8fafc"],
+[data-theme="dark"] #modal [style*="background:#fff"],
+[data-theme="dark"] #modal [style*="background:#ffffff"],
+[data-theme="dark"] #modal [style*="background:#f8fafc"],
+body.dark #page-content [style*="background:#fff"],
+body.dark #page-content [style*="background:#ffffff"],
+body.dark #page-content [style*="background:#f8fafc"],
+body.dark #modal [style*="background:#fff"],
+body.dark #modal [style*="background:#ffffff"],
+body.dark #modal [style*="background:#f8fafc"] {
+  background-color: var(--sp-bg-subtle, #18253d) !important;
+  border-color: var(--sp-border, #22334f) !important;
+}
+
+/* Dark Mode: all tables, inputs, selects, textareas & placeholders */
+[data-theme="dark"] table,
+[data-theme="dark"] table.zy-dt,
+[data-theme="dark"] table.zy-dt2-table,
+body.dark table,
+body.dark table.zy-dt,
+body.dark table.zy-dt2-table {
+  color: #f1f5f9 !important;
+}
+[data-theme="dark"] table thead th,
+[data-theme="dark"] table.zy-dt thead th,
+body.dark table thead th,
+body.dark table.zy-dt thead th {
+  background-color: #18253d !important;
+  color: #f1f5f9 !important;
+  border-color: #22334f !important;
+}
+[data-theme="dark"] table tbody td,
+[data-theme="dark"] table.zy-dt tbody td,
+body.dark table tbody td,
+body.dark table.zy-dt tbody td {
+  color: #e2e8f0 !important;
+  border-color: #22334f !important;
+}
+[data-theme="dark"] input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+[data-theme="dark"] select,
+[data-theme="dark"] textarea,
+[data-theme="dark"] .zy-input,
+[data-theme="dark"] .zy-filter-input,
+[data-theme="dark"] .zy-select-pill,
+body.dark input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+body.dark select,
+body.dark textarea,
+body.dark .zy-input,
+body.dark .zy-filter-input,
+body.dark .zy-select-pill {
+  background-color: #0f172a !important;
+  color: #f1f5f9 !important;
+  border-color: #334155 !important;
+}
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder,
+body.dark input::placeholder,
+body.dark textarea::placeholder {
+  color: #94a3b8 !important;
+}
+[data-theme="dark"] select option,
+body.dark select option {
+  background-color: #0f172a;
+  color: #f1f5f9;
+}
+[data-theme="dark"] .text-muted,
+[data-theme="dark"] .zy-empty,
+[data-theme="dark"] .empty-state,
+body.dark .text-muted,
+body.dark .zy-empty,
+body.dark .empty-state {
+  color: #94a3b8 !important;
+}
+[data-theme="dark"] .btn-outline,
+[data-theme="dark"] .zy-btn-grey,
+[data-theme="dark"] .apx-btn:not(.zy-btn-alloc-solid):not(.zy-btn-return-solid):not(.zy-btn-blue-solid):not(.zy-btn-amber):not(.btn-primary):not(.btn-danger),
+body.dark .btn-outline,
+body.dark .zy-btn-grey,
+body.dark .apx-btn:not(.zy-btn-alloc-solid):not(.zy-btn-return-solid):not(.zy-btn-blue-solid):not(.zy-btn-amber):not(.btn-primary):not(.btn-danger) {
+  background-color: #18253d !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+[data-theme="dark"] .zy-applinks-tab,
+body.dark .zy-applinks-tab {
+  color: #cbd5e1 !important;
+  border-color: #334155 !important;
+  background: #18253d !important;
+}
+[data-theme="dark"] .zy-applinks-tab.active,
+body.dark .zy-applinks-tab.active {
+  background: #1d4ed8 !important;
+  border-color: #1d4ed8 !important;
+  color: #ffffff !important;
+}
+
+/* Light Mode: crisp dark-slate text guarantee on cards, tables, inputs & modals */
+[data-theme="light"] body,
+[data-theme="light"] .zy-main,
+[data-theme="light"] #page-content,
+body.light,
+body.light .zy-main,
+body.light #page-content {
+  background-color: var(--sp-bg-canvas, #f8fafc) !important;
+  color: #0f172a !important;
+}
+[data-theme="light"] table.zy-dt thead th,
+body.light table.zy-dt thead th {
+  color: #0f172a !important;
+}
+[data-theme="light"] table.zy-dt tbody td,
+body.light table.zy-dt tbody td {
+  color: #0f172a !important;
+}
+[data-theme="light"] input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+[data-theme="light"] select,
+[data-theme="light"] textarea,
+[data-theme="light"] .zy-input,
+[data-theme="light"] .zy-filter-input,
+body.light input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+body.light select,
+body.light textarea,
+body.light .zy-input,
+body.light .zy-filter-input {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+[data-theme="light"] .zy-modal-body,
+[data-theme="light"] .zy-modal-body label,
+[data-theme="light"] .zy-modal-head h3,
+body.light .zy-modal-body,
+body.light .zy-modal-body label,
+body.light .zy-modal-head h3 {
+  color: #0f172a !important;
+}
+
+/* ==========================================================================
+   FINAL FIXES:
+   1. Live Chat Mobile Keyboard Pinning & 3-Dot Overflow Menu (Clean Username Bar)
+   2. Left-Aligned Username Columns & User Boxes Everywhere
+   3. Create Client / Create Agent Existing Account Search Box
+   ========================================================================== */
+
+/* Pinned thread layout: Header stays locked at top, ONLY message feed scrolls */
+body.zy-is-live-chat .zy-chat-thread-col {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+body.zy-is-live-chat .zy-chat-thread-head {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 30 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-height: 56px;
+}
+body.zy-is-live-chat .zy-chat-feed {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+body.zy-is-live-chat .zy-chat-composer-wrap,
+body.zy-is-live-chat .zy-chat-locked-bar,
+body.zy-is-live-chat .zy-chat-select-bar {
+  flex: 0 0 auto !important;
+}
+body.zy-is-live-chat .zy-chat-thread-meta {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  text-align: left !important;
+}
+body.zy-is-live-chat .zy-chat-thread-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left !important;
+}
+
+/* Desktop vs Mobile Header Actions (3-dot overflow on mobile keeps Username clean) */
+.zy-chat-more-wrap {
+  display: none;
+  position: relative;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.zy-chat-more-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--sp-border, #cbd5e1);
+  background: var(--sp-bg-subtle, #f8fafc);
+  color: var(--sp-text-primary, #0f172a);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  cursor: pointer;
+}
+.zy-chat-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 175px;
+  background: var(--sp-bg-surface, #ffffff);
+  border: 1px solid var(--sp-border, #cbd5e1);
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+  padding: 6px;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 1500;
+}
+.zy-chat-more-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sp-text-primary, #0f172a);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.zy-chat-more-item:hover,
+.zy-chat-more-item.is-active {
+  background: rgba(37, 99, 235, 0.10);
+  color: #1d4ed8;
+}
+.zy-chat-more-item.is-danger {
+  color: #dc2626;
+}
+.zy-chat-more-item.is-danger:hover {
+  background: rgba(220, 38, 38, 0.10);
+}
+[data-theme="dark"] .zy-chat-more-btn,
+body.dark .zy-chat-more-btn {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #f1f5f9 !important;
+}
+[data-theme="dark"] .zy-chat-more-menu,
+body.dark .zy-chat-more-menu {
+  background: #0f172a !important;
+  border-color: #334155 !important;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.55) !important;
+}
+[data-theme="dark"] .zy-chat-more-item,
+body.dark .zy-chat-more-item {
+  color: #e2e8f0 !important;
+}
+[data-theme="dark"] .zy-chat-more-item.is-danger,
+body.dark .zy-chat-more-item.is-danger {
+  color: #f87171 !important;
+}
+
+@media (max-width: 768px) {
+  .zy-chat-thread-actions-inline {
+    display: none !important;
+  }
+  .zy-chat-more-wrap {
+    display: inline-flex !important;
+  }
+  body.zy-is-live-chat .zy-chat-thread-head {
+    padding: 8px 10px !important;
+    gap: 8px !important;
+  }
+  body.zy-is-live-chat .zy-chat-back-btn.zy-chat-back-profile {
+    width: 34px !important;
+    height: 34px !important;
+    padding: 0 !important;
+    justify-content: center !important;
+  }
+  body.zy-is-live-chat .zy-chat-back-btn .zy-chat-back-txt {
+    display: none !important;
+  }
+  body.zy-is-live-chat .zy-chat-ava.is-profile-ava {
+    width: 36px !important;
+    height: 36px !important;
+    font-size: 13px !important;
+    flex-shrink: 0 !important;
+  }
+  body.zy-is-live-chat .zy-chat-thread-name {
+    font-size: 15px !important;
+    line-height: 1.25 !important;
+  }
+  body.zy-is-live-chat .zy-chat-thread-sub {
+    font-size: 11.5px !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* Always Left-Align Username Columns & User Boxes Everywhere */
+.zy-col-username {
+  display: block;
+  text-align: left !important;
+  justify-content: flex-start !important;
+}
+td:has(.zy-col-username),
+#tbl-agents th:first-child,
+#tbl-agents td:first-child,
+#tbl-users th:first-child,
+#tbl-users td:first-child,
+#dt-clients th:nth-child(2),
+#dt-clients td:nth-child(2),
+#dt-client-payreq th:first-child,
+#dt-client-payreq td:first-child,
+#dt-agt-reqs th:first-child,
+#dt-agt-reqs td:first-child {
+  text-align: left !important;
+}
+.zy-chat-row,
+.zy-chat-row-body,
+.zy-chat-row-name-wrap,
+.zy-chat-row-name,
+.zy-chat-row-sub,
+.zy-chat-thread-meta,
+.zy-chat-thread-name-row,
+.zy-chat-thread-name,
+.zy-chat-thread-sub {
+  text-align: left !important;
+  justify-content: flex-start !important;
+}
+.zy-chat-row-top {
+  justify-content: space-between !important;
+  text-align: left !important;
+}
+
+/* Search Existing Accounts Box inside Create Client / Create Agent / Create Account Modals */
+.zy-acct-search-box {
+  background: var(--sp-bg-subtle, #f8fafc);
+  border: 1px solid var(--sp-border, #cbd5e1);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  text-align: left;
+}
+.zy-acct-search-box label {
+  display: block;
+  text-align: left !important;
+  margin-bottom: 5px;
+  font-weight: 700;
+  font-size: 12px;
+}
+.zy-acct-search-box input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.zy-acct-search-results {
+  display: none;
+  margin-top: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--sp-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--sp-bg-surface, #ffffff);
+}
+.zy-acct-search-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--sp-border, #f1f5f9);
+  font-size: 12.5px;
+  text-align: left !important;
+}
+.zy-acct-search-row:last-child {
+  border-bottom: none;
+}
+.zy-acct-search-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #059669;
+  font-weight: 600;
+  text-align: left !important;
+}
+[data-theme="dark"] .zy-acct-search-box,
+body.dark .zy-acct-search-box {
+  background: #131f33 !important;
+  border-color: #334155 !important;
+}
+[data-theme="dark"] .zy-acct-search-results,
+body.dark .zy-acct-search-results {
+  background: #0f172a !important;
+  border-color: #334155 !important;
+}
+[data-theme="dark"] .zy-acct-search-row,
+body.dark .zy-acct-search-row {
+  border-bottom-color: #1e293b !important;
+  color: #e2e8f0 !important;
+}
+[data-theme="dark"] .zy-acct-search-empty,
+body.dark .zy-acct-search-empty {
+  color: #34d399 !important;
+}
+
+/* ==========================================================================
+   WHATSAPP-STYLE PROFILE PHOTO (MY PROFILE + LIVE CHAT AVATARS)
+   ========================================================================== */
+.zy-chat-ava {
+  overflow: visible;
+}
+.zy-chat-ava-fallback {
+  position: relative;
+  z-index: 0;
+  line-height: 1;
+  user-select: none;
+}
+.zy-chat-ava-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  border-radius: 50%;
+  display: block;
+  z-index: 1;
+  background: #0f172a;
+}
+.zy-chat-ava.is-clickable {
+  cursor: pointer;
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+.zy-chat-ava.is-clickable:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.35);
+}
+.zy-chat-dot-online {
+  z-index: 2;
+}
+
+/* My Profile — Profile Photo Card */
+.zy-pro-ava-layout {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.zy-pro-ava-preview-wrap {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.zy-pro-ava-ring {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: linear-gradient(135deg, #2563eb, #059669);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 3px solid var(--sp-border, #cbd5e1);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  transition: transform 0.16s ease, border-color 0.16s ease;
+}
+.zy-pro-ava-preview-wrap:hover .zy-pro-ava-ring {
+  transform: scale(1.03);
+  border-color: #2563eb;
+}
+.zy-pro-ava-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+.zy-pro-ava-initials {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+.zy-pro-ava-cam-badge {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #059669;
+  color: #ffffff;
+  border: 2.5px solid var(--sp-bg-surface, #ffffff);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.zy-pro-ava-info {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.zy-pro-ava-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.zy-pro-btn-outline-danger {
+  background: transparent;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+}
+.zy-pro-btn-outline-danger:hover {
+  background: rgba(220, 38, 38, 0.08);
+}
+.zy-pro-btn-secondary {
+  background: var(--sp-bg-subtle, #f1f5f9);
+  color: var(--sp-text-primary, #0f172a);
+  border: 1px solid var(--sp-border, #cbd5e1);
+}
+
+/* WhatsApp-Style Interactive Circular Cropper Modal */
+.zy-ava-crop-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.zy-ava-crop-modal {
+  width: 100%;
+  max-width: 380px;
+  background: var(--sp-bg-surface, #ffffff);
+  color: var(--sp-text-primary, #0f172a);
+  border: 1px solid var(--sp-border, #cbd5e1);
+  border-radius: 16px;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+.zy-ava-crop-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--sp-border, #e2e8f0);
+}
+.zy-ava-crop-title {
+  font-size: 15px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.zy-ava-crop-sub {
+  font-size: 11.5px;
+  color: var(--sp-text-muted, #64748b);
+  margin-top: 2px;
+}
+.zy-ava-crop-x {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--sp-text-muted, #64748b);
+  cursor: pointer;
+  font-size: 15px;
+}
+.zy-ava-crop-x:hover {
+  background: rgba(148, 163, 184, 0.16);
+}
+.zy-ava-crop-body {
+  padding: 18px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.zy-ava-crop-stage {
+  position: relative;
+  width: 260px;
+  height: 260px;
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  background: #0f172a;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+}
+.zy-ava-crop-stage:active {
+  cursor: grabbing;
+}
+.zy-ava-crop-stage canvas {
+  width: 260px;
+  height: 260px;
+  display: block;
+}
+.zy-ava-crop-mask {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: 50%;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.56);
+  border: 2.5px solid rgba(255, 255, 255, 0.92);
+}
+.zy-ava-crop-zoom-row {
+  width: 100%;
+  max-width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--sp-text-muted, #64748b);
+  font-size: 13px;
+}
+.zy-ava-crop-zoom-row input[type="range"] {
+  flex: 1;
+  accent-color: #059669;
+  cursor: pointer;
+}
+.zy-ava-crop-reset {
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--sp-border, #cbd5e1);
+  background: var(--sp-bg-subtle, #f8fafc);
+  color: var(--sp-text-primary, #0f172a);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-ava-crop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--sp-border, #e2e8f0);
+}
+
+[data-theme="dark"] .zy-ava-crop-modal,
+body.dark .zy-ava-crop-modal {
+  background: #0f172a !important;
+  color: #f1f5f9 !important;
+  border-color: #334155 !important;
+}
+[data-theme="dark"] .zy-ava-crop-head,
+body.dark .zy-ava-crop-head,
+[data-theme="dark"] .zy-ava-crop-foot,
+body.dark .zy-ava-crop-foot {
+  border-color: #1e293b !important;
+}
+[data-theme="dark"] .zy-ava-crop-reset,
+body.dark .zy-ava-crop-reset,
+[data-theme="dark"] .zy-pro-btn-secondary,
+body.dark .zy-pro-btn-secondary {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+[data-theme="dark"] .zy-pro-ava-cam-badge,
+body.dark .zy-pro-ava-cam-badge {
+  border-color: #0f172a !important;
+}
+[data-theme="dark"] .zy-pro-btn-outline-danger,
+body.dark .zy-pro-btn-outline-danger {
+  color: #f87171 !important;
+  border-color: rgba(248, 113, 113, 0.4) !important;
+}
 

@@ -354,23 +354,30 @@ function paginationWithNumbers(current, total, onPage) {
 
 // ── Theme ─────────────────────────────────────────────────────────
 function toggleTheme() {
-  document.body.classList.toggle('light');
-  const icon = document.getElementById('theme-icon');
-  if (icon) {
-    icon.className = document.body.classList.contains('light') ? 'fas fa-moon' : 'fas fa-circle-half-stroke';
+  const cur = (document.documentElement && document.documentElement.getAttribute('data-theme')) ||
+    (document.body && document.body.classList.contains('dark') ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  if (typeof window.setManualThemeOverride === 'function') {
+    window.setManualThemeOverride(next);
+  } else {
+    try { localStorage.setItem('theme', next); } catch {}
   }
-  try {
-    localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark');
-  } catch {}
+  if (typeof window.applyThemePreference === 'function') {
+    window.applyThemePreference(next);
+  } else {
+    if (document.documentElement) document.documentElement.setAttribute('data-theme', next);
+    if (document.body) {
+      document.body.classList.remove('dark', 'light');
+      document.body.classList.add(next);
+    }
+  }
 }
 
 // Restore theme
 (function initTheme() {
   try {
-    if (localStorage.getItem('theme') === 'light') {
-      document.body.classList.add('light');
-      const icon = document.getElementById('theme-icon');
-      if (icon) icon.className = 'fas fa-moon';
+    if (typeof window.applyThemePreference === 'function') {
+      window.applyThemePreference();
     }
   } catch {}
 })();

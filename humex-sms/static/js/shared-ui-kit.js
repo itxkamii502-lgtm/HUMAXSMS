@@ -3734,19 +3734,40 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   };
 
   const appLinksHtml = appLinks.length ? `
-    <div class="zy-ud-applinks-list">
-      ${appLinks.map((app, i) => {
-        const href = safeHref(app.url);
-        const cat = String(app.category || '').trim();
-        return `
-          <a class="zy-ud-applink-item" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer">
-            <span class="zy-ud-applink-idx">${i + 1}</span>
-            <span class="zy-ud-applink-name">${zyEsc(app.name || 'App Link')}</span>
-            ${cat ? `<span class="zy-ud-applink-cat">${zyEsc(cat)}</span>` : ''}
-            <i class="fas fa-arrow-up-right-from-square zy-ud-applink-ext" aria-hidden="true"></i>
-          </a>
-        `;
-      }).join('')}
+    <div class="zy-ud-applinks-list zy-applinks-tbl-wrap zy-ud-applinks-tbl-wrap">
+      <table class="zy-dt zy-applinks-tbl zy-applinks-tbl-compact">
+        <thead>
+          <tr>
+            <th style="width:46px;text-align:center;">#</th>
+            <th style="width:36%;">App Name</th>
+            <th>App Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${appLinks.map((app, i) => {
+            const href = safeHref(app.url);
+            const rawUrl = String(app.url || '').trim();
+            const cat = String(app.category || '').trim();
+            return `
+              <tr>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${i + 1}</span></td>
+                <td class="zy-applink-name-td">
+                  <div class="zy-applink-name-line">
+                    <span class="zy-applink-name-txt">${zyEsc(app.name || 'App Link')}</span>
+                    ${cat ? `<span class="zy-ud-applink-cat">${zyEsc(cat)}</span>` : ''}
+                  </div>
+                </td>
+                <td class="zy-applink-url-td">
+                  <div class="zy-applink-url-wrap">
+                    <a class="zy-applink-url-anchor" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="${zyEsc(rawUrl)}">${zyEsc(rawUrl || href)}</a>
+                    <button type="button" class="zy-applink-copy-btn" data-url="${zyEsc(rawUrl || href)}" onclick="zyCopyAppLinkUrl(this)" title="Copy link"><i class="far fa-copy"></i> Copy</button>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
     </div>
   ` : `<div class="zy-ud-empty"><i class="fas fa-link" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No app links added yet.</div>`;
 
@@ -4561,6 +4582,49 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
     activePollers.push(window._zyLiveAccessPollTimer);
   }
 };
+
+/* Global 1-click App Link Copy Helper (Available across Owner, Agent & Client pages) */
+window.zyCopyAppLinkUrl = function (btn) {
+  try {
+    const url = btn && btn.getAttribute('data-url') ? String(btn.getAttribute('data-url')) : '';
+    if (!url || url === '#') return;
+    const done = () => {
+      if (!btn) return;
+      const orig = btn.innerHTML;
+      btn.classList.add('is-copied');
+      btn.innerHTML = '<i class="fas fa-check"></i> Copied';
+      setTimeout(() => {
+        btn.classList.remove('is-copied');
+        btn.innerHTML = orig;
+      }, 1500);
+      if (typeof window.toast === 'function') window.toast('App link copied!', 'success');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        document.body.removeChild(ta);
+        done();
+      });
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      done();
+    }
+  } catch (_) {}
+};
+
 
 
 

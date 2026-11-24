@@ -2221,47 +2221,39 @@ function zyPad2(n) {
 window.zyPad2 = zyPad2;
 
 function zyFormatDateStr(d) {
-  return `${d.getFullYear()}-${zyPad2(d.getMonth() + 1)}-${zyPad2(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${zyPad2(d.getUTCMonth() + 1)}-${zyPad2(d.getUTCDate())}`;
 }
 window.zyFormatDateStr = zyFormatDateStr;
 
 function zyGetDatePresetRange(key) {
   const now = new Date();
-  const todayStr = zyFormatDateStr(now);
-  let fromD = new Date(now);
-  let toD = new Date(now);
+  const baseUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  let fromD = new Date(baseUtc.getTime());
+  let toD = new Date(baseUtc.getTime());
 
   switch (key) {
     case 'today':
-      fromD = new Date(now);
-      toD = new Date(now);
       break;
     case 'yesterday':
-      fromD.setDate(fromD.getDate() - 1);
-      toD.setDate(toD.getDate() - 1);
+      fromD.setUTCDate(fromD.getUTCDate() - 1);
+      toD.setUTCDate(toD.getUTCDate() - 1);
       break;
     case 'this_week': {
-      const day = fromD.getDay(); // 0 is Sun
-      const diff = fromD.getDate() - day + (day === 0 ? -6 : 1); // Monday
-      fromD = new Date(fromD.setDate(diff));
-      toD = new Date(now);
+      const day = fromD.getUTCDay(); // 0 is Sun
+      const diff = fromD.getUTCDate() - day + (day === 0 ? -6 : 1); // Monday UTC
+      fromD.setUTCDate(diff);
       break;
     }
     case 'last_7':
-      fromD.setDate(fromD.getDate() - 6);
-      toD = new Date(now);
+      fromD.setUTCDate(fromD.getUTCDate() - 6);
       break;
     case 'this_month':
-      fromD = new Date(now.getFullYear(), now.getMonth(), 1);
-      toD = new Date(now);
+      fromD = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
       break;
     case 'last_30':
-      fromD.setDate(fromD.getDate() - 29);
-      toD = new Date(now);
+      fromD.setUTCDate(fromD.getUTCDate() - 29);
       break;
     default:
-      fromD = new Date(now);
-      toD = new Date(now);
       break;
   }
 
@@ -2766,17 +2758,17 @@ window.zyHideLoading = zyHideLoading;
 
 function zyDefaultFromDateTime() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} 00:00:00`;
 }
 
 function zyDefaultToDateTime() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} 23:59:59`;
 }
 
@@ -2915,9 +2907,9 @@ window.zyClearCdrSearch = zyClearCdrSearch;
 
 function zyResetCdrFilters(reloadCb) {
   const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
   const today = `${y}-${m}-${d}`;
   const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
   setVal('rp-from', `${today} 00:00:00`);
@@ -3368,20 +3360,30 @@ window.zyOpenDatePicker = function(inputEl) {
     if (wasSame) return;
   }
 
-  let currDate = new Date();
-  if (inputEl.value) {
-    const parsed = new Date(inputEl.value.replace(' ', 'T'));
-    if (!isNaN(parsed.getTime())) currDate = parsed;
-  }
+  const nowUtc = new Date();
+  const isToInit = /(^|-)to$/i.test(inputEl.id || '');
+  let viewYear = nowUtc.getUTCFullYear();
+  let viewMonth = nowUtc.getUTCMonth();
+  let selYear = viewYear;
+  let selMonth = viewMonth;
+  let selDay = nowUtc.getUTCDate();
+  let selHour = isToInit ? '23' : '00';
+  let selMin = isToInit ? '59' : '00';
+  let selSec = isToInit ? '59' : '00';
 
-  let viewYear = currDate.getFullYear();
-  let viewMonth = currDate.getMonth();
-  let selYear = currDate.getFullYear();
-  let selMonth = currDate.getMonth();
-  let selDay = currDate.getDate();
-  let selHour = String(currDate.getHours()).padStart(2, '0');
-  let selMin = String(currDate.getMinutes()).padStart(2, '0');
-  let selSec = String(currDate.getSeconds()).padStart(2, '0');
+  if (inputEl.value) {
+    const m = String(inputEl.value).trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (m) {
+      viewYear = parseInt(m[1], 10);
+      viewMonth = parseInt(m[2], 10) - 1;
+      selYear = viewYear;
+      selMonth = viewMonth;
+      selDay = parseInt(m[3], 10);
+      if (m[4] != null) selHour = m[4];
+      if (m[5] != null) selMin = m[5];
+      if (m[6] != null) selSec = m[6];
+    }
+  }
 
   const pop = document.createElement('div');
   pop.id = 'zy-datepicker-popover';
@@ -3481,11 +3483,11 @@ window.zyOpenDatePicker = function(inputEl) {
     pop.querySelector('#zy-cal-today').onclick = (ev) => {
       ev.stopPropagation();
       const now = new Date();
-      viewYear = now.getFullYear();
-      viewMonth = now.getMonth();
+      viewYear = now.getUTCFullYear();
+      viewMonth = now.getUTCMonth();
       selYear = viewYear;
       selMonth = viewMonth;
-      selDay = now.getDate();
+      selDay = now.getUTCDate();
       const isToField = /(^|-)to$/i.test(inputEl.id || '');
       selHour = isToField ? '23' : '00';
       selMin = isToField ? '59' : '00';

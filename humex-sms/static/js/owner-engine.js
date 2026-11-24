@@ -9441,13 +9441,24 @@ async function zyCommitAllMatchedSmartGroups() {
 // ══════════════════════════════════════════════════════════════════
 //  OWNER APPS LINKS DIRECTORY (Excel Upload + Manual CRUD + Top/Low + Agent Access)
 // ══════════════════════════════════════════════════════════════════
-let _ownerAppLinksTab = 'links';
+let _ownerAppLinksTab = 'latest';
 let _ownerAppLinksList = [];
 let _ownerAppLinksAgents = [];
 let _ownerAppLinksQuery = '';
 
+function _ownerPickLatestAppLinks(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const pinned = arr.filter(x => x && x.pinned_top);
+  const rest = arr.filter(x => x && !x.pinned_top).sort((a, b) => {
+    const ta = Date.parse(a.updated_at || a.created_at || a.created || 0) || Number(a.id || 0);
+    const tb = Date.parse(b.updated_at || b.created_at || b.created || 0) || Number(b.id || 0);
+    return tb - ta;
+  });
+  return [...pinned, ...rest].slice(0, 12);
+}
+
 async function renderOwnerAppLinks(tabOverride) {
-  if (tabOverride) _ownerAppLinksTab = tabOverride;
+  if (tabOverride) _ownerAppLinksTab = tabOverride === 'links' ? 'all' : tabOverride;
   const c = document.getElementById('page-content');
   if (!c) return;
 
@@ -9460,6 +9471,7 @@ async function renderOwnerAppLinks(tabOverride) {
   _ownerAppLinksAgents = Array.isArray(agentsRes?.data) ? agentsRes.data : (Array.isArray(agentsRes) ? agentsRes : []);
 
   const totalCount = _ownerAppLinksList.length;
+  const latestCount = _ownerPickLatestAppLinks(_ownerAppLinksList).length;
   const visibleCount = _ownerAppLinksList.filter(x => x.visible !== false).length;
   const hiddenCount = totalCount - visibleCount;
   const enabledAgentsCount = _ownerAppLinksAgents.filter(a => a.app_links_access).length;
@@ -9502,8 +9514,11 @@ async function renderOwnerAppLinks(tabOverride) {
 
     <div class="card">
       <div class="zy-applinks-tabbar">
-        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'links' ? 'active' : ''}" onclick="renderOwnerAppLinks('links')">
-          <i class="fas fa-link"></i> App Links (${totalCount})
+        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'latest' ? 'active' : ''}" onclick="renderOwnerAppLinks('latest')">
+          <i class="fas fa-bolt"></i> Latest (${latestCount})
+        </button>
+        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'all' ? 'active' : ''}" onclick="renderOwnerAppLinks('all')">
+          <i class="fas fa-table-cells"></i> All Links (${totalCount})
         </button>
         <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'access' ? 'active' : ''}" onclick="renderOwnerAppLinks('access')">
           <i class="fas fa-user-shield"></i> Agent Access Control (${enabledAgentsCount}/${_ownerAppLinksAgents.length})
@@ -9566,7 +9581,8 @@ function zyRenderOwnerAppLinksBody() {
     return;
   }
 
-  const filtered = _ownerAppLinksList.filter(item => {
+  const baseList = _ownerAppLinksTab === 'latest' ? _ownerPickLatestAppLinks(_ownerAppLinksList) : _ownerAppLinksList;
+  const filtered = baseList.filter(item => {
     if (!q) return true;
     return String(item.name || '').toLowerCase().includes(q)
       || String(item.url || '').toLowerCase().includes(q)
@@ -9590,7 +9606,7 @@ function zyRenderOwnerAppLinksBody() {
 
   host.innerHTML = `
     <div class="zy-applinks-tbl-wrap">
-      <table class="zy-dt zy-applinks-tbl">
+      <table class="zy-dt zy-applinks-tbl zy-applinks-excel">
         <thead>
           <tr>
             <th style="width:60px;text-align:center;">#</th>

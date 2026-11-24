@@ -1112,6 +1112,9 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
     st.batches = batches;
     st.rangeId = res.range_id || st.rangeId;
     st.rangeName = res.range_name || st.rangeName;
+    st.isWhitenoise = Boolean(res.is_whitenoise);
+    st.requiresAgentApproval = Boolean(res.requires_agent_approval);
+    st.pendingReturnCount = Number(res.pending_return_count || 0);
     st.minDate = res.min_date || '';
     st.maxDate = res.max_date || '';
     st.totalHeld = Number(res.total_held || 0);
@@ -1121,11 +1124,15 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
     st.selectedDates = new Set();
 
     if (!batches.length) {
+      const pendingNote = st.pendingReturnCount > 0
+        ? `<div style="margin-top:8px;font-size:12px;color:#b45309;font-weight:700;"><i class="fas fa-clock"></i> ${st.pendingReturnCount} number(s) already have a pending Return Request awaiting Agent approval.</div>`
+        : '';
       zyModal(`Return Range: ${zyEsc(st.rangeName)}`, `
-        <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:18px;border:1px solid #e2e8f0;text-align:center;">
-          <i class="fas fa-circle-info" style="font-size:22px;color:#64748b;margin-bottom:8px;"></i>
-          <div style="font-weight:700;color:#0f172a;font-size:14px;">No Returnable Numbers in ${zyEsc(st.rangeName)}</div>
-          <div style="font-size:12px;color:#64748b;margin-top:4px;">You currently hold 0 returnable numbers in this range.</div>
+        <div class="zy-modal-summary-card" style="background:var(--sp-bg-subtle,#f8fafc);border-radius:12px;padding:18px;border:1px solid var(--sp-border,#e2e8f0);text-align:center;">
+          <i class="fas fa-circle-info" style="font-size:22px;color:var(--sp-text-muted,#64748b);margin-bottom:8px;"></i>
+          <div style="font-weight:700;color:var(--sp-text-primary,#0f172a);font-size:14px;">No Returnable Numbers in ${zyEsc(st.rangeName)}</div>
+          <div style="font-size:12px;color:var(--sp-text-muted,#64748b);margin-top:4px;">You currently hold 0 additional returnable numbers in this range.</div>
+          ${pendingNote}
         </div>
       `, `<button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Close</button>`);
       return;
@@ -1152,6 +1159,13 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
         </label>`;
     }).join('');
 
+    const wnApprovalBannerHtml = st.requiresAgentApproval
+      ? `<div style="background:rgba(99,102,241,0.10);border:1px solid rgba(99,102,241,0.35);color:var(--sp-text-primary,#1e1b4b);border-radius:9px;padding:10px 12px;margin-bottom:10px;font-size:12px;line-height:1.45;display:flex;align-items:flex-start;gap:8px;">
+           <i class="fas fa-user-check" style="color:#4f46e5;margin-top:2px;flex-shrink:0;"></i>
+           <span><b>Monthly Route {W} Return Request:</b> Returning these numbers sends a request to your Agent. Numbers stay active on your panel until your Agent approves.${st.pendingReturnCount > 0 ? ` <b>(${st.pendingReturnCount} already pending approval)</b>` : ''}</span>
+         </div>`
+      : '';
+
     const lockedNoticeHtml = st.lockedTodayCount > 0
       ? `<div class="zy-ret-today-notice">
            <i class="fas fa-shield-halved"></i>
@@ -1160,21 +1174,23 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
       : '';
 
     const hasReturnable = st.returnableCount > 0;
+    const submitIdleLabel = st.requiresAgentApproval ? 'Request Return' : 'Return Selected';
 
-    zyModal(`Return Range: ${zyEsc(st.rangeName)}`, `
-      <div class="zy-modal-summary-card" style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:12px;border:1px solid #e2e8f0;">
+    zyModal(`${st.requiresAgentApproval ? 'Request Return' : 'Return Range'}: ${zyEsc(st.rangeName)}`, `
+      <div class="zy-modal-summary-card" style="background:var(--sp-bg-subtle,#f8fafc);border-radius:12px;padding:12px 14px;margin-bottom:12px;border:1px solid var(--sp-border,#e2e8f0);">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <div>
-            <div style="font-weight:800;color:#0f172a;font-size:14px;">${zyEsc(st.rangeName)}</div>
-            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Strictly scoped to this range only — choose previous-day date(s) to return.</div>
+            <div style="font-weight:800;color:var(--sp-text-primary,#0f172a);font-size:14px;">${zyEsc(st.rangeName)}</div>
+            <div style="font-size:11.5px;color:var(--sp-text-muted,#64748b);margin-top:2px;">Strictly scoped to this range only — choose previous-day date(s) to return.</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-size:10.5px;color:#64748b;font-weight:700;text-transform:uppercase;">Returnable / Held</div>
+            <div style="font-size:10.5px;color:var(--sp-text-muted,#64748b);font-weight:700;text-transform:uppercase;">Returnable / Held</div>
             <div style="font-size:16px;font-weight:800;color:${hasReturnable ? '#dc2626' : '#d97706'};" class="monospace">${st.returnableCount} / ${st.totalHeld}</div>
           </div>
         </div>
       </div>
 
+      ${wnApprovalBannerHtml}
       ${lockedNoticeHtml}
 
       ${hasReturnable ? `
@@ -1194,7 +1210,7 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
         </div>
       </div>` : ''}
 
-      <div style="font-size:11.5px;font-weight:700;color:#475569;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+      <div style="font-size:11.5px;font-weight:700;color:var(--sp-text-secondary,#475569);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
         <span>Assigned Date Batches (${batches.length} date${batches.length === 1 ? '' : 's'})</span>
         <span id="zy-ret-sel-summary" style="color:#dc2626;font-weight:800;">0 numbers selected</span>
       </div>
@@ -1203,11 +1219,11 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
       </div>
     `, `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
-        <span style="font-size:11.5px;color:#64748b;" id="zy-ret-footer-hint">${hasReturnable ? 'Select at least one eligible date batch above.' : 'Today’s allocations unlock for return tomorrow.'}</span>
+        <span style="font-size:11.5px;color:var(--sp-text-muted,#64748b);" id="zy-ret-footer-hint">${hasReturnable ? 'Select at least one eligible date batch above.' : 'Today’s allocations unlock for return tomorrow.'}</span>
         <div style="display:flex;align-items:center;gap:8px;">
           <button type="button" class="zy-btn-pill-cancel" onclick="closeModal()">Cancel</button>
-          <button type="button" class="zy-btn-pill-submit" id="zy-ret-submit-btn" disabled style="background:#dc2626;opacity:0.5;cursor:not-allowed;" onclick="zySubmitRangeReturnByDate()">
-            <i class="fas fa-rotate-left"></i> Return Selected
+          <button type="button" class="zy-btn-pill-submit" id="zy-ret-submit-btn" disabled style="background:${st.requiresAgentApproval ? '#4f46e5' : '#dc2626'};opacity:0.5;cursor:not-allowed;" onclick="zySubmitRangeReturnByDate()">
+            <i class="fas ${st.requiresAgentApproval ? 'fa-paper-plane' : 'fa-rotate-left'}"></i> ${submitIdleLabel}
           </button>
         </div>
       </div>
@@ -1271,18 +1287,25 @@ window.zySyncReturnDateCheckboxes = function() {
   const hintEl = document.getElementById('zy-ret-footer-hint');
   if (hintEl) {
     hintEl.textContent = totalSel > 0
-      ? `Returning ${totalSel} number(s) strictly from ${st ? st.rangeName : 'this range'}.`
+      ? (st && st.requiresAgentApproval
+          ? `Submitting return request for ${totalSel} Monthly Route {W} number(s) to your Agent.`
+          : `Returning ${totalSel} number(s) strictly from ${st ? st.rangeName : 'this range'}.`)
       : 'Select at least one date batch above.';
   }
 
   const btn = document.getElementById('zy-ret-submit-btn');
   if (btn) {
+    const isReq = Boolean(st && st.requiresAgentApproval);
     btn.disabled = totalSel <= 0;
     btn.style.opacity = totalSel > 0 ? '1' : '0.5';
     btn.style.cursor = totalSel > 0 ? 'pointer' : 'not-allowed';
     btn.innerHTML = totalSel > 0
-      ? `<i class="fas fa-rotate-left"></i> Return ${totalSel} Number${totalSel === 1 ? '' : 's'}`
-      : `<i class="fas fa-rotate-left"></i> Return Selected`;
+      ? (isReq
+          ? `<i class="fas fa-paper-plane"></i> Request Return (${totalSel})`
+          : `<i class="fas fa-rotate-left"></i> Return ${totalSel} Number${totalSel === 1 ? '' : 's'}`)
+      : (isReq
+          ? `<i class="fas fa-paper-plane"></i> Request Return`
+          : `<i class="fas fa-rotate-left"></i> Return Selected`);
   }
 };
 
@@ -1295,7 +1318,7 @@ window.zySubmitRangeReturnByDate = async function() {
     return;
   }
   const btn = document.getElementById('zy-ret-submit-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Returning...'; }
+  if (btn) { btn.disabled = true; btn.textContent = st.requiresAgentApproval ? 'Submitting Request...' : 'Returning...'; }
   try {
     const res = await apiFetch('/api/numbers/return-by-date', {
       method: 'POST',
@@ -1309,8 +1332,10 @@ window.zySubmitRangeReturnByDate = async function() {
       throw new Error((res && res.error) || 'Failed to return numbers');
     }
     if (typeof closeModal === 'function') closeModal();
-    const msg = res.message || `Returned ${res.returned_count} number(s) from ${st.rangeName}`;
-    if (typeof toast === 'function') toast(msg, 'success');
+    const msg = res.message || (res.return_request_submitted
+      ? `Return request sent to your Agent for ${res.request_count || ''} Monthly Route {W} number(s).`
+      : `Returned ${res.returned_count} number(s) from ${st.rangeName}`);
+    if (typeof toast === 'function') toast(msg, res.return_request_submitted ? 'info' : 'success');
     else if (typeof zyFlash === 'function') zyFlash(msg);
     if (typeof st.onDone === 'function') st.onDone();
   } catch (err) {
@@ -1323,10 +1348,8 @@ window.zySubmitRangeReturnByDate = async function() {
 };
 const zyTick = on => on ? zyImg('ui_tick', 'zy-tick') : '';
 
-/* CLI privacy — every panel EXCEPT admin shows only the first character of
-   the CLI and masks the rest ("1Engage" -> "1XXXXX"). The admin panel does
-   not load this kit, so it keeps the full CLI. */
-const zyMaskCli = v => { const s = String(v ?? ''); return s ? zyEsc(s.slice(0, 1)) + 'XXXXX' : ''; };
+/* Full unmasked CLI display across Owner, Agent, and Client panels */
+const zyMaskCli = v => { const s = String(v ?? '').trim(); return s ? zyEsc(s) : ''; };
 
 /* CDR totals — the footer block sums the payouts per currency (USD/EUR/GBP)
    exactly like the reference panel, instead of the old fixed 0 / 0 / 0. */
@@ -3771,9 +3794,9 @@ window.zyRenderUnifiedDashboard = function (cfg) {
     return /^https?:\/\//i.test(s) ? s : '#';
   };
 
-  const appLinksHtml = appLinks.length ? `
+  const buildDashAppLinksTable = (list) => list.length ? `
     <div class="zy-ud-applinks-list zy-applinks-tbl-wrap zy-ud-applinks-tbl-wrap">
-      <table class="zy-dt zy-applinks-tbl zy-applinks-tbl-compact">
+      <table class="zy-dt zy-applinks-tbl zy-applinks-excel zy-applinks-tbl-compact">
         <thead>
           <tr>
             <th style="width:46px;text-align:center;">#</th>
@@ -3782,7 +3805,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
           </tr>
         </thead>
         <tbody>
-          ${appLinks.map((app, i) => {
+          ${list.map((app, i) => {
             const href = safeHref(app.url);
             const rawUrl = String(app.url || '').trim();
             const cat = String(app.category || '').trim();
@@ -3792,6 +3815,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
                 <td class="zy-applink-name-td">
                   <div class="zy-applink-name-line">
                     <span class="zy-applink-name-txt">${zyEsc(app.name || 'App Link')}</span>
+                    ${app.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
                     ${cat ? `<span class="zy-ud-applink-cat">${zyEsc(cat)}</span>` : ''}
                   </div>
                 </td>
@@ -3808,6 +3832,22 @@ window.zyRenderUnifiedDashboard = function (cfg) {
       </table>
     </div>
   ` : `<div class="zy-ud-empty"><i class="fas fa-link" style="display:block;font-size:20px;margin-bottom:6px;opacity:0.5;"></i>No app links added yet.</div>`;
+
+  const latestAppLinks = appLinks.slice(0, 10);
+  const dashAppLinksId = 'zy-ud-applinks-' + Math.random().toString(36).slice(2, 8);
+  window._zyDashAppLinksCache = window._zyDashAppLinksCache || {};
+  window._zyDashAppLinksCache[dashAppLinksId] = { latest: latestAppLinks, all: appLinks, render: buildDashAppLinksTable };
+  window.zySwitchDashAppLinksTab = function(id, tab, btnEl) {
+    const entry = window._zyDashAppLinksCache && window._zyDashAppLinksCache[id];
+    const host = document.getElementById(id);
+    if (!entry || !host) return;
+    host.innerHTML = entry.render(tab === 'all' ? entry.all : entry.latest);
+    if (btnEl && btnEl.parentElement) {
+      btnEl.parentElement.querySelectorAll('.zy-ud-al-tab').forEach(b => b.classList.remove('active'));
+      btnEl.classList.add('active');
+    }
+  };
+  const appLinksHtml = `<div id="${dashAppLinksId}">${buildDashAppLinksTable(latestAppLinks)}</div>`;
 
   const moneyPairClass = moneyCards.length === 1 ? 'zy-ud-money-pair zy-ud-money-pair-single' : 'zy-ud-money-pair';
 
@@ -3912,7 +3952,10 @@ window.zyRenderUnifiedDashboard = function (cfg) {
         <div class="zy-ud-card" style="display:flex;flex-direction:column;">
           <div class="zy-ud-card-head">
             <div class="zy-ud-card-title"><i class="fas fa-mobile-screen-button"></i> Apps &amp; Links</div>
-            <span class="zy-ud-card-sub">Latest 10 Apps</span>
+            <div class="zy-ud-al-tabs" style="display:inline-flex;gap:4px;align-items:center;">
+              <button type="button" class="zy-ud-al-tab active" onclick="zySwitchDashAppLinksTab('${dashAppLinksId}','latest',this)">Latest (${latestAppLinks.length})</button>
+              <button type="button" class="zy-ud-al-tab" onclick="zySwitchDashAppLinksTab('${dashAppLinksId}','all',this)">All (${appLinks.length})</button>
+            </div>
           </div>
           ${appLinksHtml}
         </div>

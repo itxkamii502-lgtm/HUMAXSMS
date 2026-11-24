@@ -138,7 +138,7 @@ function broadcastWs(data, targetFilter = null) {
           client.send(msg);
         } else if (uRole === 'agent' && recipientAgentId && Number(u.id) === recipientAgentId) {
           const base = { ...(payload.data || payload) };
-          base.cli = serverMaskCli(base.cli || base.app || base.sender);
+          base.cli = String(base.cli || base.app || base.sender || '—').trim() || '—';
           base.provider = maskProviderLabel(base.provider || '', false);
           delete base.company_rate;
           delete base.company_cost;
@@ -154,7 +154,7 @@ function broadcastWs(data, targetFilter = null) {
           (recipientClientId == null && recipientUser && String(u.username || '').toLowerCase() === recipientUser)
         )) {
           const base = { ...(payload.data || payload) };
-          base.cli = serverMaskCli(base.cli || base.app || base.sender);
+          base.cli = String(base.cli || base.app || base.sender || '—').trim() || '—';
           base.provider = maskProviderLabel(base.provider || '', false);
           delete base.company_rate;
           delete base.company_cost;
@@ -7922,6 +7922,10 @@ app.get('/api/user/profile', (req, res) => {
   if (!found) return res.status(404).json({ success: false, error: 'User not found' });
 
   const u = found.user;
+  let clientChatId = '';
+  if (found.role === 'Client') {
+    clientChatId = ensureSingleClientChatId(u.id);
+  }
   const themeCatalog = getThemeCatalog(readDb('settings') || {});
   const validUserThemeKey = (u.theme_key && themeCatalog.some(t => t.key === u.theme_key)) ? u.theme_key : '';
   res.json({
@@ -7930,6 +7934,7 @@ app.get('/api/user/profile', (req, res) => {
       id: u.id,
       username: u.username,
       role: found.role,
+      chat_id: clientChatId || u.chat_id || '',
       full_name: u.full_name || u.name || '',
       email: u.email || '',
       phone: u.phone || u.contact || '',
@@ -8306,6 +8311,7 @@ app.get('/api/auth/me', (req, res) => {
   const liveAccessEnabled = hasLiveAccess(sessionUser);
   const found = findUserAnywhere(sessionUser.username);
   const dbUser = (found && found.user) || {};
+  const clientChatId = sessionUser.role === 'Client' ? ensureSingleClientChatId(sessionUser.id) : '';
   const catalog = getThemeCatalog(readDb('settings') || {});
   const validUserThemeKey = (dbUser.theme_key && catalog.some(t => t.key === dbUser.theme_key)) ? dbUser.theme_key : '';
   res.json({
@@ -8313,6 +8319,7 @@ app.get('/api/auth/me', (req, res) => {
     id: sessionUser.id,
     username: sessionUser.username,
     role: sessionUser.role,
+    chat_id: clientChatId || dbUser.chat_id || '',
     agent_id: sessionUser.agent_id || null,
     alloc_mode: sessionUser.alloc_mode || null,
     alloc_daily_limit: sessionUser.alloc_daily_limit ?? null,
@@ -8753,10 +8760,7 @@ app.get('/api/sms/period-stats', (req, res) => {
       else apiTodayCount += weight;
       profitTodaySum += amt;
       if (!isWnRow) {
-        let rawCli = String(s.cli || s.app || s.sender || '—').trim() || '—';
-        if (isClient && rawCli !== '—') {
-          rawCli = rawCli.slice(0, 1) + 'XXXXX';
-        }
+        const rawCli = String(s.cli || s.app || s.sender || '—').trim() || '—';
         const rangeLabel = String(s.range || s.range_name || s.country || '—').trim() || '—';
         const accessKey = `${rawCli}|||${rangeLabel}`;
         topAccessMap.set(accessKey, (topAccessMap.get(accessKey) || 0) + weight);
@@ -9220,6 +9224,24 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
   items.sort((a, b) => String(a.range_name || a.country || '').localeCompare(String(b.range_name || b.country || ''), undefined, { sensitivity: 'base', numeric: true }));
 
   const pendingCount = items.filter(i => !i.configured).length;
+  const allAgents = readDb('agents') || [];
+  const myAgentRec = allAgents.find(a => Number(a.id) === agentId) || null;
+  const myClients = (readDb('clients') || [])
+    .filter(c => c && Number(c.agent_id) === agentId && c.status !== 'deleted')
+    .map(c => {
+      const held = numbers.filter(n => n && Number(n.client_id) === Number(c.id)).length;
+      return {
+        id: Number(c.id),
+        username: c.username || `Client #${c.id}`,
+        full_name: c.full_name || c.name || '',
+        status: c.status || 'active',
+        held_count: held
+      };
+    })
+    .sort((a, b) => String(a.username).localeCompare(String(b.username), undefined, { sensitivity: 'base' }));
+  const rawVaultId = myAgentRec && myAgentRec.return_vault_client_id ? Number(myAgentRec.return_vault_client_id) : null;
+  const vaultClient = rawVaultId ? myClients.find(c => Number(c.id) === rawVaultId) || null : null;
+
   res.json({
     success: true,
     agent_id: agentId,
@@ -9227,7 +9249,89 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
     pending_count: pendingCount,
     configured_count: items.length - pendingCount,
     weekly_target: weeklyStats,
+    return_vault_client_id: vaultClient ? Number(vaultClient.id) : null,
+    return_vault_client_username: vaultClient ? vaultClient.username : '',
+    return_vault_held_count: vaultClient ? Number(vaultClient.held_count || 0) : 0,
+    agent_clients: myClients,
     ranges: items
+  });
+});
+
+// ── Agent Used / Returned Numbers Vault Client Configuration ─────
+app.get('/api/agent/return-vault', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const agents = readDb('agents') || [];
+  const agRec = agents.find(a => Number(a.id) === agentId) || null;
+  const numbers = readDb('numbers') || [];
+  const myClients = (readDb('clients') || [])
+    .filter(c => c && Number(c.agent_id) === agentId && c.status !== 'deleted')
+    .map(c => ({
+      id: Number(c.id),
+      username: c.username || `Client #${c.id}`,
+      full_name: c.full_name || c.name || '',
+      status: c.status || 'active',
+      held_count: numbers.filter(n => n && Number(n.client_id) === Number(c.id)).length
+    }))
+    .sort((a, b) => String(a.username).localeCompare(String(b.username), undefined, { sensitivity: 'base' }));
+  const rawVaultId = agRec && agRec.return_vault_client_id ? Number(agRec.return_vault_client_id) : null;
+  const vaultClient = rawVaultId ? myClients.find(c => Number(c.id) === rawVaultId) || null : null;
+  res.json({
+    success: true,
+    return_vault_client_id: vaultClient ? Number(vaultClient.id) : null,
+    return_vault_client_username: vaultClient ? vaultClient.username : '',
+    return_vault_held_count: vaultClient ? Number(vaultClient.held_count || 0) : 0,
+    clients: myClients
+  });
+});
+
+app.put('/api/agent/return-vault', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const rawId = req.body && (req.body.client_id !== undefined ? req.body.client_id : req.body.return_vault_client_id);
+  const clearVault = rawId === null || rawId === '' || rawId === 0 || String(rawId) === '0';
+  const agents = readDb('agents') || [];
+  const agIdx = agents.findIndex(a => Number(a.id) === agentId);
+  if (agIdx === -1) return res.status(404).json({ error: 'Agent account not found.' });
+
+  if (clearVault) {
+    agents[agIdx].return_vault_client_id = null;
+    agents[agIdx].return_vault_client_username = '';
+    writeDb('agents', agents);
+    logAudit(sessionUser.username, 'Return Vault Cleared', 'Returned client numbers will go to default Agent Free Pool', 'Numbers');
+    return res.json({
+      success: true,
+      return_vault_client_id: null,
+      return_vault_client_username: '',
+      return_vault_held_count: 0,
+      message: 'Returned numbers will now go to your default Agent Free Pool.'
+    });
+  }
+
+  const targetClientId = Number(rawId);
+  const clients = readDb('clients') || [];
+  const targetClient = clients.find(c => c && Number(c.id) === targetClientId && Number(c.agent_id) === agentId && c.status !== 'deleted');
+  if (!targetClient) {
+    return res.status(404).json({ error: 'Selected Client not found under your Agent account.' });
+  }
+  agents[agIdx].return_vault_client_id = Number(targetClient.id);
+  agents[agIdx].return_vault_client_username = targetClient.username || '';
+  writeDb('agents', agents);
+  const numbers = readDb('numbers') || [];
+  const heldCount = numbers.filter(n => n && Number(n.client_id) === Number(targetClient.id)).length;
+  logAudit(sessionUser.username, 'Return Vault Updated', `Set Used/Returned Numbers Vault Client to ${targetClient.username}`, 'Numbers');
+  return res.json({
+    success: true,
+    return_vault_client_id: Number(targetClient.id),
+    return_vault_client_username: targetClient.username || '',
+    return_vault_held_count: heldCount,
+    message: `All returned client numbers will now automatically move to "${targetClient.username}" so used numbers are never re-issued.`
   });
 });
 
@@ -12577,6 +12681,19 @@ function cleanupDeletedAccountData(tableName, target, opts = {}) {
       (String(t.to_role || '').toLowerCase() === 'client' && (Number(t.to_user_id) === tid || (uLc && String(t.to_username || '').toLowerCase() === uLc))) ||
       (String(t.from_role || '').toLowerCase() === 'client' && (Number(t.from_user_id) === tid || (uLc && String(t.from_username || '').toLowerCase() === uLc)))
     ));
+    pruneTable('return_requests', r => r && Number(r.client_id) === tid);
+    try {
+      const agentsList = readDb('agents') || [];
+      let agChanged = false;
+      for (const a of agentsList) {
+        if (a && Number(a.return_vault_client_id) === tid) {
+          a.return_vault_client_id = null;
+          a.return_vault_client_username = '';
+          agChanged = true;
+        }
+      }
+      if (agChanged) writeDb('agents', agentsList);
+    } catch (_) {}
   }
 
   // 7. Clean Live Chat conversations/memberships so a recreated account never sees dead chats
@@ -12934,11 +13051,15 @@ function registerPaginatedCrud(routePath, tableName) {
 
     let slice = data.slice(start, start + limit);
     if (tableName === 'clients') {
+      ensureAllClientsHaveChatId();
+      const refreshedClients = readDb('clients') || [];
+      const chatIdById = new Map(refreshedClients.map(c => [Number(c.id), c.chat_id || '']));
       const allAgents = readDb('agents') || [];
       const agMap = new Map(allAgents.map(a => [Number(a.id), a.username]));
       slice = slice.map(item => {
         if (!item) return item;
         const copy = { ...item };
+        if (!copy.chat_id && chatIdById.has(Number(copy.id))) copy.chat_id = chatIdById.get(Number(copy.id));
         if (!copy.agent_username && copy.agent_id) copy.agent_username = agMap.get(Number(copy.agent_id)) || `agent_${copy.agent_id}`;
         return isOwner ? safeClientForOwner(copy) : safeUser(copy);
       });
@@ -13157,6 +13278,19 @@ function registerPaginatedCrud(routePath, tableName) {
       item.agent_username = sessionUser.username;
       item.whitenoise_access = agentHasWn ? Boolean(req.body && req.body.whitenoise_access) : false;
       item.app_links_access = agentHasAppLinks ? Boolean(req.body && req.body.app_links_access) : false;
+      const rawChatId = String((req.body && req.body.chat_id) || '').trim();
+      if (rawChatId) {
+        if (!CLIENT_CHAT_ID_RE.test(rawChatId)) {
+          return res.status(400).json({ error: 'Client Chat ID must be 6 to 8 digits (numbers only).' });
+        }
+        if (isClientChatIdTaken(rawChatId, null, data)) {
+          return res.status(400).json({ error: `Chat ID "${rawChatId}" is already assigned to another client. Choose a different 6–8 digit ID.` });
+        }
+        item.chat_id = rawChatId;
+      } else {
+        item.chat_id = generateUniqueClientChatId(data);
+      }
+      delete item.auto_generate_chat_id;
       delete item.manager_id;
       delete item.manager_username;
     } else if (tableName === 'payout_requests') {
@@ -13631,6 +13765,30 @@ function registerPaginatedCrud(routePath, tableName) {
     }
     if (['agents', 'clients'].includes(tableName) && ('app_links_access' in updates)) {
       updates.app_links_access = Boolean(updates.app_links_access);
+    }
+    if (tableName === 'clients') {
+      if (updates.auto_generate_chat_id === true) {
+        updates.chat_id = generateUniqueClientChatId(data);
+        delete updates.auto_generate_chat_id;
+      } else if ('chat_id' in updates) {
+        const rawChatId = String(updates.chat_id || '').trim();
+        if (!rawChatId) {
+          updates.chat_id = (existing && CLIENT_CHAT_ID_RE.test(String(existing.chat_id || '')))
+            ? String(existing.chat_id)
+            : generateUniqueClientChatId(data);
+        } else {
+          if (!CLIENT_CHAT_ID_RE.test(rawChatId)) {
+            return res.status(400).json({ error: 'Client Chat ID must be 6 to 8 digits (numbers only).' });
+          }
+          if (isClientChatIdTaken(rawChatId, id, data)) {
+            return res.status(400).json({ error: `Chat ID "${rawChatId}" is already assigned to another client. Choose a different 6–8 digit ID.` });
+          }
+          updates.chat_id = rawChatId;
+        }
+      } else if (existing && !CLIENT_CHAT_ID_RE.test(String(existing.chat_id || ''))) {
+        updates.chat_id = generateUniqueClientChatId(data);
+      }
+      delete updates.auto_generate_chat_id;
     }
     if (updates.password) {
       if (['users', 'agents', 'clients'].includes(tableName)) {
@@ -14279,6 +14437,159 @@ app.post(['/api/numbers/:id/move', '/api/numbers/move'], requireAuth, (req, res)
   }
 });
 
+// ── Centralized Returned / Used Numbers Vault Client Routing ───────────
+function resolveAgentReturnVaultClient(agentId, cache = null) {
+  const aid = Number(agentId || 0);
+  if (!aid) return null;
+  if (cache && cache.has(aid)) return cache.get(aid);
+  const agents = readDb('agents') || [];
+  const agRec = agents.find(a => a && Number(a.id) === aid);
+  const vaultId = agRec && agRec.return_vault_client_id ? Number(agRec.return_vault_client_id) : null;
+  let vaultClient = null;
+  if (vaultId) {
+    const clients = readDb('clients') || [];
+    vaultClient = clients.find(c => c && Number(c.id) === vaultId && Number(c.agent_id) === aid && c.status !== 'deleted') || null;
+  }
+  if (cache) cache.set(aid, vaultClient);
+  return vaultClient;
+}
+
+function applyClientReturnWithVault(numRec, returningClientId, nowIso, vaultCache = null) {
+  const aid = Number(numRec.agent_id || 0);
+  const vaultClient = aid ? resolveAgentReturnVaultClient(aid, vaultCache) : null;
+  if (vaultClient && Number(vaultClient.id) !== Number(returningClientId)) {
+    return {
+      updated: {
+        ...numRec,
+        client_id: Number(vaultClient.id),
+        client_username: vaultClient.username || '',
+        client_name: vaultClient.full_name || vaultClient.name || vaultClient.username || '',
+        user: vaultClient.username || '',
+        client_assigned_at: nowIso,
+        status: numRec.status === 'blocked' ? 'blocked' : 'assigned',
+        returned_to_vault: true,
+        returned_from_client_id: Number(returningClientId) || null,
+        returned_at: nowIso,
+        return_pending: false,
+        return_request_id: null
+      },
+      routedToVault: true,
+      vaultClient
+    };
+  }
+  return {
+    updated: {
+      ...numRec,
+      client_id: null,
+      client_name: '',
+      client_username: '',
+      user: '',
+      client_assigned_at: null,
+      return_pending: false,
+      return_request_id: null,
+      status: numRec.status === 'blocked' ? 'blocked' : (numRec.agent_id ? 'assigned' : 'active')
+    },
+    routedToVault: false,
+    vaultClient: null
+  };
+}
+
+// ── Client Whitenoise Return Request Submission (Requires Agent Approval) ─
+function createClientWhitenoiseReturnRequests({ clientUser, numbers, eligibleNums, skippedTodayCount = 0, skippedPendingCount = 0 }) {
+  const nowIso = new Date().toISOString();
+  const returnReqs = readDb('return_requests') || [];
+  const clients = readDb('clients') || [];
+  const clRec = clients.find(c => Number(c.id) === Number(clientUser.id)) || {};
+  const fallbackAgentId = Number(clRec.agent_id || clientUser.agent_id || 0) || null;
+
+  // Group by range so each range creates a crisp, reviewable Return Request for the Agent
+  const byRange = new Map();
+  for (const n of eligibleNums) {
+    const rKey = `${n.range_id || ''}|${String(n.range_name || n.range || n.country || 'Monthly Route').trim().toLowerCase()}`;
+    if (!byRange.has(rKey)) {
+      byRange.set(rKey, {
+        range_id: n.range_id ? Number(n.range_id) : null,
+        range_name: n.range_name || n.range || n.country || 'Monthly Route',
+        agent_id: Number(n.agent_id || fallbackAgentId || 0) || null,
+        items: []
+      });
+    }
+    byRange.get(rKey).items.push(n);
+  }
+
+  const createdReqs = [];
+  const numIdToReqId = new Map();
+
+  for (const grp of byRange.values()) {
+    const reqId = nextId(returnReqs, 'return_requests');
+    const numIds = grp.items.map(n => Number(n.id));
+    const numStrings = grp.items.map(n => String(n.number || '')).filter(Boolean);
+    const datesSet = new Set(grp.items.map(n => getNumberAssignedDateKey(n, true) || 'Unknown'));
+    const rec = {
+      id: reqId,
+      type: 'whitenoise_return',
+      status: 'pending',
+      agent_id: grp.agent_id,
+      client_id: Number(clientUser.id),
+      client_username: clientUser.username || clRec.username || '',
+      client_name: clRec.full_name || clRec.name || clientUser.username || '',
+      range_id: grp.range_id,
+      range_name: grp.range_name,
+      number_ids: numIds,
+      numbers_preview: numStrings.slice(0, 10),
+      dates: Array.from(datesSet).sort(),
+      quantity: numIds.length,
+      is_whitenoise: true,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    returnReqs.unshift(rec);
+    createdReqs.push(rec);
+    for (const nid of numIds) numIdToReqId.set(nid, reqId);
+
+    if (grp.agent_id) {
+      sendInstantNotification({
+        recipient_role: 'agent',
+        recipient_id: grp.agent_id,
+        title: `Whitenoise Return Request (${numIds.length} Numbers)`,
+        message: `Client ${rec.client_username} requested to return ${numIds.length} Monthly Route {W} number(s) in "${grp.range_name}". Review in Client Number Requests -> Return Requests.`,
+        type: 'request',
+        category: 'numbers',
+        action_page: 'client-requests',
+        status: 'pending',
+        count: numIds.length,
+        range_id: grp.range_id,
+        range_name: grp.range_name,
+        actor_role: 'Client',
+        actor_name: rec.client_username,
+        metadata: { return_request_id: reqId, count: numIds.length, is_whitenoise: true }
+      });
+    }
+  }
+
+  writeDb('return_requests', returnReqs);
+
+  const updatedNumbers = numbers.map(n => {
+    if (!n) return n;
+    const reqId = numIdToReqId.get(Number(n.id));
+    if (!reqId) return n;
+    return {
+      ...n,
+      return_pending: true,
+      return_request_id: reqId,
+      return_requested_at: nowIso
+    };
+  });
+
+  return {
+    updatedNumbers,
+    createdReqs,
+    count: eligibleNums.length,
+    skipped_today: skippedTodayCount,
+    skipped_pending: skippedPendingCount
+  };
+}
+
 // Explicit Return Number Endpoint (Holder returns number to upstream holder)
 app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-return'], requireAuth, (req, res) => {
   try {
@@ -14294,38 +14605,102 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
     let numbers = readDb('numbers') || [];
     const wnRangesMap = buildRangesLookupMap();
     const wnTags = getWhitenoiseProviderTags();
-
-    // Clients cannot self-return Whitenoise / Monthly Route numbers — they must contact their Agent
-    if (isClient) {
-      const hasWnToReturn = numbers.some(n => {
-        if (!n) return false;
-        if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return false;
-        if (Number(n.client_id) !== Number(sessionUser.id)) return false;
-        return isWhitenoiseRecord(n, wnRangesMap, wnTags);
-      });
-      if (hasWnToReturn) {
-        return res.status(400).json({ error: 'Monthly Route numbers cannot be returned directly. Please contact your Agent.' });
-      }
-    }
-
     const todayIso = getTodayUtcDateKey();
+    const nowIso = new Date().toISOString();
+    const vaultCache = new Map();
+
     let count = 0;
     let blockedTodayCount = 0;
+    let skippedPendingCount = 0;
+    let routedToVaultCount = 0;
+    let vaultClientName = '';
+    const wnEligible = [];
 
-    numbers = numbers.map(n => {
-      if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return n;
-
-      if (isClient) {
+    if (isClient) {
+      // Split Client selections into Whitenoise (requires Agent approval) vs Weekly/Regular (immediate with Vault routing)
+      numbers = numbers.map(n => {
+        if (!n) return n;
+        if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return n;
         if (Number(n.client_id) !== Number(sessionUser.id)) return n;
+
         const assignedDate = getNumberAssignedDateKey(n, true);
         if (assignedDate && assignedDate >= todayIso) {
           blockedTodayCount++;
           return n;
         }
+        if (isWhitenoiseRecord(n, wnRangesMap, wnTags)) {
+          if (n.return_pending) {
+            skippedPendingCount++;
+            return n;
+          }
+          wnEligible.push(n);
+          return n;
+        }
         count++;
-        // Client returns to Agent pool
-        return { ...n, client_id: null, client_name: '', client_username: '', user: '', client_assigned_at: null, status: n.status === 'blocked' ? 'blocked' : 'assigned' };
-      } else if (isAgent) {
+        const ret = applyClientReturnWithVault(n, sessionUser.id, nowIso, vaultCache);
+        if (ret.routedToVault) {
+          routedToVaultCount++;
+          vaultClientName = (ret.vaultClient && ret.vaultClient.username) || vaultClientName;
+        }
+        return ret.updated;
+      });
+
+      let wnSubmittedCount = 0;
+      let wnReqIds = [];
+      if (wnEligible.length > 0) {
+        const wnRes = createClientWhitenoiseReturnRequests({
+          clientUser: sessionUser,
+          numbers,
+          eligibleNums: wnEligible,
+          skippedTodayCount: blockedTodayCount,
+          skippedPendingCount
+        });
+        numbers = wnRes.updatedNumbers;
+        wnSubmittedCount = wnRes.count;
+        wnReqIds = wnRes.createdReqs.map(r => r.id);
+      }
+
+      if (count === 0 && wnSubmittedCount === 0) {
+        if (blockedTodayCount > 0) {
+          return res.status(400).json({
+            error: `Numbers allocated today (${todayIso}) cannot be returned on the same day. You can return them starting tomorrow.`
+          });
+        }
+        if (skippedPendingCount > 0) {
+          return res.status(400).json({
+            error: `${skippedPendingCount} selected Monthly Route {W} number(s) already have a pending Return Request awaiting Agent approval.`
+          });
+        }
+        return res.status(400).json({ error: 'No eligible numbers found to return.' });
+      }
+
+      writeDb('numbers', numbers);
+      const parts = [];
+      if (count > 0) parts.push(`Returned ${count} number(s).`);
+      if (wnSubmittedCount > 0) parts.push(`Submitted Return Request for ${wnSubmittedCount} Monthly Route {W} number(s) — awaiting your Agent's approval.`);
+      if (blockedTodayCount > 0) parts.push(`${blockedTodayCount} number(s) allocated today unlock tomorrow.`);
+      if (skippedPendingCount > 0) parts.push(`${skippedPendingCount} already pending approval.`);
+
+      return res.json({
+        success: true,
+        returned: count,
+        return_request_submitted: wnSubmittedCount > 0,
+        pending_approval: wnSubmittedCount > 0,
+        return_request_count: wnSubmittedCount,
+        return_request_ids: wnReqIds,
+        routed_to_vault: routedToVaultCount > 0,
+        vault_client_username: vaultClientName,
+        skipped_today: blockedTodayCount,
+        skipped_pending: skippedPendingCount,
+        message: parts.join(' ')
+      });
+    }
+
+    // Agent returns directly to Owner pool
+    numbers = numbers.map(n => {
+      if (!n) return n;
+      if (!idSet.has(String(n.id)) && !idSet.has(String(n.number))) return n;
+      if (isAgent) {
         if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
         const assignedDate = getNumberAssignedDateKey(n, false);
         if (assignedDate && assignedDate >= todayIso) {
@@ -14333,8 +14708,7 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
           return n;
         }
         count++;
-        // Agent returns directly to Owner pool
-        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, client_assigned_at: null, status: n.status === 'blocked' ? 'blocked' : 'active' };
+        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, client_assigned_at: null, return_pending: false, return_request_id: null, status: n.status === 'blocked' ? 'blocked' : 'active' };
       }
       return n;
     });
@@ -14385,9 +14759,6 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
     const wnRangesMap = buildRangesLookupMap();
     const wnTags = getWhitenoiseProviderTags();
     const isWnTarget = (matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(effRangeName);
-    if (isClient && isWnTarget) {
-      return res.status(400).json({ error: 'Monthly Route numbers cannot be returned directly. Please contact your Agent.' });
-    }
 
     const numbers = readDb('numbers') || [];
     const heldInRange = numbers.filter(n => {
@@ -14398,7 +14769,12 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
     });
 
     const groups = new Map();
+    let pendingReturnCount = 0;
     for (const n of heldInRange) {
+      if (isClient && isWnTarget && n.return_pending) {
+        pendingReturnCount++;
+        continue;
+      }
       const rawTs = isClient
         ? (n.client_assigned_at || n.assigned_at || n.assigned_date || n.allocated_at || n.created || '')
         : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
@@ -14443,6 +14819,9 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
       success: true,
       range_id: effRangeId,
       range_name: effRangeName,
+      is_whitenoise: isWnTarget,
+      requires_agent_approval: Boolean(isClient && isWnTarget),
+      pending_return_count: pendingReturnCount,
       today_date: todayIso,
       total_held: heldInRange.length,
       returnable_count: returnableCount,
@@ -14498,9 +14877,6 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
     const wnRangesMap = buildRangesLookupMap();
     const wnTags = getWhitenoiseProviderTags();
     const isWnTarget = (matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(effRangeName);
-    if (isClient && isWnTarget) {
-      return res.status(400).json({ error: 'Monthly Route numbers cannot be returned directly. Please contact your Agent.' });
-    }
 
     const todayIso = getTodayUtcDateKey();
     if (dateSet.size > 0) {
@@ -14514,11 +14890,67 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
     }
 
     let numbers = readDb('numbers') || [];
+    const nowIso = new Date().toISOString();
+    const vaultCache = new Map();
+
+    // Client Whitenoise Return -> Submit Return Request to Agent for Approval
+    if (isClient && isWnTarget) {
+      const wnEligible = [];
+      let skippedTodayCount = 0;
+      let skippedPendingCount = 0;
+      for (const n of numbers) {
+        if (!n) continue;
+        if (Number(n.client_id) !== Number(sessionUser.id)) continue;
+        if (!matchesRangeRef(n, effRangeId, effRangeName)) continue;
+        const dateStr = getNumberAssignedDateKey(n, true) || 'Unknown';
+        let matchesDate = false;
+        if (dateSet.size > 0) matchesDate = dateSet.has(dateStr);
+        else if (dateStr !== 'Unknown') matchesDate = (!cleanFrom || dateStr >= cleanFrom) && (!cleanTo || dateStr <= cleanTo);
+        if (!matchesDate) continue;
+        if (dateStr !== 'Unknown' && dateStr >= todayIso) { skippedTodayCount++; continue; }
+        if (n.return_pending) { skippedPendingCount++; continue; }
+        wnEligible.push(n);
+      }
+      if (!wnEligible.length) {
+        if (skippedTodayCount > 0) {
+          return res.status(400).json({ error: `Numbers allocated today (${todayIso}) cannot be returned on the same day. You can return them starting tomorrow.` });
+        }
+        if (skippedPendingCount > 0) {
+          return res.status(400).json({ error: `Selected numbers already have a pending Return Request awaiting Agent approval.` });
+        }
+        return res.status(400).json({ error: `No eligible Monthly Route {W} numbers matched the selected date(s) in "${effRangeName}".` });
+      }
+      const wnRes = createClientWhitenoiseReturnRequests({
+        clientUser: sessionUser,
+        numbers,
+        eligibleNums: wnEligible,
+        skippedTodayCount,
+        skippedPendingCount
+      });
+      writeDb('numbers', wnRes.updatedNumbers);
+      logAudit(sessionUser.username, 'Whitenoise Return Request', `Requested return of ${wnRes.count} Monthly Route {W} number(s) in "${effRangeName}"`, 'Numbers');
+      return res.json({
+        success: true,
+        return_request_submitted: true,
+        pending_approval: true,
+        returned: 0,
+        returned_count: 0,
+        request_count: wnRes.count,
+        request_ids: wnRes.createdReqs.map(r => r.id),
+        range_id: effRangeId,
+        range_name: effRangeName,
+        message: `Return request submitted for ${wnRes.count} Monthly Route {W} number(s) in "${effRangeName}". Numbers will remain on your panel until your Agent approves.`
+      });
+    }
+
     const returnedIds = [];
     const returnedDates = new Set();
     let remainingInRange = 0;
     let skippedTodayCount = 0;
     let upstreamAgentId = null;
+    let routedToVault = false;
+    let vaultClientName = '';
+    let vaultClientId = null;
 
     numbers = numbers.map(n => {
       if (!n) return n;
@@ -14555,15 +14987,13 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       returnedDates.add(dateStr);
       if (isClient) {
         if (n.agent_id) upstreamAgentId = Number(n.agent_id);
-        return {
-          ...n,
-          client_id: null,
-          client_name: '',
-          client_username: '',
-          user: '',
-          client_assigned_at: null,
-          status: n.agent_id ? 'assigned' : 'active'
-        };
+        const ret = applyClientReturnWithVault(n, sessionUser.id, nowIso, vaultCache);
+        if (ret.routedToVault && ret.vaultClient) {
+          routedToVault = true;
+          vaultClientId = Number(ret.vaultClient.id);
+          vaultClientName = ret.vaultClient.username || '';
+        }
+        return ret.updated;
       }
       return {
         ...n,
@@ -14577,6 +15007,8 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
         assigned_at: null,
         assigned_date: null,
         client_assigned_at: null,
+        return_pending: false,
+        return_request_id: null,
         status: 'active'
       };
     });
@@ -14592,7 +15024,6 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
 
     writeDb('numbers', numbers);
 
-    const nowIso = new Date().toISOString();
     const datesArr = Array.from(returnedDates).sort();
     try {
       const transfers = readDb('number_transfers') || [];
@@ -14601,14 +15032,15 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
         from_user_id: sessionUser.id,
         from_username: sessionUser.username,
         from_role: isClient ? 'Client' : 'Agent',
-        to_user_id: isClient ? upstreamAgentId : 1,
-        to_username: isClient ? 'Agent Pool' : 'Owner Pool',
-        to_role: isClient ? 'Agent' : 'Owner',
+        to_user_id: isClient ? (routedToVault ? vaultClientId : upstreamAgentId) : 1,
+        to_username: isClient ? (routedToVault ? `Vault (${vaultClientName})` : 'Agent Pool') : 'Owner Pool',
+        to_role: isClient ? (routedToVault ? 'Vault Client' : 'Agent') : 'Owner',
         range_id: effRangeId,
         range_name: effRangeName,
         dates_returned: datesArr,
         number_ids: returnedIds,
         count: returnedIds.length,
+        routed_to_vault: routedToVault,
         timestamp: nowIso,
         action: 'return_by_date',
         status: 'completed'
@@ -14616,29 +15048,31 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       writeDb('number_transfers', transfers);
     } catch (_) {}
 
-    logAudit(sessionUser.username, 'Return Range Numbers by Date', `Returned ${returnedIds.length} number(s) from "${effRangeName}" (${datesArr.join(', ')})`, 'Numbers');
+    logAudit(sessionUser.username, 'Return Range Numbers by Date', `Returned ${returnedIds.length} number(s) from "${effRangeName}" (${datesArr.join(', ')})${routedToVault ? ` -> Vault: ${vaultClientName}` : ''}`, 'Numbers');
 
     sendInstantNotification({
       recipient_role: isClient ? (upstreamAgentId ? 'agent' : 'owner') : 'owner',
       recipient_id: isClient ? (upstreamAgentId || null) : null,
       title: `${isClient ? 'Client' : 'Agent'} Returned ${returnedIds.length} Numbers`,
-      message: `${isClient ? 'Client' : 'Agent'} ${sessionUser.username} returned ${returnedIds.length} number(s) in range "${effRangeName}" (Dates: ${datesArr.join(', ')}).`,
+      message: `${isClient ? 'Client' : 'Agent'} ${sessionUser.username} returned ${returnedIds.length} number(s) in range "${effRangeName}" (Dates: ${datesArr.join(', ')}).${routedToVault ? ` Routed automatically to Vault Client "${vaultClientName}".` : ''}`,
       type: 'revocation',
       category: 'numbers',
-      action_page: isClient ? 'numbers' : 'numbers',
+      action_page: 'numbers',
       status: 'returned',
       count: returnedIds.length,
       range_id: effRangeId,
       range_name: effRangeName,
       actor_role: isClient ? 'Client' : 'Agent',
       actor_name: sessionUser.username,
-      metadata: { dates: datesArr, returned: returnedIds.length }
+      metadata: { dates: datesArr, returned: returnedIds.length, routed_to_vault: routedToVault, vault_client_username: vaultClientName }
     });
 
     res.json({
       success: true,
       returned: returnedIds.length,
       returned_count: returnedIds.length,
+      routed_to_vault: routedToVault,
+      vault_client_username: vaultClientName,
       range_id: effRangeId,
       range_name: effRangeName,
       dates_returned: datesArr,
@@ -14646,6 +15080,184 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Client Whitenoise Return Requests (Agent Approval / Rejection) ───────
+app.get('/api/return-requests', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const sRole = normRole(sessionUser.role);
+  const all = readDb('return_requests') || [];
+  let list = [];
+  if (sRole === 'agent') {
+    list = all.filter(r => r && Number(r.agent_id) === Number(sessionUser.id));
+  } else if (sRole === 'client') {
+    list = all.filter(r => r && Number(r.client_id) === Number(sessionUser.id));
+  } else if (sRole === 'owner' || sRole === 'admin') {
+    list = all;
+  } else {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const statusFilter = String(req.query.status || '').trim().toLowerCase();
+  if (statusFilter) {
+    list = list.filter(r => String(r.status || 'pending').toLowerCase() === statusFilter);
+  }
+  list.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  res.json({
+    success: true,
+    data: list,
+    pending_count: list.filter(r => String(r.status || 'pending').toLowerCase() === 'pending').length
+  });
+});
+
+app.post('/api/return-requests/:id/approve', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    if (normRole(sessionUser.role) !== 'agent') {
+      return res.status(403).json({ error: 'Forbidden. Only the managing Agent can approve Client return requests.' });
+    }
+    const reqId = Number(req.params.id);
+    const all = readDb('return_requests') || [];
+    const idx = all.findIndex(r => r && Number(r.id) === reqId);
+    if (idx === -1) return res.status(404).json({ error: 'Return request not found.' });
+    const rec = all[idx];
+    if (Number(rec.agent_id) !== Number(sessionUser.id)) {
+      return res.status(403).json({ error: 'Forbidden. This return request belongs to another Agent.' });
+    }
+    if (String(rec.status || 'pending').toLowerCase() !== 'pending') {
+      return res.status(409).json({ error: `Return request #${reqId} is already ${rec.status}.` });
+    }
+
+    const targetIds = new Set((rec.number_ids || []).map(Number));
+    const nowIso = new Date().toISOString();
+    const vaultCache = new Map();
+    let numbers = readDb('numbers') || [];
+    let releasedCount = 0;
+    let routedToVault = false;
+    let vaultClientName = '';
+
+    numbers = numbers.map(n => {
+      if (!n || !targetIds.has(Number(n.id))) return n;
+      if (Number(n.client_id) !== Number(rec.client_id)) {
+        // Already detached earlier; clear stale flag
+        return n.return_pending ? { ...n, return_pending: false, return_request_id: null } : n;
+      }
+      releasedCount++;
+      const ret = applyClientReturnWithVault(n, rec.client_id, nowIso, vaultCache);
+      if (ret.routedToVault && ret.vaultClient) {
+        routedToVault = true;
+        vaultClientName = ret.vaultClient.username || '';
+      }
+      return ret.updated;
+    });
+
+    writeDb('numbers', numbers);
+    all[idx] = {
+      ...rec,
+      status: 'approved',
+      approved_count: releasedCount,
+      approved_by: sessionUser.username,
+      approved_at: nowIso,
+      routed_to_vault: routedToVault,
+      vault_client_username: vaultClientName,
+      updated_at: nowIso
+    };
+    writeDb('return_requests', all);
+
+    logAudit(sessionUser.username, 'Approved Whitenoise Return', `Approved return of ${releasedCount} number(s) from ${rec.client_username} (${rec.range_name})${routedToVault ? ` -> Vault: ${vaultClientName}` : ''}`, 'Numbers');
+
+    sendInstantNotification({
+      recipient_role: 'client',
+      recipient_id: Number(rec.client_id),
+      title: `Return Approved (${releasedCount} Numbers)`,
+      message: `Your Agent approved your Monthly Route {W} return request of ${releasedCount} number(s) in "${rec.range_name}".`,
+      type: 'approval',
+      category: 'numbers',
+      action_page: 'my-numbers',
+      status: 'approved',
+      count: releasedCount,
+      range_id: rec.range_id,
+      range_name: rec.range_name,
+      actor_role: 'Agent',
+      actor_name: sessionUser.username
+    });
+
+    return res.json({
+      success: true,
+      returned: releasedCount,
+      routed_to_vault: routedToVault,
+      vault_client_username: vaultClientName,
+      request: all[idx],
+      message: routedToVault
+        ? `Approved! ${releasedCount} number(s) moved to Vault Client "${vaultClientName}".`
+        : `Approved! ${releasedCount} number(s) returned to your Agent Pool.`
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/return-requests/:id/reject', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    if (normRole(sessionUser.role) !== 'agent') {
+      return res.status(403).json({ error: 'Forbidden. Only the managing Agent can reject Client return requests.' });
+    }
+    const reqId = Number(req.params.id);
+    const all = readDb('return_requests') || [];
+    const idx = all.findIndex(r => r && Number(r.id) === reqId);
+    if (idx === -1) return res.status(404).json({ error: 'Return request not found.' });
+    const rec = all[idx];
+    if (Number(rec.agent_id) !== Number(sessionUser.id)) {
+      return res.status(403).json({ error: 'Forbidden. This return request belongs to another Agent.' });
+    }
+    if (String(rec.status || 'pending').toLowerCase() !== 'pending') {
+      return res.status(409).json({ error: `Return request #${reqId} is already ${rec.status}.` });
+    }
+
+    const reason = String((req.body && req.body.reason) || '').trim().slice(0, 240) || 'Rejected by Agent';
+    const targetIds = new Set((rec.number_ids || []).map(Number));
+    const nowIso = new Date().toISOString();
+    let numbers = readDb('numbers') || [];
+    numbers = numbers.map(n => {
+      if (!n || !targetIds.has(Number(n.id))) return n;
+      if (Number(n.return_request_id) === reqId || n.return_pending) {
+        return { ...n, return_pending: false, return_request_id: null };
+      }
+      return n;
+    });
+    writeDb('numbers', numbers);
+
+    all[idx] = {
+      ...rec,
+      status: 'rejected',
+      rejected_reason: reason,
+      rejected_by: sessionUser.username,
+      rejected_at: nowIso,
+      updated_at: nowIso
+    };
+    writeDb('return_requests', all);
+
+    logAudit(sessionUser.username, 'Rejected Whitenoise Return', `Rejected return request #${reqId} from ${rec.client_username}: ${reason}`, 'Numbers');
+
+    sendInstantNotification({
+      recipient_role: 'client',
+      recipient_id: Number(rec.client_id),
+      title: `Return Request Declined (${rec.range_name})`,
+      message: `Your Agent declined your Monthly Route {W} return request (${rec.quantity} numbers). Reason: ${reason}`,
+      type: 'rejection',
+      category: 'numbers',
+      action_page: 'my-numbers',
+      status: 'rejected',
+      range_id: rec.range_id,
+      range_name: rec.range_name,
+      actor_role: 'Agent',
+      actor_name: sessionUser.username
+    });
+
+    return res.json({ success: true, request: all[idx], message: 'Return request declined.' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -15362,9 +15974,6 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
 
     if (!isOwner && !wnAllowed && isWnMatched) {
       return res.status(403).json({ error: 'Forbidden. CDR 2 / Monthly Route access is not enabled for your account.' });
-    }
-    if (isClient && isWnMatched) {
-      return res.status(400).json({ error: 'Monthly Route numbers are request-only. Please submit a request to your Agent.' });
     }
 
     const ptInfo = matchedRng ? resolveRangeActivePayterms(matchedRng, isWnMatched) : { active_payterms: ['Weekly'], primary_payterm: 'Weekly' };
@@ -16320,12 +16929,10 @@ app.get('/api/notifications/header-feed', (req, res) => {
       recentSms = [];
     }
 
-    const latestSms = recentSms.slice(0, 8).map(s => {
-      if (sr === 'client') {
-        return { ...s, cli: serverMaskCli(s.cli || s.app || s.sender) };
-      }
-      return s;
-    });
+    const latestSms = recentSms.slice(0, 8).map(s => ({
+      ...s,
+      cli: String(s.cli || s.app || s.sender || '—').trim() || '—'
+    }));
 
     // Latest Owner Broadcast (for popup modal on open)
     const latestBroadcast = (Array.isArray(announcements) ? announcements : []).find(a => {
@@ -18398,7 +19005,7 @@ app.get('/api/sms/client-logs', requireAuth, (req, res) => {
   let data = getScopedSmsList(req).map(s => {
     const item = enrich(s);
     if (!isOwner) {
-      item.cli = serverMaskCli(item.cli || item.app || item.sender);
+      item.cli = String(item.cli || item.app || item.sender || '—').trim() || '—';
       delete item.company_rate;
       delete item.company_cost;
       delete item.owner_amount;
@@ -18417,7 +19024,7 @@ app.get('/api/sms/client-logs', requireAuth, (req, res) => {
 function serverMaskCli(v) {
   const s = String(v ?? '').trim();
   if (!s || s === '—') return '—';
-  return s.slice(0, 1) + 'XXXXX';
+  return s;
 }
 
 function cleanSmsHierarchyName(val) {
@@ -18709,7 +19316,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
         }
         const dtNorm = String(s.timestamp || s.date || s.date_ymd || s.created || '').replace('T', ' ').slice(0, 19);
         const rawCli = String(s.cli || s.service || s.app || s.from || s.sender || '');
-        const visibleCli = isOwner ? rawCli : serverMaskCli(rawCli);
+        const visibleCli = rawCli;
         const visibleProvider = maskProviderLabel(s.provider || '', isOwner, wnTags);
         const statusLower = String(s.status || '').toLowerCase();
         const causeDisplay = s.cause || (statusLower === 'delivered' || statusLower === 'success' ? 'Success' : (s.status || ''));
@@ -18946,7 +19553,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
         for (const g of groupedResult) {
           const row = [
             ...validKeys.map(k => {
-              if (k === 'cli' && !isOwner) return serverMaskCli(g[k]);
+              if (k === 'cli') return g[k] || '—';
               if (k === 'agent' || k === 'client') return g[k] || '';
               return g[k] || '—';
             }),
@@ -18997,7 +19604,6 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
           delete copy.profit;
           delete copy.agent_payout;
         }
-        if (copy.cli) copy.cli = serverMaskCli(copy.cli);
         return copy;
       });
 
@@ -19113,7 +19719,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
       const dtStr = useExcelCsv ? (s.date_ymd || extractDateStr(s) || '') : (s.timestamp || '').replace('T', ' ').slice(0, 19);
       const provStr = maskProviderLabel(s.provider || '—', isOwner, wnTags) || '—';
       const rngStr = scrubWhitenoiseName(s.range_name || s.range_label || s.range || s.country || '—', isOwner);
-      const cliStr = isOwner ? (s.cli || s.service || '') : serverMaskCli(s.cli || s.service || '');
+      const cliStr = String(s.cli || s.service || s.app || s.sender || '').trim();
       const smsCnt = (s.sms_count != null && Number(s.sms_count) > 0) ? Math.round(Number(s.sms_count)) : 1;
       const agpVal = Number(s.agent_payout ?? s.agent_rate ?? 0);
       const cpVal = Number(s.client_payout ?? s.client_amount ?? 0);
@@ -19175,8 +19781,7 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     delete item.ip;
 
     if (!isOwner) {
-      item.cli = serverMaskCli(item.cli || item.app || item.sender);
-      if (item.service) item.service = serverMaskCli(item.service);
+      item.cli = String(item.cli || item.app || item.sender || '—').trim() || '—';
       item.provider = maskProviderLabel(item.provider || '', false, wnTags);
       if (item.company) item.company = maskProviderLabel(item.company, false, wnTags);
       if (item.source && isWhitenoiseText(item.source)) item.source = 'monthly_route';
@@ -20947,7 +21552,7 @@ const ALLOWED_BACKUP_TABLES = new Set([
   'users.json', 'agents.json', 'clients.json', 'numbers.json', 'sms_ranges.json',
   'rate_card.json', 'sms_log.json', 'whitenoise_daily_stats.json', 'whitenoise_upload_batches.json',
   'number_ownership_ledger.json', 'payout_requests.json', 'payout_rates.json', 'credit_notes.json',
-  'bank_accounts.json', 'agent_client_rates.json', 'number_requests.json', 'number_transfers.json',
+  'bank_accounts.json', 'agent_client_rates.json', 'number_requests.json', 'return_requests.json', 'number_transfers.json',
   'allocation_history.json', 'announcements.json', 'notifications.json', 'support_tickets.json',
   'chat_conversations.json', 'chat_messages.json', 'settings.json', 'permissions.json',
   'services.json', 'app_links.json', 'cli_routes.json', 'blacklist.json', 'blocked_ips.json',
@@ -21361,6 +21966,84 @@ function isActorOnline(key) {
   return (CHAT_ONLINE_COUNTS.get(key) || 0) > 0;
 }
 
+// ── Unique 6–8 Digit Client Group Chat ID System ──────────────────────
+const CLIENT_CHAT_ID_RE = /^\d{6,8}$/;
+
+function isClientChatIdTaken(chatId, excludeClientId = null, clientsList = null) {
+  const clean = String(chatId || '').trim();
+  if (!clean) return false;
+  const clients = Array.isArray(clientsList) ? clientsList : (readDb('clients') || []);
+  return clients.some(c => c && (excludeClientId == null || Number(c.id) !== Number(excludeClientId)) && String(c.chat_id || '').trim() === clean);
+}
+
+function generateUniqueClientChatId(clientsList = null) {
+  const clients = Array.isArray(clientsList) ? clientsList : (readDb('clients') || []);
+  const used = new Set(clients.filter(Boolean).map(c => String(c.chat_id || '').trim()).filter(Boolean));
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const candidate = String(crypto.randomInt(100000, 1000000));
+    if (!used.has(candidate)) return candidate;
+  }
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const candidate = String(crypto.randomInt(1000000, 100000000));
+    if (!used.has(candidate)) return candidate;
+  }
+  return String(Date.now()).slice(-8);
+}
+
+function ensureAllClientsHaveChatId() {
+  try {
+    const clients = readDb('clients') || [];
+    if (!Array.isArray(clients) || !clients.length) return clients;
+    let changed = false;
+    const seen = new Set();
+    for (const c of clients) {
+      if (!c) continue;
+      const cur = String(c.chat_id || '').trim();
+      if (CLIENT_CHAT_ID_RE.test(cur) && !seen.has(cur)) {
+        seen.add(cur);
+      } else {
+        let nextCid = generateUniqueClientChatId(clients);
+        while (seen.has(nextCid)) nextCid = String(crypto.randomInt(100000, 10000000));
+        c.chat_id = nextCid;
+        seen.add(nextCid);
+        changed = true;
+      }
+    }
+    if (changed) writeDb('clients', clients);
+    return clients;
+  } catch (e) {
+    console.error('[CHAT-ID] ensureAllClientsHaveChatId error:', e.message);
+    return readDb('clients') || [];
+  }
+}
+
+function ensureSingleClientChatId(clientId) {
+  const cid = Number(clientId || 0);
+  if (!cid) return '';
+  const clients = readDb('clients') || [];
+  const idx = clients.findIndex(c => c && Number(c.id) === cid);
+  if (idx === -1) return '';
+  const cur = String(clients[idx].chat_id || '').trim();
+  if (CLIENT_CHAT_ID_RE.test(cur)) return cur;
+  const fresh = generateUniqueClientChatId(clients);
+  clients[idx].chat_id = fresh;
+  writeDb('clients', clients);
+  return fresh;
+}
+
+function resolveClientChatIdByKey(actorKey, fallbackChatId = '') {
+  const cleanFallback = String(fallbackChatId || '').trim();
+  if (CLIENT_CHAT_ID_RE.test(cleanFallback)) return cleanFallback;
+  const [role, rawId] = String(actorKey || '').split(':');
+  if (role !== 'client') return '';
+  const id = Number(rawId);
+  if (!Number.isFinite(id) || id <= 0) return '';
+  return ensureSingleClientChatId(id) || String(100000 + (id % 899999));
+}
+
+// Backfill any existing VPS clients missing a 6-8 digit Chat ID on boot
+setImmediate(() => { try { ensureAllClientsHaveChatId(); } catch (_) {} });
+
 function resolveLiveChatActor(sessionUser) {
   if (!sessionUser) return null;
   const role = chatActorRole(sessionUser.role);
@@ -21393,14 +22076,16 @@ function resolveLiveChatActor(sessionUser) {
       agent_id: id
     };
   }
-  // Client — authoritative lookup from clients table so agent_id is always current
+  // Client — authoritative lookup from clients table so agent_id & chat_id are always current
   const clients = readDb('clients') || [];
   const rec = clients.find(c => Number(c.id) === id);
   const agentId = rec ? Number(rec.agent_id || 0) : Number(sessionUser.agent_id || 0);
+  const chatId = ensureSingleClientChatId(id) || (rec && rec.chat_id) || '';
   return {
     key: `client:${id}`,
     role: 'client',
     id,
+    chat_id: chatId,
     username: (rec && rec.username) || sessionUser.username || `Client #${id}`,
     display_name: (rec && (rec.name || rec.username)) || sessionUser.username || `Client #${id}`,
     avatar_url: (rec && rec.avatar_url) || '',
@@ -21428,7 +22113,8 @@ function resolveActorSummaryByKey(actorKey) {
     const clients = readDb('clients') || [];
     const c = clients.find(x => Number(x.id) === id);
     if (!c) return null;
-    return { key: actorKey, role: 'client', id, username: c.username || `Client #${id}`, display_name: c.name || c.username || `Client #${id}`, avatar_url: c.avatar_url || '', agent_id: Number(c.agent_id || 0) || null, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    const chatId = ensureSingleClientChatId(id) || c.chat_id || '';
+    return { key: actorKey, role: 'client', id, chat_id: chatId, username: c.username || `Client #${id}`, display_name: c.name || c.username || `Client #${id}`, avatar_url: c.avatar_url || '', agent_id: Number(c.agent_id || 0) || null, online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
   }
   return null;
 }
@@ -21597,15 +22283,37 @@ function projectMessageForActor(msg, actor, conv) {
   delete out.deleted_preview_body;
   delete out.deleted_preview_image;
 
-  // Strict Client Group Privacy: Clients in agent_group never see peer client usernames or IDs
-  if (actor && actor.role === 'client' && conv && conv.type === 'agent_group') {
-    if (out.sender_role === 'client' && out.sender_key !== actor.key) {
-      out.sender_name = 'Member';
-      out.sender_key = 'client:hidden';
-      out.sender_username = '';
-    }
-    if (out.reply_to && out.reply_to.sender_key && out.reply_to.sender_key !== actor.key && String(out.reply_to.sender_key).startsWith('client:')) {
-      out.reply_to = { ...out.reply_to, sender_name: 'Member', sender_key: 'client:hidden' };
+  // Group Chat Identity Projection:
+  // - Clients NEVER see peer client usernames or member counts; peer messages show ONLY unique 6-8 digit ID ("ID: 482910")
+  // - Agent (Group Admin) sees both username and unique Chat ID
+  if (conv && conv.type === 'agent_group') {
+    const senderChatId = out.sender_role === 'client'
+      ? resolveClientChatIdByKey(out.sender_key, out.sender_chat_id)
+      : '';
+    if (senderChatId) out.sender_chat_id = senderChatId;
+
+    if (actor && actor.role === 'client') {
+      if (out.sender_role === 'client' && out.sender_key !== actor.key) {
+        const cid = senderChatId || 'Member';
+        out.sender_name = cid !== 'Member' ? `ID: ${cid}` : 'Member';
+        out.sender_key = cid !== 'Member' ? `client:cid:${cid}` : 'client:hidden';
+        out.sender_username = '';
+      }
+      if (out.reply_to && out.reply_to.sender_key && out.reply_to.sender_key !== actor.key && String(out.reply_to.sender_key).startsWith('client:')) {
+        const replyCid = resolveClientChatIdByKey(out.reply_to.sender_key, out.reply_to.sender_chat_id);
+        out.reply_to = {
+          ...out.reply_to,
+          sender_role: 'client',
+          sender_chat_id: replyCid || '',
+          sender_name: replyCid ? `ID: ${replyCid}` : 'Member',
+          sender_key: replyCid ? `client:cid:${replyCid}` : 'client:hidden'
+        };
+      }
+    } else if (actor && actor.role === 'agent') {
+      if (out.reply_to && out.reply_to.sender_key && String(out.reply_to.sender_key).startsWith('client:')) {
+        const replyCid = resolveClientChatIdByKey(out.reply_to.sender_key, out.reply_to.sender_chat_id);
+        out.reply_to = { ...out.reply_to, sender_role: 'client', sender_chat_id: replyCid || '' };
+      }
     }
   }
 
@@ -21615,6 +22323,35 @@ function projectMessageForActor(msg, actor, conv) {
     out.deleted_preview_image = msg.deleted_original_image ? { ...msg.deleted_original_image } : null;
   }
   return out;
+}
+
+function broadcastChatMessageForConv(conv, msgRecord, extra = {}) {
+  const participants = Array.isArray(conv && conv.participants) ? conv.participants : [];
+  if (!participants.length) return;
+  if (conv.type === 'agent_group') {
+    for (const pKey of participants) {
+      const [pRole, pRawId] = String(pKey || '').split(':');
+      const pActor = { key: pKey, role: pRole, id: Number(pRawId) };
+      const projected = projectMessageForActor(msgRecord, pActor, conv);
+      sendChatWsEvent({
+        type: 'chat:message',
+        conversation_id: Number(conv.id),
+        conversation_type: conv.type,
+        conversation_title: conv.title,
+        ...extra,
+        message: projected
+      }, [pKey]);
+    }
+    return;
+  }
+  sendChatWsEvent({
+    type: 'chat:message',
+    conversation_id: Number(conv.id),
+    conversation_type: conv.type,
+    conversation_title: msgRecord.sender_name,
+    ...extra,
+    message: msgRecord
+  }, participants);
 }
 
 function safeUnlinkChatMedia(convId, imgObj) {
@@ -22042,14 +22779,20 @@ function hydrateConversationForActor(conv, actor, allMessages) {
   const closedForMember = Boolean(conv.type === 'agent_group' && scheduleState && scheduleState.is_closed && actor.role !== 'agent');
   const adminOnlyLocked = Boolean(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent');
 
-  const safePinnedSender = pinnedMsg
-    ? ((hideGroupMembersForClient && pinnedMsg.sender_role === 'client' && pinnedMsg.sender_key !== actor.key) ? 'Member' : pinnedMsg.sender_name)
-    : '';
-  const safeLastSenderName = visibleLastMsg
-    ? ((hideGroupMembersForClient && visibleLastMsg.sender_role === 'client' && visibleLastMsg.sender_key !== actor.key) ? 'Member' : (visibleLastMsg.sender_name || ''))
-    : '';
+  const formatGroupPeerLabel = (m) => {
+    if (!m) return '';
+    if (hideGroupMembersForClient && m.sender_role === 'client' && m.sender_key !== actor.key) {
+      const cid = resolveClientChatIdByKey(m.sender_key, m.sender_chat_id);
+      return cid ? `ID: ${cid}` : 'Member';
+    }
+    return m.sender_name || '';
+  };
+  const safePinnedSender = pinnedMsg ? formatGroupPeerLabel(pinnedMsg) : '';
+  const safeLastSenderName = visibleLastMsg ? formatGroupPeerLabel(visibleLastMsg) : '';
   const safeLastSenderKey = visibleLastMsg
-    ? ((hideGroupMembersForClient && visibleLastMsg.sender_role === 'client' && visibleLastMsg.sender_key !== actor.key) ? 'client:hidden' : (visibleLastMsg.sender_key || ''))
+    ? ((hideGroupMembersForClient && visibleLastMsg.sender_role === 'client' && visibleLastMsg.sender_key !== actor.key)
+        ? (`client:cid:${resolveClientChatIdByKey(visibleLastMsg.sender_key, visibleLastMsg.sender_chat_id) || 'hidden'}`)
+        : (visibleLastMsg.sender_key || ''))
     : '';
 
   return {
@@ -22281,6 +23024,8 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
       reply_to = {
         id: Number(targetMsg.id),
         sender_key: targetMsg.sender_key,
+        sender_role: targetMsg.sender_role || '',
+        sender_chat_id: targetMsg.sender_role === 'client' ? resolveClientChatIdByKey(targetMsg.sender_key, targetMsg.sender_chat_id) : '',
         sender_name: targetMsg.sender_name,
         body_snippet: targetSnippet
       };
@@ -22293,6 +23038,7 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
     conversation_id: convId,
     sender_key: actor.key,
     sender_role: actor.role,
+    sender_chat_id: actor.role === 'client' ? (actor.chat_id || ensureSingleClientChatId(actor.id)) : '',
     sender_name: actor.display_name || actor.username,
     body,
     reply_to,
@@ -22315,18 +23061,11 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
 
   const alert_priority = computeChatAlertPriority(conv, actor.role);
 
-  // Strictly broadcast ONLY to members of this conversation (NEVER leaks to Owner or other Agents)
-  sendChatWsEvent({
-    type: 'chat:message',
-    conversation_id: convId,
-    conversation_type: conv.type,
-    conversation_title: conv.type === 'agent_group' ? conv.title : msgRecord.sender_name,
-    alert_priority,
-    message: msgRecord
-  }, conv.participants);
+  // Strictly broadcast ONLY to members of this conversation (per-recipient projected for agent_group privacy)
+  broadcastChatMessageForConv(conv, msgRecord, { alert_priority });
 
   res.status(201).json({
-    message: msgRecord,
+    message: projectMessageForActor(msgRecord, actor, conv),
     conversation: hydrateConversationForActor(conv, actor, allMessages)
   });
 });
@@ -22434,6 +23173,8 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
           reply_to = {
             id: Number(targetMsg.id),
             sender_key: targetMsg.sender_key,
+            sender_role: targetMsg.sender_role || '',
+            sender_chat_id: targetMsg.sender_role === 'client' ? resolveClientChatIdByKey(targetMsg.sender_key, targetMsg.sender_chat_id) : '',
             sender_name: targetMsg.sender_name,
             body_snippet: targetSnippet
           };
@@ -22446,6 +23187,7 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
         conversation_id: convId,
         sender_key: actor.key,
         sender_role: actor.role,
+        sender_chat_id: actor.role === 'client' ? (actor.chat_id || ensureSingleClientChatId(actor.id)) : '',
         sender_name: actor.display_name || actor.username,
         body,
         image: {
@@ -22474,18 +23216,10 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
       writeDb('chat_conversations', latestConvs);
 
       const alert_priority = computeChatAlertPriority(latestConv, actor.role);
-      sendChatWsEvent({
-        type: 'chat:message',
-        conversation_id: convId,
-        conversation_type: latestConv.type,
-        conversation_title: latestConv.type === 'agent_group' ? latestConv.title : msgRecord.sender_name,
-        alert_priority,
-        client_temp_id: clientTempId,
-        message: msgRecord
-      }, latestConv.participants);
+      broadcastChatMessageForConv(latestConv, msgRecord, { alert_priority, client_temp_id: clientTempId });
 
       return res.status(201).json({
-        message: msgRecord,
+        message: projectMessageForActor(msgRecord, actor, latestConv),
         conversation: hydrateConversationForActor(latestConv, actor, allMessages)
       });
     } catch (err) {

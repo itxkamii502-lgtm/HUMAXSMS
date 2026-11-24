@@ -118,8 +118,8 @@ try {
   // 8. Notifications header-feed scoping & IDOR
   const clFeed = await srv.api('GET', '/api/notifications/header-feed', { cookie: cl1Login.cookie });
   const hasOtherClientSms = (clFeed.data?.recent_sms || []).some(s => String(s.number).includes('233500000007'));
-  const clSmsMasked = (clFeed.data?.recent_sms || []).length > 0 && (clFeed.data?.recent_sms || []).every(s => !s.cli || (s.cli !== 'WhatsApp' && /^[A-Za-z0-9]XXXXX$/.test(s.cli)));
-  check('Security: client header-feed excludes other client SMS and masks CLI', clFeed.status === 200 && !hasOtherClientSms && clSmsMasked);
+  const clSmsUnmasked = (clFeed.data?.recent_sms || []).length > 0 && (clFeed.data?.recent_sms || []).every(s => !s.cli || !/XXXXX$/.test(s.cli));
+  check('Security: client header-feed excludes other client SMS and exposes full unmasked CLI', clFeed.status === 200 && !hasOtherClientSms && clSmsUnmasked);
 
   const notifList = await srv.api('GET', '/api/notifications', { cookie: ag1Login.cookie });
   const seesOtherAgNotif = (notifList.data?.data || []).some(n => n.id === 301);

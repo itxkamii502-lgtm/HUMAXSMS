@@ -50,224 +50,101 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: #f8fafc;
+  background-color: #101228;
   background-image:
-    radial-gradient(circle at 20% 0%, rgba(29, 78, 216, 0.08) 0%, transparent 52%),
-    radial-gradient(circle at 85% 100%, rgba(5, 150, 105, 0.08) 0%, transparent 52%),
-    linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
-  color: #0f172a;
-  padding: 16px;
+    radial-gradient(circle at 20% 10%, rgba(74, 193, 58, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 80% 90%, rgba(99, 132, 224, 0.12) 0%, transparent 50%),
+    linear-gradient(180deg, #0d1024 0%, #131630 100%);
+  color: #1f2937;
+  padding: 18px 14px;
   position: relative;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
-/* ── Clean White Card ── */
+/* ── Reference-Matched Centered Login Card ── */
 .login-card {
-  width: 290.478px;
-  height: 485.863px;
-  max-width: 460px;
-  background: #ffffff;
-  border-radius: 18px;
-  border: 1px solid #e2e8f0;
+  width: min(392px, calc(100vw - 26px));
+  min-height: 560px;
+  background: linear-gradient(180deg, #b8c9ed 0%, #abc0e8 100%);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
   box-shadow:
-    0 20px 40px -15px rgba(15, 23, 42, 0.1),
-    0 4px 12px -2px rgba(15, 23, 42, 0.04);
-  padding: 28px 23px 24px;
+    0 24px 56px rgba(4, 7, 20, 0.55),
+    0 6px 18px rgba(4, 7, 20, 0.3);
+  padding: 46px 34px 44px;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  animation: cardFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  align-items: center;
+  animation: cardFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
   position: relative;
   box-sizing: border-box;
 }
 @keyframes cardFadeIn {
-  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+@media (prefers-reduced-motion: reduce) {
+  .login-card { animation: none; }
+}
 
-/* ── Brand Logo Wrap ── */
+/* ── Prominent Brand Logo ── */
 .brand-logo-wrap {
   width: 100%;
-  max-width: 240px;
-  height: 84px;
-  max-height: 88px;
-  margin: 0 auto 14px auto;
+  max-width: 248px;
+  height: 158px;
+  margin: 0 auto 28px auto;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
+  flex-shrink: 0;
 }
 .brand-logo-img {
-  max-width: 220px !important;
-  max-height: 84px !important;
+  max-width: 236px !important;
+  max-height: 156px !important;
   width: auto !important;
-  height: 84px !important;
+  height: 154px !important;
   object-fit: contain !important;
-  transition: transform 0.2s ease;
+  display: block;
+  filter: drop-shadow(0 6px 14px rgba(15, 23, 42, 0.14));
+  transition: transform 0.18s ease;
 }
 .brand-logo-img:hover {
-  transform: scale(1.03);
+  transform: scale(1.025);
 }
 
-/* ── Header Typography ── */
+/* ── Heading ("Account Login") ── */
 .login-title {
-  font-size: 17px;
-  font-weight: 800;
-  color: #0f172a;
-  text-align: center;
-  letter-spacing: -0.3px;
-  margin-bottom: 2px;
+  display: none !important;
 }
 .login-sub {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: #64748b;
+  width: 100%;
+  font-size: 27px;
+  font-weight: 800;
+  color: #242933;
   text-align: center;
-  margin-top: 0;
-  margin-bottom: 18px;
+  letter-spacing: -0.45px;
+  line-height: 1.2;
+  margin: 0 0 30px 0;
 }
 
 /* ── Error Notification ── */
 .login-err {
-  background: #fef2f2;
-  color: #dc2626;
-  border: 1px solid #fecaca;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 12.5px;
-  font-weight: 600;
-  margin-bottom: 14px;
-  text-align: center;
-}
-
-/* ── Input Group & Fields ── */
-.pill-input-wrap, .input-wrap {
-  position: relative;
-  height: 42px;
-  background: #f8fafc;
-  border: 1px solid #cbd5e1;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  margin-bottom: 12px;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.pill-input-wrap:focus-within, .input-wrap:focus-within {
-  background: #ffffff;
-  border-color: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
-}
-.pill-icon, .input-icon {
-  color: #94a3b8;
-  font-size: 14px;
-  margin-right: 10px;
-  width: 16px;
-  text-align: center;
-  flex-shrink: 0;
-  transition: color 0.15s ease;
-}
-.pill-input-wrap:focus-within .pill-icon, .input-wrap:focus-within .input-icon {
-  color: #2563eb;
-}
-.pill-input-wrap input, .input-wrap input {
   width: 100%;
-  height: 100%;
-  background: transparent;
-  border: none;
-  font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: #0f172a;
-  outline: none;
-}
-.pill-input-wrap input::placeholder, .input-wrap input::placeholder {
-  color: #94a3b8;
-  font-weight: 400;
-}
-.eye-toggle {
-  background: transparent;
-  border: none;
-  color: #94a3b8;
-  font-size: 14px;
-  cursor: pointer;
-  padding: 4px;
-  margin-left: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s;
-}
-.eye-toggle:hover {
-  color: #475569;
-}
-
-/* ── Inline Clean Captcha ── */
-.captcha-container {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 2px;
+  background: rgba(254, 242, 242, 0.96);
+  color: #b91c1c;
+  border: 1px solid #fca5a5;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 600;
   margin-bottom: 16px;
-  padding: 8px 12px;
-  background: #f8fafc;
-  border-radius: 10px;
-  border: 1px solid #cbd5e1;
-  user-select: none;
-}
-.captcha-label-wrap {
-  display: flex;
-  align-items: center;
-}
-.captcha-question {
-  font-size: 13px;
-  font-weight: 700;
-  color: #1e293b;
-  font-family: 'Consolas', 'SFMono-Regular', 'Roboto Mono', monospace;
-  letter-spacing: 0.3px;
-}
-.captcha-box-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.captcha-input {
-  width: 80px;
-  height: 32px;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-family: 'Consolas', 'SFMono-Regular', 'Roboto Mono', monospace;
-  font-size: 13px;
-  font-weight: 700;
-  color: #0f172a;
   text-align: center;
-  outline: none;
-  transition: all 0.2s ease;
-}
-.captcha-input:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2.5px rgba(37, 99, 235, 0.16);
-}
-.captcha-reload {
-  background: transparent;
-  border: none;
-  color: #64748b;
-  font-size: 13px;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-}
-.captcha-reload:hover {
-  color: #2563eb;
-  transform: rotate(45deg);
 }
 
-/* ── Form Layout & Alignment ── */
+/* ── Form Layout ── */
 #loginForm {
   width: 100%;
   display: flex;
@@ -275,122 +152,188 @@ body {
   align-items: center;
 }
 #loginForm .pill-input-wrap,
-#loginForm #twoFaWrap,
-#loginForm .captcha-container {
+#loginForm #twoFaWrap {
   width: 100%;
-  max-width: 243.258px;
 }
 
-/* ── Primary Action Button ── */
-.login-btn-green, .login-btn-primary {
+/* ── Full Pill Capsule Input Fields ── */
+.pill-input-wrap, .input-wrap {
+  position: relative;
+  height: 54px;
+  background: #e7e8eb;
+  border: 1.5px solid transparent;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  padding: 0 22px;
+  margin-bottom: 16px;
+  transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.pill-input-wrap:focus-within, .input-wrap:focus-within {
+  background: #f5f6f8;
+  border-color: #46bd36;
+  box-shadow: 0 0 0 3.5px rgba(70, 189, 54, 0.22);
+}
+.pill-icon, .input-icon {
+  color: #52525b;
+  font-size: 16px;
+  margin-right: 14px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+.pill-input-wrap:focus-within .pill-icon, .input-wrap:focus-within .input-icon {
+  color: #369e28;
+}
+.pill-input-wrap input, .input-wrap input {
   width: 100%;
-  height: 42px;
-  border-radius: 10px;
+  height: 100%;
+  background: transparent;
   border: none;
-  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  color: #1f2937;
+  outline: none;
+}
+.pill-input-wrap input::placeholder, .input-wrap input::placeholder {
+  color: #9498a1;
+  font-weight: 500;
+}
+.pill-input-wrap input:-webkit-autofill,
+.pill-input-wrap input:-webkit-autofill:hover,
+.pill-input-wrap input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 40px #e7e8eb inset;
+  -webkit-text-fill-color: #1f2937;
+  transition: background-color 5000s ease-in-out 0s;
+}
+.eye-toggle {
+  background: transparent;
+  border: none;
+  color: #71717a;
+  font-size: 17px;
+  cursor: pointer;
+  width: 36px;
+  height: 36px;
+  margin-right: -6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.eye-toggle:hover {
+  color: #27272a;
+  background: rgba(15, 23, 42, 0.06);
+}
+.eye-toggle:focus-visible {
+  outline: 2px solid #46bd36;
+  outline-offset: 2px;
+}
+
+/* ── 2FA Hint ── */
+#twoFaWrap {
+  margin-bottom: 16px;
+}
+#twoFaWrap .pill-input-wrap {
+  margin-bottom: 6px;
+  border-color: rgba(70, 189, 54, 0.55);
+}
+#twoFaHint {
+  font-size: 12px;
+  color: #1e293b;
+  font-weight: 600;
+  padding: 0 14px;
+  text-align: center;
+}
+
+/* ── Primary Vibrant Green Pill LOGIN Button ── */
+.login-btn-green, .login-btn-primary, #submitBtn {
+  width: 100%;
+  height: 54px;
+  margin-top: 8px;
+  border-radius: 9999px;
+  border: none;
+  background: linear-gradient(135deg, #52c641 0%, #43b633 100%) !important;
   color: #ffffff !important;
   font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.9px;
   text-transform: uppercase;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
-  transition: all 0.18s ease;
+  box-shadow: 0 8px 20px rgba(67, 182, 51, 0.34);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
 }
-#submitBtn {
-  width: 243.258px;
-  height: 52.9902px;
-  margin: 4px auto 0;
-  align-self: center;
-  font-size: 14px;
-}
-.login-btn-green:hover, .login-btn-primary:hover {
-  background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%) !important;
+.login-btn-green:hover, .login-btn-primary:hover, #submitBtn:hover {
+  background: linear-gradient(135deg, #47ba37 0%, #37a329 100%) !important;
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+  box-shadow: 0 10px 24px rgba(55, 163, 41, 0.42);
 }
-.login-btn-green:active, .login-btn-primary:active {
+.login-btn-green:active, .login-btn-primary:active, #submitBtn:active {
   transform: translateY(0);
 }
-.login-btn-green:disabled, .login-btn-primary:disabled {
-  opacity: 0.65;
+.login-btn-green:focus-visible, .login-btn-primary:focus-visible, #submitBtn:focus-visible {
+  outline: 3px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+.login-btn-green:disabled, .login-btn-primary:disabled, #submitBtn:disabled {
+  opacity: 0.68;
   cursor: not-allowed;
   transform: none;
 }
 
-/* ── Mobile 100vh / 100dvh Zero-Scroll Fit ── */
+/* ── Mobile Fit (Mirrors Full-Height Reference Frame) ── */
 @media (max-width: 480px) {
   body {
-    padding: 8px 10px;
+    padding: 16px 12px;
   }
   .login-card {
-    padding: 26px 22px 22px;
-    border-radius: 16px;
-    max-width: 390px;
+    width: calc(100vw - 24px);
+    max-width: 392px;
+    min-height: min(580px, calc(100dvh - 32px));
+    padding: 40px 24px 38px;
+    border-radius: 14px;
   }
   .brand-logo-wrap {
-    height: 68px;
-    max-height: 72px;
-    max-width: 200px;
-    margin-bottom: 10px;
+    height: 146px;
+    margin-bottom: 24px;
   }
   .brand-logo-img {
-    height: 68px !important;
-    max-height: 68px !important;
-    max-width: 190px !important;
-  }
-  .login-title {
-    font-size: 15px;
+    height: 144px !important;
+    max-height: 146px !important;
+    max-width: 220px !important;
   }
   .login-sub {
-    font-size: 11.5px;
-    margin-bottom: 14px;
+    font-size: 25px;
+    margin-bottom: 26px;
   }
-  .pill-input-wrap, .input-wrap {
-    height: 38px;
-    padding: 0 10px;
-    margin-bottom: 10px;
-  }
-  .pill-input-wrap input, .input-wrap input {
-    font-size: 16px;
-  }
-  .captcha-container {
-    padding: 6px 10px;
-    margin-bottom: 12px;
-  }
-  .captcha-question {
-    font-size: 12px;
-  }
-  .captcha-input {
-    width: 72px;
-    height: 28px;
-    font-size: 12px;
-  }
-  .login-btn-green, .login-btn-primary {
-    height: 38px;
-    font-size: 12.5px;
+  .pill-input-wrap, .input-wrap, .login-btn-green, .login-btn-primary, #submitBtn {
+    height: 52px;
   }
 }
 @media (max-width: 360px) {
   .login-card {
-    padding: 22px 18px 18px;
-    border-radius: 14px;
+    padding: 32px 18px 30px;
   }
   .brand-logo-wrap {
-    height: 58px;
-    max-height: 62px;
-    max-width: 175px;
-    margin-bottom: 8px;
+    height: 128px;
+    margin-bottom: 20px;
   }
   .brand-logo-img {
-    height: 58px !important;
-    max-height: 58px !important;
-    max-width: 165px !important;
+    height: 126px !important;
+    max-height: 128px !important;
+  }
+  .login-sub {
+    font-size: 23px;
+    margin-bottom: 22px;
   }
 }
 </style>
@@ -400,28 +343,27 @@ body {
 <main class="login-card">
   <!-- Brand Logo -->
   <div class="brand-logo-wrap">
-    <img id="login-logo-img" class="brand-logo-img" src="/static/img/humex-sms-logo.png" style="height:84px;max-height:84px;max-width:220px;width:auto;object-fit:contain;display:block;" onerror="this.onerror=null;this.src='/static/img/humex-sms-logo.svg';" alt="HUMAX SMS">
+    <img id="login-logo-img" class="brand-logo-img" src="/static/img/humex-sms-logo.png" onerror="this.onerror=null;this.src='/static/img/humex-sms-logo.svg';" alt="HUMAX SMS" referrerpolicy="no-referrer">
   </div>
 
-  <!-- Title & Subtitle -->
+  <!-- Hidden legacy title node kept for brand script compatibility -->
   <div class="login-title">HUMAX SMS</div>
-  <div class="login-sub">Sign in to your account</div>
-
+  <h1 class="login-sub">Account Login</h1>
 
   <!-- Error Notification -->
-  <div id="errorMsg" class="login-err" style="display:none;"></div>
+  <div id="errorMsg" class="login-err" style="display:none;" role="alert"></div>
 
   <!-- Login Form -->
   <form id="loginForm" novalidate>
     <!-- Username -->
     <div class="pill-input-wrap">
-      <i class="fas fa-user pill-icon"></i>
+      <i class="far fa-user pill-icon" aria-hidden="true"></i>
       <input type="text" id="username" name="username" placeholder="Username" autocomplete="username" required>
     </div>
 
     <!-- Password -->
     <div class="pill-input-wrap">
-      <i class="fas fa-lock pill-icon"></i>
+      <i class="fas fa-lock pill-icon" aria-hidden="true"></i>
       <input type="password" id="password" name="password" placeholder="Password" autocomplete="current-password" required>
       <button type="button" class="eye-toggle" id="togglePassword" aria-label="Toggle password visibility">
         <i class="far fa-eye" id="eyeIcon"></i>
@@ -429,18 +371,17 @@ body {
     </div>
 
     <!-- 2FA Code Input (Revealed if account has 2FA enabled) -->
-    <div id="twoFaWrap" style="display:none; margin-bottom: 12px;">
-      <div class="pill-input-wrap" style="border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);">
-        <i class="fas fa-shield-alt pill-icon" style="color: #2563eb;"></i>
+    <div id="twoFaWrap" style="display:none;">
+      <div class="pill-input-wrap">
+        <i class="fas fa-shield-alt pill-icon" style="color: #369e28;" aria-hidden="true"></i>
         <input type="text" id="twoFaCode" name="two_fa_code" placeholder="Enter 6-digit 2FA code" autocomplete="one-time-code" maxlength="8">
       </div>
-      <div id="twoFaHint" style="font-size: 11.5px; color: #1d4ed8; font-weight: 600; margin-top: 4px; padding-left: 8px;">Enter your 2FA code (trusted on this browser for 3 hours).</div>
+      <div id="twoFaHint">Enter your 2FA code (trusted on this browser for 3 hours).</div>
     </div>
 
     <!-- Primary LOGIN Button -->
     <button type="submit" class="login-btn-green login-btn-primary" id="submitBtn">
-      <span>SIGN IN</span>
-      <i class="fas fa-arrow-right" style="font-size:12px;"></i>
+      <span>LOGIN</span>
     </button>
 
   </form>
@@ -505,7 +446,7 @@ const username = document.getElementById('username');
 const password = document.getElementById('password');
 const errorMsg = document.getElementById('errorMsg');
 const submitBtn = document.getElementById('submitBtn');
-const defaultBtnHtml = '<span>SIGN IN</span><i class="fas fa-arrow-right" style="font-size:12px;"></i>';
+const defaultBtnHtml = '<span>LOGIN</span>';
 const togglePassword = document.getElementById('togglePassword');
 const eyeIcon = document.getElementById('eyeIcon');
 
@@ -567,6 +508,7 @@ loginForm.addEventListener('submit', async (e) => {
     if (data.require_2fa) {
       const wrap = document.getElementById('twoFaWrap');
       if (wrap) wrap.style.display = 'block';
+      document.querySelector('.login-card')?.classList.add('has-2fa');
       if (data.error) {
         showError(data.error);
       } else {

@@ -1816,14 +1816,25 @@
 
       const hidePeerClientIdentity = Boolean(isGroup && ((state.me && state.me.role === 'client') || conv.hide_members));
       const senderLabel = isGroup && !isMine
-        ? (hidePeerClientIdentity && m.sender_role !== 'agent'
-            ? ''
-            : `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)}${m.sender_role === 'agent' ? ' · Admin' : ''}</div>`)
+        ? (() => {
+            if (m.sender_role === 'agent') {
+              return `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)} · Admin</div>`;
+            }
+            if (hidePeerClientIdentity) {
+              // Server projects peer client sender_name to "ID: 482910" (never username)
+              const peerIdLabel = m.sender_chat_id ? `ID: ${m.sender_chat_id}` : (m.sender_name || 'Member');
+              return `<div class="zy-chat-sender zy-chat-sender-id" style="color:${colorForKey(m.sender_key)};">${esc(peerIdLabel)}</div>`;
+            }
+            const idSuffix = m.sender_chat_id ? ` · ID ${m.sender_chat_id}` : '';
+            return `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)}${esc(idSuffix)}</div>`;
+          })()
         : '';
 
       const replyWho = (hidePeerClientIdentity && m.reply_to && m.reply_to.sender_role === 'client')
-        ? 'Member'
-        : (m.reply_to && m.reply_to.sender_name) || 'Message';
+        ? (m.reply_to.sender_chat_id ? `ID: ${m.reply_to.sender_chat_id}` : (m.reply_to.sender_name || 'Member'))
+        : (m.reply_to && m.reply_to.sender_name
+            ? (m.reply_to.sender_chat_id && !hidePeerClientIdentity ? `${m.reply_to.sender_name} · ID ${m.reply_to.sender_chat_id}` : m.reply_to.sender_name)
+            : 'Message');
       const replyBlock = m.reply_to && !m.deleted
         ? `<div class="zy-chat-quote" data-jump-msg="${m.reply_to.id}">
              <div class="zy-chat-quote-who">${esc(replyWho)}</div>
@@ -2178,7 +2189,7 @@
                     ${renderAvatarInner(m.avatar_url || '', m.display_name || m.username, false, Boolean(m.online))}
                   </div>
                   <div class="zy-gd-member-info">
-                    <div class="zy-gd-member-name">${esc(m.display_name || m.username)}</div>
+                    <div class="zy-gd-member-name">${esc(m.display_name || m.username)}${m.role === 'client' && m.chat_id ? ` <span style="font-size:11px;font-weight:700;color:#2563eb;font-family:monospace;">(ID: ${esc(m.chat_id)})</span>` : ''}</div>
                     <div class="zy-gd-member-sub">${m.role === 'agent' ? 'Group Admin (Agent)' : (m.online ? 'Client · Online' : 'Client')}</div>
                   </div>
                   ${isAdmin && m.role === 'client'

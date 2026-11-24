@@ -232,6 +232,17 @@
               <input type="text" class="zy-pro-input is-role" value="${escapeHtml(user.role || 'User')}" readonly>
             </div>
           </div>
+          ${String(user.role || '').toLowerCase() === 'client' && user.chat_id ? `
+          <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--sp-border,#e2e8f0);">
+            <label class="zy-pro-label">Group Chat ID (6–8 Digits)</label>
+            <div style="display:flex;align-items:center;gap:8px;max-width:340px;">
+              <input type="text" id="pro-client-chat-id" class="zy-pro-input" style="font-family:monospace;font-weight:800;letter-spacing:0.08em;" value="${escapeHtml(user.chat_id)}" readonly>
+              <button type="button" class="zy-pro-btn zy-pro-btn-primary" style="white-space:nowrap;" onclick="navigator.clipboard&&navigator.clipboard.writeText('${escapeHtml(user.chat_id)}');if(typeof toast==='function')toast('Chat ID copied!','success');">
+                <i class="far fa-copy"></i> Copy
+              </button>
+            </div>
+            <div class="zy-pro-hint">In Agent Group Chat, other members only see this unique ID (never your username). Managed by your Agent.</div>
+          </div>` : ''}
         </div>
 
         <!-- CARD 3: APPEARANCE & THEME -->

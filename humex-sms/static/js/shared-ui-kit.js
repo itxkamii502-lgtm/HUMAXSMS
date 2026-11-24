@@ -3227,15 +3227,19 @@ window.zyGetMyNumDisplayMode = function() {
 window.zyResetMyNumDisplayMode = function() {
   window._zyMyNumDisplayMode = 'full';
   const sel = document.getElementById('zy-my-num-display-mode');
-  if (sel) sel.value = 'full';
+  if (sel) {
+    sel.value = 'full';
+    sel.classList.remove('is-local');
+  }
 };
 
 window.zySetMyNumDisplayMode = function(mode, onChangeCb) {
   window._zyMyNumDisplayMode = mode === 'local' ? 'local' : 'full';
   const sel = document.getElementById('zy-my-num-display-mode');
-  if (sel && sel.value !== window._zyMyNumDisplayMode) sel.value = window._zyMyNumDisplayMode;
-  const wrap = sel ? sel.closest('.zy-num-disp-bar') : document.querySelector('.zy-num-disp-bar');
-  if (wrap) wrap.classList.toggle('is-local', window._zyMyNumDisplayMode === 'local');
+  if (sel) {
+    if (sel.value !== window._zyMyNumDisplayMode) sel.value = window._zyMyNumDisplayMode;
+    sel.classList.toggle('is-local', window._zyMyNumDisplayMode === 'local');
+  }
   if (typeof onChangeCb === 'function') onChangeCb(window._zyMyNumDisplayMode);
 };
 
@@ -3317,20 +3321,13 @@ window.zyCopyVisibleMyNumbers = function(tableId) {
   }
 };
 
-window.zyRenderMyNumDisplayControl = function(onChangeHandlerExpr, tableId) {
+window.zyRenderMyNumDisplayControl = function(onChangeHandlerExpr) {
   const mode = window.zyGetMyNumDisplayMode();
-  const tid = tableId || 'dt-numbers';
   return `
-    <div class="zy-num-disp-bar${mode === 'local' ? ' is-local' : ''}" title="Switch between Full Number (with country code) and Local Number (without country code). Resets on page refresh.">
-      <label class="zy-num-disp-lbl" for="zy-my-num-display-mode"><i class="fas fa-scissors"></i> Display:</label>
-      <select id="zy-my-num-display-mode" class="zy-num-disp-select" aria-label="Number Display Format" onchange="${onChangeHandlerExpr}(this.value)">
-        <option value="full"${mode === 'full' ? ' selected' : ''}>Full Num (With Code)</option>
-        <option value="local"${mode === 'local' ? ' selected' : ''}>Local Num (Hide Prefix)</option>
-      </select>
-      <button type="button" class="zy-num-disp-copy-btn" onclick="window.zyCopyVisibleMyNumbers('${tid}')" title="Copy selected or visible numbers in current display format">
-        <i class="far fa-copy"></i> Copy
-      </button>
-    </div>`;
+    <select id="zy-my-num-display-mode" class="zy-num-disp-select${mode === 'local' ? ' is-local' : ''}" aria-label="Number Display Format" title="Switch between Full Number (with country code) and Local Number (without country code). Resets on page refresh." onchange="${onChangeHandlerExpr}(this.value)">
+      <option value="full"${mode === 'full' ? ' selected' : ''}>Full Num (With Code)</option>
+      <option value="local"${mode === 'local' ? ' selected' : ''}>Local Num (Hide Prefix)</option>
+    </select>`;
 };
 
 // ── Shared Date Column Cell for My Numbers (Owner / Agent / Client) ──────

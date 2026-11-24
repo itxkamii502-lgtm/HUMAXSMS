@@ -1858,6 +1858,106 @@ function sanitizeNumberForRole(numObj, isOwner = false, wnTags = null) {
   return copy;
 }
 
+function buildNumberRateDisplayContext(wnTags = null, rangesMap = null) {
+  const fx = getUsdToPkrRate();
+  const rMap = rangesMap || buildRangesLookupMap();
+  const tags = wnTags || getWhitenoiseProviderTags();
+  const clientsById = new Map();
+  for (const c of (readDb('clients') || [])) {
+    if (c && c.id != null) clientsById.set(Number(c.id), c);
+  }
+  const acrByAgent = new Map();
+  for (const r of getAllAgentClientRates()) {
+    if (!r || r.agent_id == null) continue;
+    const aid = Number(r.agent_id);
+    if (!acrByAgent.has(aid)) acrByAgent.set(aid, []);
+    acrByAgent.get(aid).push(r);
+  }
+  return { fx, rangesMap: rMap, wnTags: tags, clientsById, acrByAgent };
+}
+
+function enrichNumberClientRateForDisplay(numObj, ctx) {
+  if (!numObj || typeof numObj !== 'object') return numObj;
+  if (numObj.client_id == null || numObj.client_id === '') return numObj;
+
+  const { fx, rangesMap, wnTags, clientsById, acrByAgent } = ctx || buildNumberRateDisplayContext();
+  const clRec = clientsById.get(Number(numObj.client_id)) || null;
+  const effAgentId = Number(numObj.agent_id || (clRec && clRec.agent_id) || 0);
+
+  let rng = null;
+  if (numObj.range_id != null && numObj.range_id !== '') {
+    rng = rangesMap.get(`id:${Number(numObj.range_id)}`) || null;
+  }
+  const rawRangeName = String(numObj.range_name || numObj.range || '').trim();
+  if (!rng && rawRangeName) {
+    rng = rangesMap.get(`name:${rawRangeName.toLowerCase()}`) || null;
+  }
+
+  const isWn = isWhitenoiseRecord(numObj, rangesMap, wnTags);
+  const payterm = isWn ? 'Monthly' : (numObj.client_payterm || numObj.payterm || 'Weekly');
+
+  let acr = null;
+  if (effAgentId && acrByAgent.has(effAgentId)) {
+    const agRates = acrByAgent.get(effAgentId);
+    const lookupRid = numObj.range_id != null && numObj.range_id !== '' ? Number(numObj.range_id) : (rng ? Number(rng.id) : null);
+    if (lookupRid) {
+      acr = agRates.find(r => Number(r.range_id) === lookupRid) || null;
+    }
+    if (!acr) {
+      const lookupName = (rawRangeName || (rng && (rng.range_name || rng.name)) || '').trim().toLowerCase();
+      if (lookupName) {
+        acr = agRates.find(r => String(r.range_name || '').trim().toLowerCase() === lookupName) || null;
+      }
+    }
+  }
+
+  const explicitUsdRaw = numObj.client_rate ?? numObj.client_payout;
+  const hasExplicitUsd = explicitUsdRaw != null && Number(explicitUsdRaw) > 0;
+  const numFromAcr = numObj.rate_source === 'agent_client_rates';
+
+  let clientRatePkr = 0;
+  let clientRateUsd = 0;
+
+  if (hasExplicitUsd && !numFromAcr) {
+    clientRateUsd = round6(explicitUsdRaw);
+    clientRatePkr = (numObj.client_rate_pkr != null && Number(numObj.client_rate_pkr) > 0)
+      ? round2(numObj.client_rate_pkr)
+      : round2(clientRateUsd * fx);
+  } else if (acr && Number(acr.client_rate_pkr) > 0) {
+    clientRatePkr = getAgentRangeClientPkrRate(acr, payterm);
+    clientRateUsd = round6(clientRatePkr / fx);
+  } else if (numObj.client_rate_pkr != null && Number(numObj.client_rate_pkr) > 0) {
+    clientRatePkr = round2(numObj.client_rate_pkr);
+    clientRateUsd = hasExplicitUsd ? round6(explicitUsdRaw) : round6(clientRatePkr / fx);
+  } else if (hasExplicitUsd) {
+    clientRateUsd = round6(explicitUsdRaw);
+    clientRatePkr = round2(clientRateUsd * fx);
+  } else if (numObj.payout != null && Number(numObj.payout) > 0) {
+    clientRateUsd = round6(numObj.payout);
+    clientRatePkr = round2(clientRateUsd * fx);
+  } else if (clRec && clRec.client_rate != null && Number(clRec.client_rate) > 0) {
+    clientRateUsd = round6(clRec.client_rate);
+    clientRatePkr = round2(clientRateUsd * fx);
+  } else {
+    const fallbackAgentUsd = Number(numObj.agent_rate || (rng && (rng.agent_rate || rng.rate || rng.payout)) || 0);
+    if (fallbackAgentUsd > 0) {
+      clientRateUsd = round6(fallbackAgentUsd);
+      clientRatePkr = round2(clientRateUsd * fx);
+    }
+  }
+
+  if (clientRatePkr > 0) {
+    return {
+      ...numObj,
+      client_rate_pkr: clientRatePkr,
+      client_rate: clientRateUsd,
+      client_payout: clientRateUsd,
+      fx_usd_to_pkr: fx
+    };
+  }
+  return numObj;
+}
+
 function isWhitenoiseRecord(obj, rangesMap = null, wnTags = null) {
   if (!obj || typeof obj !== 'object') return false;
   if (obj.is_whitenoise === true) return true;
@@ -13074,7 +13174,8 @@ function registerPaginatedCrud(routePath, tableName) {
       });
     } else if (tableName === 'numbers' && !isOwner) {
       const wnTags = getWhitenoiseProviderTags();
-      slice = slice.map(item => sanitizeNumberForRole(item, false, wnTags));
+      const rateCtx = buildNumberRateDisplayContext(wnTags);
+      slice = slice.map(item => sanitizeNumberForRole(enrichNumberClientRateForDisplay(item, rateCtx), false, wnTags));
     } else if (tableName === 'numbers' && isOwner) {
       // Owner visibility stops at the Agent tier: resolve managing Agent name and hide private Client names
       const allAgents = readDb('agents') || [];
@@ -16043,18 +16144,41 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const toAllocate = available.slice(0, qty);
     const now = new Date().toISOString();
 
+    const clRecForStamp = isClient
+      ? ((readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser)
+      : null;
+
     toAllocate.forEach(n => {
       const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
       const effTerm = isWn ? 'Monthly' : targetPayterm;
       const ptMeta = getPaytermMeta(effTerm);
       if (isClient) {
+        const effAgId = Number(sessionUser.agent_id || (clRecForStamp && clRecForStamp.agent_id) || n.agent_id || 0) || null;
+        const rngForStamp = (n.range_id != null && wnRangesMap.get(`id:${Number(n.range_id)}`)) || matchedRng || null;
+        const agentRateUsd = Number(n.agent_rate || (rngForStamp && (rngForStamp.agent_rate || rngForStamp.rate || rngForStamp.payout)) || 0);
+        const rp = resolveClientRatePair({
+          agentId: effAgId,
+          rangeId: n.range_id || (rngForStamp && rngForStamp.id) || effMatchRid,
+          rangeName: n.range_name || (rngForStamp && (rngForStamp.range_name || rngForStamp.name)) || effMatchRname,
+          payterm: ptMeta.key,
+          agentRateUsd,
+          clientRecord: clRecForStamp
+        });
         n.client_id = sessionUser.id;
         n.client_username = sessionUser.username;
         n.client_name = sessionUser.full_name || sessionUser.username;
         n.user = sessionUser.username;
-        n.agent_id = sessionUser.agent_id || n.agent_id || null;
+        n.agent_id = effAgId;
         n.client_payterm = ptMeta.key;
         n.client_assigned_at = now;
+        if (rp && !rp.error && Number(rp.client_rate_pkr) > 0) {
+          n.client_rate = rp.client_rate;
+          n.client_payout = rp.client_rate;
+          n.client_rate_pkr = rp.client_rate_pkr;
+          n.client_currency = rp.client_currency || 'PKR';
+          n.fx_usd_to_pkr = rp.fx_usd_to_pkr;
+          n.rate_source = rp.source || 'agent_client_rates';
+        }
       } else if (isAgent) {
         n.agent_id = sessionUser.id;
         n.agent_username = sessionUser.username;
@@ -18988,7 +19112,8 @@ app.get('/api/client/:client_id/numbers', requireAuth, (req, res) => {
   }
   if (!isOwner) {
     const wnTags = getWhitenoiseProviderTags();
-    numbers = numbers.map(n => sanitizeNumberForRole(n, false, wnTags));
+    const rateCtx = buildNumberRateDisplayContext(wnTags);
+    numbers = numbers.map(n => sanitizeNumberForRole(enrichNumberClientRateForDisplay(n, rateCtx), false, wnTags));
   }
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 100;

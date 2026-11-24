@@ -531,6 +531,16 @@ window.zyClientFetchWhitenoiseOtp = async function(id, btn) {
 
 function zyRenderClientNumbers(list) {
   const fx = Number(window._zyClientFx || 280);
+  const rcById = new Map();
+  const rcByName = new Map();
+  (Array.isArray(ZY_RANGES) ? ZY_RANGES : []).forEach(rc => {
+    if (!rc) return;
+    const rid = rc.range_id != null ? Number(rc.range_id) : (rc.id != null ? Number(rc.id) : null);
+    if (rid) rcById.set(rid, rc);
+    const rname = String(rc.range_name || rc.name || rc.country || '').trim().toLowerCase();
+    if (rname) rcByName.set(rname, rc);
+  });
+
   ZY_NUMROWS = (list || []).map(n => {
     const dateCell = typeof zyFormatNumberDateCell === 'function'
       ? zyFormatNumberDateCell(n, 'client')
@@ -549,9 +559,26 @@ function zyRenderClientNumbers(list) {
     const numHtml = isBlockedNum
       ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${zyEsc(displayNumber)}</span>`
       : rawNumHtml;
-    const ratePkr = n.client_rate_pkr != null
-      ? Number(n.client_rate_pkr)
-      : (n.payout != null ? Number(n.payout) * fx : null);
+
+    let ratePkr = null;
+    if (n.client_rate_pkr != null && Number(n.client_rate_pkr) > 0) {
+      ratePkr = Number(n.client_rate_pkr);
+    } else if (n.client_rate != null && Number(n.client_rate) > 0) {
+      ratePkr = Number(n.client_rate) * (Number(n.fx_usd_to_pkr) || fx);
+    } else if (n.client_payout != null && Number(n.client_payout) > 0) {
+      ratePkr = Number(n.client_payout) * (Number(n.fx_usd_to_pkr) || fx);
+    } else if (n.payout != null && Number(n.payout) > 0) {
+      ratePkr = Number(n.payout) * (Number(n.fx_usd_to_pkr) || fx);
+    } else {
+      const matchedRc = (n.range_id != null && rcById.get(Number(n.range_id)))
+        || rcByName.get(String(rangeName || '').trim().toLowerCase())
+        || null;
+      if (matchedRc) {
+        const rcPkr = Number(matchedRc.client_rate_pkr ?? matchedRc.rate ?? matchedRc.payout ?? 0);
+        if (rcPkr > 0) ratePkr = rcPkr;
+      }
+    }
+
     const rawTerm = isWn ? 'Monthly' : (n.client_payterm || n.payterm || 'Weekly');
     const termBadge = isWn
       ? `<span class="zy-payterm-badge zy-pt-monthly"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>`
@@ -578,7 +605,7 @@ function zyRenderClientNumbers(list) {
       { v: cleanPrefix, h: cleanPrefix || '—' },
       { v: displayNumber, h: numHtml },
       { v: isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)', h: termBadge },
-      { v: ratePkr ?? '', h: ratePkr != null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(Number(ratePkr), 4)}</span>` : '—' },
+      { v: ratePkr != null ? ratePkr : '', h: (ratePkr != null && ratePkr > 0) ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(Number(ratePkr), 4)}</span>` : '—' },
       { v: (n.sms_daily || 0) + (n.sms_weekly || 0), h: `SD: <b>${n.sms_daily || 0}</b> | SW: <b>${n.sms_weekly || 0}</b>` },
       { v: isBlockedNum ? 'blocked' : (isWn ? 'fetch' : ''), h: actionHtml }
     ];

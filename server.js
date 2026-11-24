@@ -2026,22 +2026,12 @@ function hasAppLinksAccess(userOrRef) {
   if (!userOrRef) return false;
   const role = normRole(userOrRef.role);
   if (role === 'owner') return true;
-  if (role === 'agent') {
-    const agents = readDb('agents') || [];
-    const ag = agents.find(a => Number(a.id) === Number(userOrRef.id) || (userOrRef.username && String(a.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
-    return Boolean(ag ? ag.app_links_access : userOrRef.app_links_access);
-  }
+  // All Agents automatically see all visible Owner App Links and curate which ones their Clients see
+  if (role === 'agent') return true;
   if (role === 'client') {
     const clients = readDb('clients') || [];
     const cl = clients.find(c => Number(c.id) === Number(userOrRef.id) || (userOrRef.username && String(c.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
-    if (!cl || !cl.app_links_access) return false;
-    const agId = cl.agent_id || userOrRef.agent_id;
-    if (agId) {
-      const agents = readDb('agents') || [];
-      const ag = agents.find(a => Number(a.id) === Number(agId));
-      if (!ag || !ag.app_links_access) return false;
-    }
-    return true;
+    return Boolean(cl && cl.app_links_access);
   }
   return false;
 }
@@ -11101,56 +11091,278 @@ function parseAppLinksExcelBuffer(buffer, filename = 'services.xlsx') {
   return extracted;
 }
 
+function getAgentAppLinksPrefs(agentId) {
+  const aid = Number(agentId || 0);
+  if (!aid) return { allowedSet: new Set(), latestSet: new Set() };
+  const raw = readDb('agent_app_links');
+  const rows = Array.isArray(raw) ? raw : [];
+  const rec = rows.find(r => Number(r && r.agent_id) === aid);
+  const allowedIds = Array.isArray(rec?.allowed_ids) ? rec.allowed_ids.map(Number).filter(Number.isFinite) : [];
+  const latestIds = Array.isArray(rec?.latest_ids) ? rec.latest_ids.map(Number).filter(Number.isFinite) : [];
+  return {
+    allowedSet: new Set(allowedIds),
+    latestSet: new Set(latestIds)
+  };
+}
+
+function saveAgentAppLinksPrefs(agentId, allowedSet, latestSet) {
+  const aid = Number(agentId || 0);
+  if (!aid) return;
+  const raw = readDb('agent_app_links');
+  const rows = Array.isArray(raw) ? raw.slice() : [];
+  const allowedArr = Array.from(allowedSet).map(Number).filter(Number.isFinite);
+  const latestArr = Array.from(latestSet).map(Number).filter(id => Number.isFinite(id) && allowedSet.has(id));
+  const entry = {
+    agent_id: aid,
+    allowed_ids: allowedArr,
+    latest_ids: latestArr,
+    updated_at: new Date().toISOString()
+  };
+  const idx = rows.findIndex(r => Number(r && r.agent_id) === aid);
+  if (idx >= 0) rows[idx] = entry;
+  else rows.push(entry);
+  writeDb('agent_app_links', rows);
+}
+
+function sortLatestAppLinks(list, isPinnedFn) {
+  return list.slice().sort((a, b) => {
+    const pa = isPinnedFn(a) ? 1 : 0;
+    const pb = isPinnedFn(b) ? 1 : 0;
+    if (pb !== pa) return pb - pa;
+    const ta = Date.parse(a.updated_at || a.created_at || '') || 0;
+    const tb = Date.parse(b.updated_at || b.created_at || '') || 0;
+    if (tb !== ta) return tb - ta;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+}
+
+function filterAppLinksBySearch(list, rawSearch) {
+  const q = String(rawSearch || '').trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(it =>
+    String(it.name || '').toLowerCase().includes(q) ||
+    String(it.url || '').toLowerCase().includes(q) ||
+    String(it.category || '').toLowerCase().includes(q) ||
+    String(it.notes || '').toLowerCase().includes(q)
+  );
+}
+
 app.get('/api/app-links', requireAuth, (req, res) => {
   const role = normRole(req.sessionUser.role);
   const isDashWidget = String(req.query.dashboard || '') === '1';
   if (!isDashWidget && !hasAppLinksAccess(req.sessionUser)) {
     return res.status(403).json({ error: 'Apps Links access is not enabled for your account.' });
   }
+
   const allLinks = sortAppLinksList(readDb('app_links') || []);
-  let items;
+  const tab = String(req.query.tab || (role === 'client' ? 'latest' : 'all')).trim().toLowerCase();
+  const search = String(req.query.search || '').trim();
+  const rawLimit = parseInt(req.query.limit, 10);
+  const limit = isDashWidget
+    ? Math.min(20, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 10))
+    : Math.min(100, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 25));
+  const reqPage = Math.max(1, parseInt(req.query.page, 10) || 1);
+
+  let pool = [];
+  let allCount = 0;
+  let allowedCount = 0;
+  let latestCount = 0;
+  let visibleCount = 0;
+  let hiddenCount = 0;
+
   if (role === 'owner') {
-    items = isDashWidget ? allLinks.filter(item => item.visible !== false && !item.agent_id) : allLinks;
+    const ownerAll = allLinks.filter(item => !item.agent_id);
+    const ownerVisible = ownerAll.filter(item => item.visible !== false);
+    allCount = ownerAll.length;
+    visibleCount = ownerVisible.length;
+    hiddenCount = ownerAll.length - ownerVisible.length;
+    latestCount = ownerVisible.length;
+    allowedCount = visibleCount;
+
+    if (isDashWidget) {
+      pool = sortLatestAppLinks(ownerVisible, it => Boolean(it.pinned_top));
+    } else if (tab === 'latest') {
+      pool = sortLatestAppLinks(ownerVisible, it => Boolean(it.pinned_top));
+    } else {
+      pool = ownerAll;
+    }
   } else if (role === 'agent') {
     const myId = Number(req.sessionUser.id);
-    items = allLinks.filter(item => {
-      if (Number(item.agent_id) === myId) return isDashWidget ? item.visible !== false : true;
-      return !item.agent_id && item.visible !== false;
-    });
+    const { allowedSet, latestSet } = getAgentAppLinksPrefs(myId);
+
+    const agentCatalog = [];
+    for (let i = 0; i < allLinks.length; i++) {
+      const item = allLinks[i];
+      const isMine = item.agent_id != null && Number(item.agent_id) === myId;
+      if (!isMine && (item.agent_id || item.visible === false)) continue;
+      const itemId = Number(item.id);
+      const isAllowed = isMine ? (item.visible !== false) : allowedSet.has(itemId);
+      const isLatest = isMine ? (item.visible !== false && Boolean(item.pinned_top)) : (isAllowed && latestSet.has(itemId));
+      agentCatalog.push({
+        ...item,
+        is_mine: isMine,
+        agent_allowed: isAllowed,
+        agent_latest: isLatest
+      });
+    }
+
+    const allowedList = agentCatalog.filter(it => it.agent_allowed);
+    const pinnedLatestList = sortLatestAppLinks(
+      agentCatalog.filter(it => it.agent_latest),
+      it => Boolean(it.agent_latest || it.pinned_top)
+    );
+
+    allCount = agentCatalog.length;
+    allowedCount = allowedList.length;
+    latestCount = pinnedLatestList.length;
+    visibleCount = allCount;
+    hiddenCount = 0;
+
+    if (isDashWidget) {
+      const dashBase = allowedList.length ? allowedList : agentCatalog;
+      pool = sortLatestAppLinks(dashBase, it => Boolean(it.agent_latest || (it.is_mine && it.pinned_top)));
+    } else if (tab === 'allowed') {
+      pool = allowedList;
+    } else if (tab === 'latest') {
+      pool = pinnedLatestList;
+    } else {
+      pool = agentCatalog;
+    }
   } else {
-    // Client sees their Agent's scoped app links first, plus Owner global visible app links
+    // Client: STRICTLY ONLY apps their managing Agent allowed (or Agent's own visible custom apps)
     const clients = readDb('clients') || [];
     const cl = clients.find(c => Number(c.id) === Number(req.sessionUser.id));
     const agId = cl && cl.agent_id != null ? Number(cl.agent_id) : Number(req.sessionUser.agent_id || 0);
-    items = allLinks.filter(item => item.visible !== false && (!item.agent_id || (agId && Number(item.agent_id) === agId)));
-    // Prioritize Agent's custom links above global links on dashboard
-    items.sort((a, b) => {
-      const aOwn = (agId && Number(a.agent_id) === agId) ? 1 : 0;
-      const bOwn = (agId && Number(b.agent_id) === agId) ? 1 : 0;
-      if (aOwn !== bOwn) return bOwn - aOwn;
-      return 0;
-    });
+    const { allowedSet, latestSet } = getAgentAppLinksPrefs(agId);
+
+    const clientAllowed = [];
+    for (let i = 0; i < allLinks.length; i++) {
+      const item = allLinks[i];
+      if (item.visible === false) continue;
+      const isAgentOwn = agId > 0 && item.agent_id != null && Number(item.agent_id) === agId;
+      const isAllowedOwner = !item.agent_id && allowedSet.has(Number(item.id));
+      if (!isAgentOwn && !isAllowedOwner) continue;
+      const isLatest = isAgentOwn ? Boolean(item.pinned_top) : latestSet.has(Number(item.id));
+      clientAllowed.push({
+        ...item,
+        agent_latest: isLatest
+      });
+    }
+
+    const pinnedLatest = sortLatestAppLinks(
+      clientAllowed.filter(it => it.agent_latest),
+      it => Boolean(it.agent_latest)
+    );
+    const effectiveLatest = pinnedLatest.length
+      ? pinnedLatest
+      : sortLatestAppLinks(clientAllowed, it => Boolean(it.pinned_top));
+
+    allCount = clientAllowed.length;
+    allowedCount = clientAllowed.length;
+    latestCount = effectiveLatest.length;
+    visibleCount = clientAllowed.length;
+    hiddenCount = 0;
+
+    if (isDashWidget) {
+      pool = sortLatestAppLinks(clientAllowed, it => Boolean(it.agent_latest));
+    } else if (tab === 'latest') {
+      pool = effectiveLatest;
+    } else {
+      pool = clientAllowed;
+    }
   }
-  if (isDashWidget) {
-    const lim = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 10));
-    // Sort latest first for dashboard Latest 10 App Links widget
-    items = items.slice().sort((a, b) => {
-      const aOwn = role === 'client' ? (a.agent_id ? 1 : 0) : 0;
-      const bOwn = role === 'client' ? (b.agent_id ? 1 : 0) : 0;
-      if (aOwn !== bOwn) return bOwn - aOwn;
-      if (Boolean(a.pinned_top) !== Boolean(b.pinned_top)) return a.pinned_top ? -1 : 1;
-      const ta = Date.parse(a.updated_at || a.created_at || '') || 0;
-      const tb = Date.parse(b.updated_at || b.created_at || '') || 0;
-      if (tb !== ta) return tb - ta;
-      return Number(b.id || 0) - Number(a.id || 0);
-    }).slice(0, lim);
-  }
+
+  const filtered = filterAppLinksBySearch(pool, search);
+  const filteredTotal = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(filteredTotal / limit));
+  const safePage = isDashWidget ? 1 : Math.min(reqPage, totalPages);
+  const start = (safePage - 1) * limit;
+  const pageData = filtered.slice(start, start + limit);
+
   res.json({
     success: true,
-    data: items,
-    total: items.length,
-    visible_count: items.filter(item => item.visible !== false).length,
-    hidden_count: items.filter(item => item.visible === false).length
+    data: pageData,
+    total: allCount,
+    filtered_total: filteredTotal,
+    page: safePage,
+    limit,
+    total_pages: totalPages,
+    all_count: allCount,
+    allowed_count: allowedCount,
+    latest_count: latestCount,
+    visible_count: visibleCount,
+    hidden_count: hiddenCount
+  });
+});
+
+app.post('/api/app-links/agent-toggle', requireAuth, (req, res) => {
+  const role = normRole(req.sessionUser.role);
+  if (role !== 'agent') {
+    return res.status(403).json({ error: 'Only Agents can curate App Links for their Clients.' });
+  }
+  const myId = Number(req.sessionUser.id);
+  const body = req.body || {};
+  const rawIds = Array.isArray(body.ids) ? body.ids : (body.id != null ? [body.id] : []);
+  const ids = Array.from(new Set(rawIds.map(Number).filter(id => Number.isFinite(id) && id > 0))).slice(0, 200);
+  if (!ids.length) {
+    return res.status(400).json({ error: 'At least one App Link ID is required.' });
+  }
+  const hasAllow = typeof body.allow === 'boolean';
+  const hasLatest = typeof body.latest === 'boolean';
+  if (!hasAllow && !hasLatest) {
+    return res.status(400).json({ error: 'Specify allow or latest boolean flag.' });
+  }
+
+  const allLinks = readDb('app_links') || [];
+  const byId = new Map(allLinks.map(x => [Number(x.id), x]));
+  const { allowedSet, latestSet } = getAgentAppLinksPrefs(myId);
+  let ownChanged = false;
+  const nowIso = new Date().toISOString();
+
+  for (const id of ids) {
+    const item = byId.get(id);
+    if (!item) continue;
+    const isMine = item.agent_id != null && Number(item.agent_id) === myId;
+    if (isMine) {
+      if (hasAllow) {
+        item.visible = body.allow;
+        if (!body.allow) item.pinned_top = false;
+        item.updated_at = nowIso;
+        ownChanged = true;
+      }
+      if (hasLatest) {
+        item.pinned_top = body.latest;
+        if (body.latest) item.visible = true;
+        item.updated_at = nowIso;
+        ownChanged = true;
+      }
+    } else if (!item.agent_id && item.visible !== false) {
+      if (hasAllow) {
+        if (body.allow) allowedSet.add(id);
+        else {
+          allowedSet.delete(id);
+          latestSet.delete(id);
+        }
+      }
+      if (hasLatest) {
+        if (body.latest) {
+          allowedSet.add(id);
+          latestSet.add(id);
+        } else {
+          latestSet.delete(id);
+        }
+      }
+    }
+  }
+
+  saveAgentAppLinksPrefs(myId, allowedSet, latestSet);
+  if (ownChanged) writeDb('app_links', sortAppLinksList(allLinks));
+
+  res.json({
+    success: true,
+    updated_count: ids.length,
+    allowed_count: allowedSet.size,
+    latest_count: latestSet.size
   });
 });
 
@@ -11253,7 +11465,6 @@ app.post('/api/app-links/import-excel', requireAuth, upload.single('file'), (req
       added,
       updated,
       total: sorted.length,
-      data: sorted,
       message: `Imported ${added} new app link(s)${updated ? ` and updated ${updated} existing` : ''}.`
     });
   } catch (err) {
@@ -11286,7 +11497,7 @@ app.post('/api/app-links/reorder', requireAuth, (req, res) => {
       it.updated_at = nowIso;
     });
     writeDb('app_links', reordered);
-    return res.json({ success: true, data: reordered });
+    return res.json({ success: true, total: reordered.length });
   }
 
   const targetId = Number(body.id);
@@ -11323,7 +11534,7 @@ app.post('/api/app-links/reorder', requireAuth, (req, res) => {
   });
   const sorted = sortAppLinksList(list);
   writeDb('app_links', sorted);
-  res.json({ success: true, data: sorted });
+  res.json({ success: true, total: sorted.length });
 });
 
 app.patch('/api/app-links/:id', requireAuth, (req, res) => {
@@ -11376,6 +11587,24 @@ app.delete('/api/app-links/:id', requireAuth, (req, res) => {
   }
   const [removed] = list.splice(idx, 1);
   writeDb('app_links', sortAppLinksList(list));
+  // Clean deleted app link ID from any Agent curation lists
+  const prefRaw = readDb('agent_app_links');
+  if (Array.isArray(prefRaw) && prefRaw.length) {
+    let dirty = false;
+    const cleaned = prefRaw.map(rec => {
+      if (!rec) return rec;
+      const a0 = Array.isArray(rec.allowed_ids) ? rec.allowed_ids : [];
+      const l0 = Array.isArray(rec.latest_ids) ? rec.latest_ids : [];
+      const a1 = a0.filter(x => Number(x) !== id);
+      const l1 = l0.filter(x => Number(x) !== id);
+      if (a1.length !== a0.length || l1.length !== l0.length) {
+        dirty = true;
+        return { ...rec, allowed_ids: a1, latest_ids: l1 };
+      }
+      return rec;
+    });
+    if (dirty) writeDb('agent_app_links', cleaned);
+  }
   logAudit(req.sessionUser.username || 'Admin', 'App Link Deleted', `Deleted app link "${removed.name}"`, 'Apps Links');
   res.json({ success: true, id });
 });
@@ -22317,7 +22546,7 @@ const ALLOWED_BACKUP_TABLES = new Set([
   'bank_accounts.json', 'agent_client_rates.json', 'number_requests.json', 'return_requests.json', 'number_transfers.json',
   'allocation_history.json', 'announcements.json', 'notifications.json', 'support_tickets.json',
   'chat_conversations.json', 'chat_messages.json', 'settings.json', 'permissions.json',
-  'services.json', 'app_links.json', 'cli_routes.json', 'blacklist.json', 'blocked_ips.json',
+  'services.json', 'app_links.json', 'agent_app_links.json', 'cli_routes.json', 'blacklist.json', 'blocked_ips.json',
   'firewall_events.json', 'rate_limits.json', 'audit_logs.json', 'login_activity.json',
   'registration_requests.json', 'cr_api_connections.json', 'login_panels.json',
   'whitenoise_connections.json', 'meta.json'
@@ -23412,9 +23641,17 @@ function countUnreadForActor(conv, actorKey, allMessages) {
 }
 
 // ── Live Chat Group Auto Night/Morning Schedule (PKT Asia/Karachi) ─────────
-const DEFAULT_GROUP_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
-const DEFAULT_GROUP_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
+const LEGACY_GROUP_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
+const LEGACY_GROUP_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
+const DEFAULT_GROUP_CLOSE_MSG = '🌙 Good Night everyone! Group chat filhal band hai. Subah chat automatically dobara open ho jayegi. Allah Hafiz! ✨';
+const DEFAULT_GROUP_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning! Group chat ab open hai. Umeed hai sab ka din acha guzray! 🚀';
 const SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function upgradeLegacyScheduleMsg(rawVal, legacyVal, nextDefault) {
+  const clean = String(rawVal || '').trim().slice(0, 500);
+  if (!clean || clean === legacyVal) return nextDefault;
+  return clean;
+}
 
 function getPktClockParts(nowDate = new Date()) {
   const pkt = new Date(nowDate.getTime() + PKT_OFFSET_MS_SHARED);
@@ -23454,8 +23691,8 @@ function normalizeGroupSchedule(raw, existing = null) {
       enabled: Boolean(prev.enabled),
       close_time: SCHEDULE_TIME_RE.test(String(prev.close_time || '')) ? String(prev.close_time) : '23:00',
       open_time: SCHEDULE_TIME_RE.test(String(prev.open_time || '')) ? String(prev.open_time) : '09:00',
-      close_message: String(prev.close_message || DEFAULT_GROUP_CLOSE_MSG).trim().slice(0, 500) || DEFAULT_GROUP_CLOSE_MSG,
-      open_message: String(prev.open_message || DEFAULT_GROUP_OPEN_MSG).trim().slice(0, 500) || DEFAULT_GROUP_OPEN_MSG,
+      close_message: upgradeLegacyScheduleMsg(prev.close_message, LEGACY_GROUP_CLOSE_MSG, DEFAULT_GROUP_CLOSE_MSG),
+      open_message: upgradeLegacyScheduleMsg(prev.open_message, LEGACY_GROUP_OPEN_MSG, DEFAULT_GROUP_OPEN_MSG),
       timezone: 'Asia/Karachi',
       last_close_cycle: prev.last_close_cycle || null,
       last_open_cycle: prev.last_open_cycle || null
@@ -23470,8 +23707,16 @@ function normalizeGroupSchedule(raw, existing = null) {
   if (enabled && close_time === open_time) {
     return { error: 'Close time and Open time cannot be the same.' };
   }
-  const close_message = String(raw.close_message !== undefined ? raw.close_message : (prev.close_message || DEFAULT_GROUP_CLOSE_MSG)).trim().slice(0, 500) || DEFAULT_GROUP_CLOSE_MSG;
-  const open_message = String(raw.open_message !== undefined ? raw.open_message : (prev.open_message || DEFAULT_GROUP_OPEN_MSG)).trim().slice(0, 500) || DEFAULT_GROUP_OPEN_MSG;
+  const close_message = upgradeLegacyScheduleMsg(
+    raw.close_message !== undefined ? raw.close_message : prev.close_message,
+    LEGACY_GROUP_CLOSE_MSG,
+    DEFAULT_GROUP_CLOSE_MSG
+  );
+  const open_message = upgradeLegacyScheduleMsg(
+    raw.open_message !== undefined ? raw.open_message : prev.open_message,
+    LEGACY_GROUP_OPEN_MSG,
+    DEFAULT_GROUP_OPEN_MSG
+  );
   return {
     enabled,
     close_time,
@@ -23644,6 +23889,54 @@ function processGroupSchedulesTick(nowDate = new Date()) {
   } catch (err) {
     console.error('[CHAT-SCHEDULE] Tick error:', err);
     return false;
+  }
+}
+
+function migrateLegacyAutoScheduleMessages() {
+  try {
+    const convs = readDb('chat_conversations') || [];
+    let convsDirty = false;
+    const legacyClosePreview = LEGACY_GROUP_CLOSE_MSG.slice(0, 120);
+    const legacyOpenPreview = LEGACY_GROUP_OPEN_MSG.slice(0, 120);
+
+    for (const conv of convs) {
+      if (!conv || conv.type !== 'agent_group') continue;
+      if (conv.schedule && typeof conv.schedule === 'object') {
+        if (String(conv.schedule.close_message || '').trim() === LEGACY_GROUP_CLOSE_MSG) {
+          conv.schedule.close_message = DEFAULT_GROUP_CLOSE_MSG;
+          convsDirty = true;
+        }
+        if (String(conv.schedule.open_message || '').trim() === LEGACY_GROUP_OPEN_MSG) {
+          conv.schedule.open_message = DEFAULT_GROUP_OPEN_MSG;
+          convsDirty = true;
+        }
+      }
+      if (String(conv.last_message_preview || '').trim() === legacyClosePreview) {
+        conv.last_message_preview = DEFAULT_GROUP_CLOSE_MSG.slice(0, 120);
+        convsDirty = true;
+      } else if (String(conv.last_message_preview || '').trim() === legacyOpenPreview) {
+        conv.last_message_preview = DEFAULT_GROUP_OPEN_MSG.slice(0, 120);
+        convsDirty = true;
+      }
+    }
+    if (convsDirty) writeDb('chat_conversations', convs);
+
+    const msgs = readDb('chat_messages') || [];
+    let msgsDirty = false;
+    for (const m of msgs) {
+      if (!m || !m.is_auto_schedule || m.deleted) continue;
+      const body = String(m.body || '').trim();
+      if (body === LEGACY_GROUP_CLOSE_MSG) {
+        m.body = DEFAULT_GROUP_CLOSE_MSG;
+        msgsDirty = true;
+      } else if (body === LEGACY_GROUP_OPEN_MSG) {
+        m.body = DEFAULT_GROUP_OPEN_MSG;
+        msgsDirty = true;
+      }
+    }
+    if (msgsDirty) writeDb('chat_messages', msgs);
+  } catch (err) {
+    console.error('[CHAT-SCHEDULE] Legacy message migration error:', err);
   }
 }
 
@@ -25556,6 +25849,7 @@ server.listen(PORT, BIND_HOST, () => {
     safeBootTask('scanInactiveNumbers', () => scanInactiveNumbers());
     const inactivityScanTimer = setInterval(() => safeBootTask('scanInactiveNumbers', () => scanInactiveNumbers()), 5 * 60 * 1000);
     if (inactivityScanTimer && typeof inactivityScanTimer.unref === 'function') inactivityScanTimer.unref();
+    safeBootTask('migrateLegacyAutoScheduleMessages', () => migrateLegacyAutoScheduleMessages());
     safeBootTask('processGroupSchedulesTick', () => processGroupSchedulesTick());
     const groupSchedTimer = setInterval(() => safeBootTask('processGroupSchedulesTick', () => processGroupSchedulesTick()), 15000);
     if (groupSchedTimer && typeof groupSchedTimer.unref === 'function') groupSchedTimer.unref();

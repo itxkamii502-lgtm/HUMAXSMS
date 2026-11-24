@@ -4956,6 +4956,64 @@ window.zyCopyAppLinkUrl = function (btn) {
   } catch (_) {}
 };
 
+window.zyRenderAppLinksPager = function(opts) {
+  const page = Math.max(1, Number(opts?.page) || 1);
+  const totalPages = Math.max(1, Number(opts?.totalPages) || 1);
+  const total = Math.max(0, Number(opts?.total) || 0);
+  const limit = Math.max(1, Number(opts?.limit) || 25);
+  const onPageFn = String(opts?.onPageFn || '').replace(/[^a-zA-Z0-9_$.]/g, '');
+  const idPrefix = String(opts?.idPrefix || 'al').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!total || !onPageFn) return '';
+
+  const start = (page - 1) * limit + 1;
+  const end = Math.min(total, page * limit);
+  const nums = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) nums.push(i);
+  } else {
+    nums.push(1);
+    const left = Math.max(2, page - 2);
+    const right = Math.min(totalPages - 1, page + 2);
+    if (left > 2) nums.push('…');
+    for (let i = left; i <= right; i++) nums.push(i);
+    if (right < totalPages - 1) nums.push('…');
+    nums.push(totalPages);
+  }
+
+  const pageBtns = nums.map(n => {
+    if (n === '…') return `<span class="zy-al-pg-dots">…</span>`;
+    const active = n === page ? ' is-active' : '';
+    return `<button type="button" class="zy-al-pg-btn${active}" onclick="${onPageFn}(${n})" ${n === page ? 'aria-current="page"' : ''}>${n.toLocaleString()}</button>`;
+  }).join('');
+
+  const jumpId = `${idPrefix}-pg-jump`;
+  return `
+    <div class="zy-al-pager" role="navigation" aria-label="Apps Links Pagination">
+      <div class="zy-al-pager-info">
+        Showing <strong>${start.toLocaleString()}–${end.toLocaleString()}</strong> of <strong>${total.toLocaleString()}</strong>
+        <span class="zy-al-pager-sep">·</span>
+        Page <strong>${page.toLocaleString()}</strong> / <strong>${totalPages.toLocaleString()}</strong> (${limit}/page)
+      </div>
+      <div class="zy-al-pager-controls">
+        <button type="button" class="zy-al-pg-btn" onclick="${onPageFn}(${Math.max(1, page - 1)})" ${page <= 1 ? 'disabled' : ''}>
+          <i class="fas fa-chevron-left"></i> Prev
+        </button>
+        ${pageBtns}
+        <button type="button" class="zy-al-pg-btn" onclick="${onPageFn}(${Math.min(totalPages, page + 1)})" ${page >= totalPages ? 'disabled' : ''}>
+          Next <i class="fas fa-chevron-right"></i>
+        </button>
+        ${totalPages > 1 ? `
+          <form class="zy-al-pg-jump" onsubmit="event.preventDefault();const _el=document.getElementById('${jumpId}');const _p=Math.max(1,Math.min(${totalPages},parseInt(_el&&_el.value,10)||1));${onPageFn}(_p);">
+            <input type="number" id="${jumpId}" min="1" max="${totalPages}" value="${page}" aria-label="Jump to page">
+            <button type="submit" class="zy-al-pg-btn">Go</button>
+          </form>
+        ` : ''}
+      </div>
+    </div>
+  `;
+};
+
+
 
 
 

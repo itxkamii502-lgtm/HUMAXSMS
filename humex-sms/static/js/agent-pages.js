@@ -4187,91 +4187,190 @@ window.zyAgtRejectReq = async function(id) {
 
 /* ── router ─────────────────────────────────────────────────── */
 (function zyHookAgentPages() {
-/* ── Apps Links Directory (Agent View + Client Access Control) ─────────── */
-let _agentAppLinksTab = 'latest';
+/* ── Apps Links Directory (Agent Catalog + Per-App Curation + Client Access) ── */
+let _agentAppLinksTab = 'all';
 let _agentAppLinksData = [];
 let _agentAppLinksClients = [];
 let _agentAppLinksQuery = '';
+let _agentAppLinksPage = 1;
+let _agentAppLinksMeta = { total: 0, filtered_total: 0, page: 1, limit: 25, total_pages: 1, all_count: 0, allowed_count: 0, latest_count: 0 };
+let _agentAppLinksSearchTimer = null;
 
 function _agentSafeUrl(raw) {
   const s = String(raw || '').trim();
   return /^https?:\/\//i.test(s) ? s : '#';
 }
 
-function _agentPickLatestAppLinks(list) {
-  return [...(Array.isArray(list) ? list : [])]
-    .sort((a, b) => {
-      const pa = a && a.pinned_top ? 1 : 0;
-      const pb = b && b.pinned_top ? 1 : 0;
-      if (pb !== pa) return pb - pa;
-      const ta = new Date(a?.updated_at || a?.created_at || 0).getTime() || 0;
-      const tb = new Date(b?.updated_at || b?.created_at || 0).getTime() || 0;
-      if (tb !== ta) return tb - ta;
-      return (Number(b?.id) || 0) - (Number(a?.id) || 0);
-    })
-    .slice(0, 10);
-}
-
-async function pgAppLinks(tabOverride) {
+async function pgAppLinks(tabOverride, pageOverride) {
   if (tabOverride) {
-    _agentAppLinksTab = tabOverride === 'links' ? 'latest' : tabOverride;
+    const nextTab = tabOverride === 'links' ? 'all' : tabOverride;
+    if (nextTab !== _agentAppLinksTab) {
+      _agentAppLinksTab = nextTab;
+      _agentAppLinksPage = 1;
+    }
+  }
+  if (pageOverride != null) {
+    _agentAppLinksPage = Math.max(1, Number(pageOverride) || 1);
   }
   const c = document.getElementById('page-content');
   if (!c) return;
-  const me = await apiFetch('/api/auth/me', { silent: true }).catch(() => null);
-  if (me && typeof window.zyRefreshWhitenoiseNav === 'function') window.zyRefreshWhitenoiseNav(me);
-  if (!me || !me.app_links_access) {
-    c.innerHTML = `<div class="zy-card"><div class="zy-empty" style="padding:36px 18px;">
-      <i class="fas fa-lock" style="font-size:28px;color:#94a3b8;margin-bottom:10px;"></i>
-      <div style="font-weight:700;font-size:15px;margin-bottom:6px;">Apps Links Access Not Enabled</div>
-      <div style="color:#64748b;font-size:13px;">Contact the Administrator to enable Apps Links for your account.</div>
-    </div></div>`;
-    return;
+
+  if (!document.getElementById('agent-applinks-body')) {
+    c.innerHTML = `
+      <div class="zy-card" style="padding:16px 18px;">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
+          <div>
+            <div style="font-weight:800;font-size:15.5px;"><i class="fas fa-link" style="color:#0284c7;margin-right:7px;"></i>Apps Links Catalog</div>
+            <div style="font-size:12px;color:var(--text-muted,#64748b);margin-top:2px;">All Owner apps are listed here (25 per page). Allow only the apps you want your Clients to see, and star apps to feature them in <strong>Latest</strong>.</div>
+          </div>
+          <button type="button" class="zy-btn-blue-solid" style="height:34px;min-height:34px;padding:0 12px;font-size:12px;" onclick="zyAgentOpenAppLinkModal()">
+            <i class="fas fa-plus"></i> Add Custom App
+          </button>
+        </div>
+        <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
+          <button type="button" id="ag-al-tab-all" class="zy-applinks-tab" onclick="pgAppLinks('all', 1)">
+            <i class="fas fa-table"></i> All Links (<span id="ag-al-cnt-all">0</span>)
+          </button>
+          <button type="button" id="ag-al-tab-allowed" class="zy-applinks-tab" onclick="pgAppLinks('allowed', 1)">
+            <i class="fas fa-check-circle"></i> Allowed for Clients (<span id="ag-al-cnt-allowed">0</span>)
+          </button>
+          <button type="button" id="ag-al-tab-latest" class="zy-applinks-tab" onclick="pgAppLinks('latest', 1)">
+            <i class="fas fa-star"></i> Latest (<span id="ag-al-cnt-latest">0</span>)
+          </button>
+          <button type="button" id="ag-al-tab-clients" class="zy-applinks-tab" onclick="pgAppLinks('clients', 1)">
+            <i class="fas fa-users"></i> Client Access (<span id="ag-al-cnt-clients">0/0</span>)
+          </button>
+          <div style="margin-left:auto;min-width:220px;">
+            <input type="search" id="agent-applinks-search" class="zy-input" placeholder="Search apps, links, clients…" value="${zyEsc(_agentAppLinksQuery)}" oninput="zyAgentFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
+          </div>
+        </div>
+        <div id="agent-applinks-body"></div>
+      </div>
+    `;
   }
 
-  const [linksRes, clientsRes] = await Promise.all([
-    apiFetch('/api/app-links', { silent: true }).catch(() => ({ data: [] })),
-    apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=200`, { silent: true }).catch(() => ({ data: [] }))
-  ]);
-  _agentAppLinksData = Array.isArray(linksRes?.data) ? linksRes.data : [];
-  _agentAppLinksClients = Array.isArray(clientsRes) ? clientsRes : (Array.isArray(clientsRes?.data) ? clientsRes.data : []);
-  const enabledClients = _agentAppLinksClients.filter(x => x.app_links_access).length;
-  const latestCount = _agentPickLatestAppLinks(_agentAppLinksData).length;
-
-  c.innerHTML = `
-    <div class="zy-card" style="padding:16px 18px;">
-      <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
-        <button type="button" class="zy-applinks-tab ${_agentAppLinksTab === 'latest' ? 'active' : ''}" onclick="pgAppLinks('latest')">
-          <i class="fas fa-bolt"></i> Latest (${latestCount})
-        </button>
-        <button type="button" class="zy-applinks-tab ${_agentAppLinksTab === 'all' ? 'active' : ''}" onclick="pgAppLinks('all')">
-          <i class="fas fa-table"></i> All Links (${_agentAppLinksData.length})
-        </button>
-        <button type="button" class="zy-applinks-tab ${_agentAppLinksTab === 'clients' ? 'active' : ''}" onclick="pgAppLinks('clients')">
-          <i class="fas fa-users"></i> Client Access (${enabledClients}/${_agentAppLinksClients.length})
-        </button>
-        <button type="button" class="zy-btn-blue-solid" style="height:34px;min-height:34px;padding:0 12px;font-size:12px;" onclick="zyAgentOpenAppLinkModal()">
-          <i class="fas fa-plus"></i> Add App Link
-        </button>
-        <div style="margin-left:auto;min-width:210px;">
-          <input type="search" class="zy-input" placeholder="Search apps or clients…" value="${zyEsc(_agentAppLinksQuery)}" oninput="zyAgentFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
-        </div>
-      </div>
-      <div id="agent-applinks-body"></div>
-    </div>
-  `;
-  zyRenderAgentAppLinksBody();
+  await zyLoadAgentAppLinksPage(true);
 }
 window.pgAppLinks = pgAppLinks;
 
+async function zyLoadAgentAppLinksPage(refreshClients) {
+  const host = document.getElementById('agent-applinks-body');
+  if (!host) return;
+
+  const setActiveTab = () => {
+    ['all', 'allowed', 'latest', 'clients'].forEach(t => {
+      const btn = document.getElementById(`ag-al-tab-${t}`);
+      if (btn) btn.classList.toggle('active', _agentAppLinksTab === t);
+    });
+  };
+  setActiveTab();
+
+  host.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-muted,#64748b);font-size:13px;"><i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>Loading…</div>`;
+
+  const reqs = [];
+  const apiTab = _agentAppLinksTab === 'clients' ? 'all' : _agentAppLinksTab;
+  const qs = new URLSearchParams({
+    tab: apiTab,
+    page: String(_agentAppLinksPage || 1),
+    limit: '25'
+  });
+  if (_agentAppLinksTab !== 'clients' && _agentAppLinksQuery.trim()) {
+    qs.set('search', _agentAppLinksQuery.trim());
+  }
+  reqs.push(apiFetch('/api/app-links?' + qs.toString(), { silent: true }).catch(() => null));
+  if (refreshClients || !_agentAppLinksClients.length || _agentAppLinksTab === 'clients') {
+    reqs.push(apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=500`, { silent: true }).catch(() => null));
+  }
+
+  const [linksRes, clientsRes] = await Promise.all(reqs);
+  _agentAppLinksData = Array.isArray(linksRes?.data) ? linksRes.data : [];
+  _agentAppLinksMeta = {
+    total: Number(linksRes?.total || 0),
+    filtered_total: Number(linksRes?.filtered_total ?? linksRes?.total ?? _agentAppLinksData.length),
+    page: Number(linksRes?.page || _agentAppLinksPage || 1),
+    limit: Number(linksRes?.limit || 25),
+    total_pages: Number(linksRes?.total_pages || 1),
+    all_count: Number(linksRes?.all_count ?? linksRes?.total ?? 0),
+    allowed_count: Number(linksRes?.allowed_count || 0),
+    latest_count: Number(linksRes?.latest_count || 0)
+  };
+  _agentAppLinksPage = _agentAppLinksMeta.page;
+
+  if (clientsRes != null) {
+    _agentAppLinksClients = Array.isArray(clientsRes) ? clientsRes : (Array.isArray(clientsRes?.data) ? clientsRes.data : []);
+  }
+  const enabledClients = _agentAppLinksClients.filter(x => x.app_links_access).length;
+
+  const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt('ag-al-cnt-all', _agentAppLinksMeta.all_count.toLocaleString());
+  setTxt('ag-al-cnt-allowed', _agentAppLinksMeta.allowed_count.toLocaleString());
+  setTxt('ag-al-cnt-latest', _agentAppLinksMeta.latest_count.toLocaleString());
+  setTxt('ag-al-cnt-clients', `${enabledClients}/${_agentAppLinksClients.length}`);
+
+  zyRenderAgentAppLinksBody();
+}
+
+window.zyAgentAppLinksGoPage = function(p) {
+  _agentAppLinksPage = Math.max(1, Number(p) || 1);
+  zyLoadAgentAppLinksPage(false);
+};
+
 window.zyAgentFilterAppLinks = function(q) {
   _agentAppLinksQuery = String(q || '');
-  zyRenderAgentAppLinksBody();
+  if (_agentAppLinksTab === 'clients') {
+    zyRenderAgentAppLinksBody();
+    return;
+  }
+  clearTimeout(_agentAppLinksSearchTimer);
+  _agentAppLinksSearchTimer = setTimeout(() => {
+    _agentAppLinksPage = 1;
+    zyLoadAgentAppLinksPage(false);
+  }, 240);
+};
+
+window.zyAgentToggleAppLinkAllow = async function(id, nextAllow) {
+  const res = await apiFetch('/api/app-links/agent-toggle', {
+    method: 'POST',
+    body: JSON.stringify({ id: Number(id), allow: Boolean(nextAllow) })
+  });
+  if (res && res.success) {
+    toast(nextAllow ? 'App allowed for your Clients.' : 'App removed from your Clients.', 'success');
+    zyLoadAgentAppLinksPage(false);
+  }
+};
+
+window.zyAgentToggleAppLinkLatest = async function(id, nextLatest) {
+  const res = await apiFetch('/api/app-links/agent-toggle', {
+    method: 'POST',
+    body: JSON.stringify({ id: Number(id), latest: Boolean(nextLatest) })
+  });
+  if (res && res.success) {
+    toast(nextLatest ? 'Pinned to Latest (and allowed for Clients).' : 'Removed from Latest.', 'success');
+    zyLoadAgentAppLinksPage(false);
+  }
+};
+
+window.zyAgentBulkPageAppLinks = async function(allowFlag) {
+  const ids = _agentAppLinksData.map(x => Number(x.id)).filter(n => Number.isFinite(n) && n > 0);
+  if (!ids.length) return;
+  const res = await apiFetch('/api/app-links/agent-toggle', {
+    method: 'POST',
+    body: JSON.stringify({ ids, allow: Boolean(allowFlag) })
+  });
+  if (res && res.success) {
+    toast(
+      allowFlag
+        ? `Allowed ${ids.length} app(s) on this page for your Clients.`
+        : `Removed ${ids.length} app(s) on this page from your Clients.`,
+      'success'
+    );
+    zyLoadAgentAppLinksPage(false);
+  }
 };
 
 window.zyAgentOpenAppLinkModal = function(existingId) {
   const item = existingId ? _agentAppLinksData.find(x => Number(x.id) === Number(existingId)) : null;
-  zyModal(item ? 'Edit App Link' : 'Add App Link for Your Clients', `
+  zyModal(item ? 'Edit App Link' : 'Add Custom App Link for Your Clients', `
     <div style="display:flex;flex-direction:column;gap:10px;">
       <div>
         <label style="display:block;font-size:12px;font-weight:700;margin-bottom:4px;">App Name *</label>
@@ -4290,7 +4389,7 @@ window.zyAgentOpenAppLinkModal = function(existingId) {
         <input type="text" id="ag-al-notes" class="zy-input" placeholder="Short instructions for clients" value="${zyEsc(item ? (item.notes || '') : '')}" maxlength="240">
       </div>
       <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;cursor:pointer;">
-        <input type="checkbox" id="ag-al-pin" ${item && item.pinned_top ? 'checked' : ''}> Pin to Top (appears in Latest 10 Dashboard Apps)
+        <input type="checkbox" id="ag-al-pin" ${item && item.pinned_top ? 'checked' : ''}> Feature in Latest (also appears in Dashboard Latest Apps)
       </label>
     </div>
   `, `
@@ -4318,7 +4417,7 @@ window.zyAgentSaveAppLink = async function(editId) {
   if (res && (res.success || res.data || res.id)) {
     closeModal();
     toast(editId ? 'App link updated!' : 'App link added for your clients!', 'success');
-    pgAppLinks(_agentAppLinksTab === 'clients' ? 'latest' : _agentAppLinksTab);
+    zyLoadAgentAppLinksPage(false);
   }
 };
 
@@ -4326,7 +4425,7 @@ window.zyAgentDeleteAppLink = async function(id) {
   const res = await apiFetch(`/api/app-links/${id}`, { method: 'DELETE' });
   if (res && res.success) {
     toast('App link deleted.', 'success');
-    pgAppLinks(_agentAppLinksTab === 'clients' ? 'latest' : _agentAppLinksTab);
+    zyLoadAgentAppLinksPage(false);
   }
 };
 
@@ -4344,9 +4443,9 @@ function zyRenderAgentAppLinksBody() {
       return;
     }
     host.innerHTML = `
-      <div style="font-size:12px;color:#64748b;margin-bottom:12px;padding:9px 12px;background:var(--bg-hover,#f8fafc);border-radius:8px;">
+      <div style="font-size:12px;color:var(--text-muted,#64748b);margin-bottom:12px;padding:9px 12px;background:var(--bg-hover,#f8fafc);border-radius:8px;">
         <i class="fas fa-circle-info" style="color:#0284c7;margin-right:6px;"></i>
-        Choose which Clients see the <strong>Apps Links</strong> menu in their sidebar.
+        Choose which Clients can access the <strong>Apps Links</strong> page. Enabled Clients will see only the apps you marked <strong>Allowed</strong>.
       </div>
       <div class="zy-access-list">
         ${list.map(cl => {
@@ -4354,8 +4453,8 @@ function zyRenderAgentAppLinksBody() {
           return `
             <div class="zy-access-row">
               <div>
-                <div style="font-weight:700;font-size:13px;">${zyEsc(cl.username || '—')} <span style="font-weight:400;color:#64748b;font-size:12px;">${cl.full_name ? `· ${zyEsc(cl.full_name)}` : ''}</span></div>
-                <div style="font-size:11.5px;color:#64748b;">Status: ${zyEsc(cl.status || 'active')}</div>
+                <div style="font-weight:700;font-size:13px;">${zyEsc(cl.username || '—')} <span style="font-weight:400;color:var(--text-muted,#64748b);font-size:12px;">${cl.full_name ? `· ${zyEsc(cl.full_name)}` : ''}</span></div>
+                <div style="font-size:11.5px;color:var(--text-muted,#64748b);">Status: ${zyEsc(cl.status || 'active')}</div>
               </div>
               <div style="display:flex;align-items:center;gap:10px;">
                 <span class="badge ${on ? 'badge-green' : ''}" style="${on ? '' : 'background:var(--bg-hover,#f1f5f9);color:#64748b;'}">${on ? 'Visible' : 'Hidden'}</span>
@@ -4371,57 +4470,88 @@ function zyRenderAgentAppLinksBody() {
     return;
   }
 
-  const baseList = _agentAppLinksTab === 'latest'
-    ? _agentPickLatestAppLinks(_agentAppLinksData)
-    : _agentAppLinksData;
-  const items = baseList.filter(it =>
-    !q
-    || String(it.name || '').toLowerCase().includes(q)
-    || String(it.url || '').toLowerCase().includes(q)
-    || String(it.category || '').toLowerCase().includes(q)
-  );
+  const items = _agentAppLinksData;
   if (!items.length) {
-    host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now. Click <strong>Add App Link</strong> to add links for your clients.</div>`;
+    const emptyMsg = _agentAppLinksTab === 'allowed'
+      ? 'No apps allowed for your Clients yet. Open <strong>All Links</strong> and click <strong>Allow</strong> on the apps you want Clients to see.'
+      : _agentAppLinksTab === 'latest'
+        ? 'No apps pinned to Latest yet. Click <strong>Latest</strong> on any app to feature it in your Clients’ Latest list.'
+        : 'No matching apps found.';
+    host.innerHTML = `<div class="zy-empty" style="padding:36px;">${emptyMsg}</div>`;
     return;
   }
+
+  const offset = (_agentAppLinksMeta.page - 1) * _agentAppLinksMeta.limit;
+  const pagerHtml = typeof window.zyRenderAppLinksPager === 'function'
+    ? window.zyRenderAppLinksPager({
+        page: _agentAppLinksMeta.page,
+        totalPages: _agentAppLinksMeta.total_pages,
+        total: _agentAppLinksMeta.filtered_total,
+        limit: _agentAppLinksMeta.limit,
+        onPageFn: 'zyAgentAppLinksGoPage',
+        idPrefix: 'ag-al'
+      })
+    : '';
+
   host.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
+      <div style="font-size:12px;color:var(--text-muted,#64748b);">
+        Page <strong>${_agentAppLinksMeta.page.toLocaleString()}</strong> of <strong>${_agentAppLinksMeta.total_pages.toLocaleString()}</strong> · Showing <strong>${items.length}</strong> of <strong>${_agentAppLinksMeta.filtered_total.toLocaleString()}</strong> apps
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="zy-al-toggle-btn is-allowed" onclick="zyAgentBulkPageAppLinks(true)">
+          <i class="fas fa-check-double"></i> Allow Page (${items.length})
+        </button>
+        <button type="button" class="zy-al-toggle-btn" onclick="zyAgentBulkPageAppLinks(false)">
+          <i class="fas fa-ban"></i> Remove Page
+        </button>
+      </div>
+    </div>
     <div class="zy-applinks-tbl-wrap zy-applinks-excel-wrap">
       <table class="zy-dt zy-applinks-tbl zy-applinks-excel">
         <thead>
           <tr>
-            <th style="width:60px;text-align:center;">#</th>
-            <th style="width:32%;">App Name</th>
-            <th>App Link</th>
+            <th style="width:66px;text-align:center;">#</th>
+            <th style="width:28%;">App Name</th>
+            <th style="width:32%;">App Link</th>
+            <th style="width:34%;text-align:right;">Client Visibility &amp; Actions</th>
           </tr>
         </thead>
         <tbody>
           ${items.map((it, idx) => {
             const href = _agentSafeUrl(it.url);
             const rawUrl = String(it.url || '').trim();
-            const isMine = it.agent_id != null && Number(it.agent_id) === Number(AGENT_ID);
+            const isMine = Boolean(it.is_mine || (it.agent_id != null && Number(it.agent_id) === Number(AGENT_ID)));
+            const isAllowed = Boolean(it.agent_allowed);
+            const isLatest = Boolean(it.agent_latest);
             return `
               <tr>
-                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${(offset + idx + 1).toLocaleString()}</span></td>
                 <td class="zy-applink-name-td">
                   <div class="zy-applink-name-line">
                     <span class="zy-applink-name-txt">${zyEsc(it.name || 'App Link')}</span>
-                    ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
                     ${isMine ? `<span class="badge badge-blue" style="font-size:9.5px;padding:1px 6px;">Mine</span>` : `<span class="zy-applink-cat-tag">Global</span>`}
                     ${it.category ? `<span class="zy-applink-cat-tag">${zyEsc(it.category)}</span>` : ''}
                   </div>
                   ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
                 </td>
                 <td class="zy-applink-url-td">
-                  <div class="zy-applink-url-wrap">
-                    <a class="zy-applink-url-anchor" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="${zyEsc(rawUrl)}">${zyEsc(rawUrl || href)}</a>
-                    <div class="zy-applink-row-actions">
-                      <button type="button" class="zy-applink-copy-btn" data-url="${zyEsc(rawUrl || href)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
-                      <a class="zy-applink-open-btn" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i> Open</a>
-                      ${isMine ? `
-                        <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyAgentOpenAppLinkModal(${Number(it.id)})" title="Edit"><i class="fas fa-pen"></i></button>
-                        <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#ef4444;" onclick="zyAgentDeleteAppLink(${Number(it.id)})" title="Delete"><i class="fas fa-trash"></i></button>
-                      ` : ''}
-                    </div>
+                  <a class="zy-applink-url-anchor" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="${zyEsc(rawUrl)}">${zyEsc(rawUrl || href)}</a>
+                </td>
+                <td style="text-align:right;white-space:nowrap;">
+                  <div class="zy-applink-row-actions" style="justify-content:flex-end;">
+                    <button type="button" class="zy-al-toggle-btn ${isAllowed ? 'is-allowed' : ''}" onclick="zyAgentToggleAppLinkAllow(${Number(it.id)}, ${isAllowed ? 'false' : 'true'})" title="${isAllowed ? 'Allowed for Clients — click to remove' : 'Click to allow for your Clients'}">
+                      <i class="fas fa-${isAllowed ? 'check-circle' : 'plus-circle'}"></i> ${isAllowed ? 'Allowed' : 'Allow'}
+                    </button>
+                    <button type="button" class="zy-al-toggle-btn ${isLatest ? 'is-latest' : ''}" onclick="zyAgentToggleAppLinkLatest(${Number(it.id)}, ${isLatest ? 'false' : 'true'})" title="${isLatest ? 'Pinned to Latest — click to unpin' : 'Click to feature in Latest'}">
+                      <i class="fas fa-star"></i> ${isLatest ? 'In Latest' : 'Latest'}
+                    </button>
+                    <button type="button" class="zy-applink-copy-btn" data-url="${zyEsc(rawUrl || href)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i></button>
+                    <a class="zy-applink-open-btn" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i></a>
+                    ${isMine ? `
+                      <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyAgentOpenAppLinkModal(${Number(it.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+                      <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#ef4444;" onclick="zyAgentDeleteAppLink(${Number(it.id)})" title="Delete"><i class="fas fa-trash"></i></button>
+                    ` : ''}
                   </div>
                 </td>
               </tr>
@@ -4430,6 +4560,7 @@ function zyRenderAgentAppLinksBody() {
         </tbody>
       </table>
     </div>
+    ${pagerHtml}
   `;
 }
 
@@ -4440,7 +4571,7 @@ window.zyAgentToggleClientAppLinks = async function(clientId, enable) {
   });
   if (res && (res.id || res.success)) {
     toast(enable ? 'Apps Links enabled for this client.' : 'Apps Links hidden for this client.', 'success');
-    pgAppLinks('clients');
+    zyLoadAgentAppLinksPage(true);
   }
 };
 

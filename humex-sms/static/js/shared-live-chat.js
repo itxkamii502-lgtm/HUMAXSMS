@@ -90,8 +90,8 @@
     return Boolean(c && (c.type === 'agent_group' || c.type === 'agent_channel'));
   }
 
-  const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
-  const DEFAULT_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
+  const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat filhal band hai. Subah chat automatically dobara open ho jayegi. Allah Hafiz! ✨';
+  const DEFAULT_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning! Group chat ab open hai. Umeed hai sab ka din acha guzray! 🚀';
 
   function formatTime12h(hhmm) {
     const parts = String(hhmm || '').split(':');

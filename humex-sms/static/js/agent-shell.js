@@ -120,7 +120,7 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
       if (!g.t) {
         return g.items.map(([label, page, icon]) =>
           `<div class="zy-snav nav-item" id="nav-${page}" data-page="${page}" role="link" tabindex="0"
-                ${(page === 'app-links' || page === 'live-access') ? 'style="display:none;"' : ''}
+                ${page === 'live-access' ? 'style="display:none;"' : ''}
                 onclick="loadPage('${page}')"
                 onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">
              <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${icon}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${label}</span>
@@ -181,7 +181,7 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
 })();
 
 window.ZY_WHITENOISE_ACCESS = false;
-window.ZY_APP_LINKS_ACCESS = false;
+window.ZY_APP_LINKS_ACCESS = true;
 window.ZY_LIVE_ACCESS_ENABLED = false;
 window.zySyncLiveAccessNav = function(enabled) {
   window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
@@ -193,10 +193,9 @@ window.zyRefreshWhitenoiseNav = function(me) {
   window.ZY_WHITENOISE_ACCESS = allowed;
   const el = document.getElementById('nav-cdr2');
   if (el) el.style.display = allowed ? '' : 'none';
-  const appAllowed = Boolean(me && me.app_links_access);
-  window.ZY_APP_LINKS_ACCESS = appAllowed;
+  window.ZY_APP_LINKS_ACCESS = true;
   const appEl = document.getElementById('nav-app-links');
-  if (appEl) appEl.style.display = appAllowed ? '' : 'none';
+  if (appEl) appEl.style.display = '';
   if (me && typeof me.live_access_enabled === 'boolean') {
     window.zySyncLiveAccessNav(me.live_access_enabled);
   }

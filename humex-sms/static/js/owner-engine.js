@@ -9549,161 +9549,147 @@ async function zyCommitAllMatchedSmartGroups() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  OWNER APPS LINKS DIRECTORY (Excel Upload + Manual CRUD + Top/Low + Agent Access)
+//  OWNER APPS LINKS DIRECTORY (Global for All Agents · 25/Page Server Pagination)
 // ══════════════════════════════════════════════════════════════════
-let _ownerAppLinksTab = 'latest';
+let _ownerAppLinksTab = 'all';
 let _ownerAppLinksList = [];
-let _ownerAppLinksAgents = [];
 let _ownerAppLinksQuery = '';
+let _ownerAppLinksPage = 1;
+let _ownerAppLinksMeta = { total: 0, filtered_total: 0, page: 1, limit: 25, total_pages: 1, latest_count: 0, all_count: 0, visible_count: 0, hidden_count: 0 };
+let _ownerAppLinksSearchTimer = null;
 
-function _ownerPickLatestAppLinks(list) {
-  const arr = Array.isArray(list) ? list : [];
-  const pinned = arr.filter(x => x && x.pinned_top);
-  const rest = arr.filter(x => x && !x.pinned_top).sort((a, b) => {
-    const ta = Date.parse(a.updated_at || a.created_at || a.created || 0) || Number(a.id || 0);
-    const tb = Date.parse(b.updated_at || b.created_at || b.created || 0) || Number(b.id || 0);
-    return tb - ta;
-  });
-  return [...pinned, ...rest].slice(0, 12);
-}
-
-async function renderOwnerAppLinks(tabOverride) {
-  if (tabOverride) _ownerAppLinksTab = tabOverride === 'links' ? 'all' : tabOverride;
+async function renderOwnerAppLinks(tabOverride, pageOverride) {
+  if (tabOverride) {
+    const nextTab = (tabOverride === 'links' || tabOverride === 'access') ? 'all' : tabOverride;
+    if (nextTab !== _ownerAppLinksTab) {
+      _ownerAppLinksTab = nextTab;
+      _ownerAppLinksPage = 1;
+    }
+  }
+  if (pageOverride != null) {
+    _ownerAppLinksPage = Math.max(1, Number(pageOverride) || 1);
+  }
   const c = document.getElementById('page-content');
   if (!c) return;
 
-  const [linksRes, agentsRes] = await Promise.all([
-    apiFetch('/api/app-links').catch(() => ({ data: [] })),
-    apiFetch('/api/agents?limit=200').catch(() => ({ data: [] }))
-  ]);
-
-  _ownerAppLinksList = Array.isArray(linksRes?.data) ? linksRes.data : [];
-  _ownerAppLinksAgents = Array.isArray(agentsRes?.data) ? agentsRes.data : (Array.isArray(agentsRes) ? agentsRes : []);
-
-  const totalCount = _ownerAppLinksList.length;
-  const latestCount = _ownerPickLatestAppLinks(_ownerAppLinksList).length;
-  const visibleCount = _ownerAppLinksList.filter(x => x.visible !== false).length;
-  const hiddenCount = totalCount - visibleCount;
-  const enabledAgentsCount = _ownerAppLinksAgents.filter(a => a.app_links_access).length;
-
-  c.innerHTML = `
-    <div class="page-header">
-      <div>
-        <div class="page-title"><i class="fas fa-link" style="color:#0284c7;margin-right:8px;"></i>Apps Links Directory</div>
-        <div class="page-subtitle">Upload Services Excel or add App Store / Play Store links, choose which apps show to users, set Top/Low priority, and control Agent access.</div>
-      </div>
-      <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('owner-applinks-excel').click()">
-          <i class="fas fa-file-excel" style="color:#059669;"></i> Upload Excel
-        </button>
-        <input type="file" id="owner-applinks-excel" accept=".xlsx,.xls,.csv" style="display:none;" onchange="zyOwnerUploadAppLinksExcel(this)">
-        <button type="button" class="btn btn-primary btn-sm" onclick="zyOpenAppLinkModal(null)">
-          <i class="fas fa-plus"></i> Add App Link
-        </button>
-      </div>
-    </div>
-
-    <div class="zy-smart-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px;">
-      <div class="zy-smart-kpi zy-kpi-blue">
-        <div class="zy-smart-kpi-val">${totalCount}</div>
-        <div class="zy-smart-kpi-lbl">Total App Links</div>
-      </div>
-      <div class="zy-smart-kpi zy-kpi-green">
-        <div class="zy-smart-kpi-val">${visibleCount}</div>
-        <div class="zy-smart-kpi-lbl">Visible to Users</div>
-      </div>
-      <div class="zy-smart-kpi zy-kpi-amber">
-        <div class="zy-smart-kpi-val">${hiddenCount}</div>
-        <div class="zy-smart-kpi-lbl">Hidden</div>
-      </div>
-      <div class="zy-smart-kpi">
-        <div class="zy-smart-kpi-val">${enabledAgentsCount} / ${_ownerAppLinksAgents.length}</div>
-        <div class="zy-smart-kpi-lbl">Agents With Access</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="zy-applinks-tabbar">
-        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'latest' ? 'active' : ''}" onclick="renderOwnerAppLinks('latest')">
-          <i class="fas fa-bolt"></i> Latest (${latestCount})
-        </button>
-        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'all' ? 'active' : ''}" onclick="renderOwnerAppLinks('all')">
-          <i class="fas fa-table-cells"></i> All Links (${totalCount})
-        </button>
-        <button type="button" class="zy-applinks-tab ${_ownerAppLinksTab === 'access' ? 'active' : ''}" onclick="renderOwnerAppLinks('access')">
-          <i class="fas fa-user-shield"></i> Agent Access Control (${enabledAgentsCount}/${_ownerAppLinksAgents.length})
-        </button>
-        <div style="margin-left:auto;min-width:210px;">
-          <input type="search" id="owner-applinks-search" placeholder="Search apps or agents…" value="${escapeHtml(_ownerAppLinksQuery)}" oninput="zyOwnerFilterAppLinks(this.value)" style="width:100%;padding:7px 10px;font-size:12.5px;">
+  if (!document.getElementById('owner-applinks-body')) {
+    c.innerHTML = `
+      <div class="page-header">
+        <div>
+          <div class="page-title"><i class="fas fa-link" style="color:#0284c7;margin-right:8px;"></i>Apps Links Directory</div>
+          <div class="page-subtitle">All visible links added here are automatically available to every Agent (25 per page). Each Agent chooses which apps to allow for their Clients.</div>
+        </div>
+        <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('owner-applinks-excel').click()">
+            <i class="fas fa-file-excel" style="color:#059669;"></i> Upload Excel
+          </button>
+          <input type="file" id="owner-applinks-excel" accept=".xlsx,.xls,.csv" style="display:none;" onchange="zyOwnerUploadAppLinksExcel(this)">
+          <button type="button" class="btn btn-primary btn-sm" onclick="zyOpenAppLinkModal(null)">
+            <i class="fas fa-plus"></i> Add App Link
+          </button>
         </div>
       </div>
-      <div id="owner-applinks-body"></div>
-    </div>
-  `;
+
+      <div class="zy-smart-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:14px;">
+        <div class="zy-smart-kpi zy-kpi-blue">
+          <div class="zy-smart-kpi-val" id="own-al-kpi-total">—</div>
+          <div class="zy-smart-kpi-lbl">Total App Links</div>
+        </div>
+        <div class="zy-smart-kpi zy-kpi-green">
+          <div class="zy-smart-kpi-val" id="own-al-kpi-visible">—</div>
+          <div class="zy-smart-kpi-lbl">Visible to All Agents</div>
+        </div>
+        <div class="zy-smart-kpi zy-kpi-amber">
+          <div class="zy-smart-kpi-val" id="own-al-kpi-hidden">—</div>
+          <div class="zy-smart-kpi-lbl">Hidden</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
+          <button type="button" id="own-al-tab-all" class="zy-applinks-tab" onclick="renderOwnerAppLinks('all', 1)">
+            <i class="fas fa-table-cells"></i> All Links (<span id="own-al-cnt-all">0</span>)
+          </button>
+          <button type="button" id="own-al-tab-latest" class="zy-applinks-tab" onclick="renderOwnerAppLinks('latest', 1)">
+            <i class="fas fa-bolt"></i> Latest (<span id="own-al-cnt-latest">0</span>)
+          </button>
+          <div style="margin-left:auto;min-width:220px;">
+            <input type="search" id="owner-applinks-search" placeholder="Search app name, link, category…" value="${escapeHtml(_ownerAppLinksQuery)}" oninput="zyOwnerFilterAppLinks(this.value)" style="width:100%;padding:7px 10px;font-size:12.5px;">
+          </div>
+        </div>
+        <div id="owner-applinks-body"></div>
+      </div>
+    `;
+  }
+
+  await zyLoadOwnerAppLinksPage();
+}
+
+async function zyLoadOwnerAppLinksPage() {
+  const host = document.getElementById('owner-applinks-body');
+  if (!host) return;
+  host.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-muted);font-size:13px;"><i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>Loading app links…</div>`;
+
+  const qs = new URLSearchParams({
+    tab: _ownerAppLinksTab || 'all',
+    page: String(_ownerAppLinksPage || 1),
+    limit: '25'
+  });
+  if (_ownerAppLinksQuery.trim()) qs.set('search', _ownerAppLinksQuery.trim());
+
+  const res = await apiFetch('/api/app-links?' + qs.toString()).catch(() => null);
+  _ownerAppLinksList = Array.isArray(res?.data) ? res.data : [];
+  _ownerAppLinksMeta = {
+    total: Number(res?.total || 0),
+    filtered_total: Number(res?.filtered_total ?? res?.total ?? _ownerAppLinksList.length),
+    page: Number(res?.page || _ownerAppLinksPage || 1),
+    limit: Number(res?.limit || 25),
+    total_pages: Number(res?.total_pages || 1),
+    all_count: Number(res?.all_count ?? res?.total ?? 0),
+    latest_count: Number(res?.latest_count || 0),
+    visible_count: Number(res?.visible_count || 0),
+    hidden_count: Number(res?.hidden_count || 0)
+  };
+  _ownerAppLinksPage = _ownerAppLinksMeta.page;
+
+  const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt('own-al-kpi-total', _ownerAppLinksMeta.all_count.toLocaleString());
+  setTxt('own-al-kpi-visible', _ownerAppLinksMeta.visible_count.toLocaleString());
+  setTxt('own-al-kpi-hidden', _ownerAppLinksMeta.hidden_count.toLocaleString());
+  setTxt('own-al-cnt-all', _ownerAppLinksMeta.all_count.toLocaleString());
+  setTxt('own-al-cnt-latest', _ownerAppLinksMeta.latest_count.toLocaleString());
+
+  const tAll = document.getElementById('own-al-tab-all');
+  const tLat = document.getElementById('own-al-tab-latest');
+  if (tAll) tAll.classList.toggle('active', _ownerAppLinksTab !== 'latest');
+  if (tLat) tLat.classList.toggle('active', _ownerAppLinksTab === 'latest');
 
   zyRenderOwnerAppLinksBody();
 }
 
+window.zyOwnerAppLinksGoPage = function(p) {
+  _ownerAppLinksPage = Math.max(1, Number(p) || 1);
+  zyLoadOwnerAppLinksPage();
+};
+
 function zyOwnerFilterAppLinks(q) {
   _ownerAppLinksQuery = String(q || '');
-  zyRenderOwnerAppLinksBody();
+  clearTimeout(_ownerAppLinksSearchTimer);
+  _ownerAppLinksSearchTimer = setTimeout(() => {
+    _ownerAppLinksPage = 1;
+    zyLoadOwnerAppLinksPage();
+  }, 240);
 }
 
 function zyRenderOwnerAppLinksBody() {
   const host = document.getElementById('owner-applinks-body');
   if (!host) return;
-  const q = _ownerAppLinksQuery.trim().toLowerCase();
 
-  if (_ownerAppLinksTab === 'access') {
-    const filteredAgents = _ownerAppLinksAgents.filter(a => {
-      if (!q) return true;
-      return String(a.username || '').toLowerCase().includes(q) || String(a.full_name || '').toLowerCase().includes(q);
-    });
-    if (!filteredAgents.length) {
-      host.innerHTML = `<div class="empty-state" style="padding:32px;">No matching Agents found.</div>`;
-      return;
-    }
-    host.innerHTML = `
-      <div class="fs-12 text-muted" style="margin-bottom:12px;padding:10px 12px;background:var(--bg-hover);border-radius:8px;">
-        <i class="fas fa-circle-info" style="color:#0284c7;margin-right:6px;"></i>
-        Turn <strong>Apps Links</strong> ON for an Agent to show the <strong>Apps Links</strong> menu in their sidebar. Authorized Agents can then toggle Apps Links ON/OFF for each of their individual Clients.
-      </div>
-      <div class="zy-access-list">
-        ${filteredAgents.map(a => {
-          const on = Boolean(a.app_links_access);
-          return `
-            <div class="zy-access-row">
-              <div>
-                <div class="fw-700 fs-13">${escapeHtml(a.username || '—')} <span class="text-muted fw-400 fs-12">${a.full_name ? `· ${escapeHtml(a.full_name)}` : ''}</span></div>
-                <div class="fs-11 text-muted">Status: ${escapeHtml(a.status || 'active')} · Clients: ${Number(a.clients_count || 0)}</div>
-              </div>
-              <div style="display:flex;align-items:center;gap:10px;">
-                <span class="badge ${on ? 'badge-green' : ''}" style="${on ? '' : 'background:var(--bg-hover);color:var(--text-muted);'}">${on ? 'Visible in Sidebar' : 'Hidden'}</span>
-                <button type="button" class="btn btn-sm ${on ? 'btn-outline' : 'btn-primary'}" onclick="zyOwnerToggleAgentAppLinks(${Number(a.id)}, ${on ? 'false' : 'true'})">
-                  <i class="fas fa-${on ? 'eye-slash' : 'check'}"></i> ${on ? 'Disable' : 'Enable Access'}
-                </button>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
-    return;
-  }
-
-  const baseList = _ownerAppLinksTab === 'latest' ? _ownerPickLatestAppLinks(_ownerAppLinksList) : _ownerAppLinksList;
-  const filtered = baseList.filter(item => {
-    if (!q) return true;
-    return String(item.name || '').toLowerCase().includes(q)
-      || String(item.url || '').toLowerCase().includes(q)
-      || String(item.category || '').toLowerCase().includes(q);
-  });
-
-  if (!filtered.length) {
+  if (!_ownerAppLinksList.length) {
     host.innerHTML = `
       <div class="empty-state" style="padding:36px 16px;">
         <i class="fas fa-link" style="font-size:28px;color:var(--text-muted);margin-bottom:10px;"></i>
-        <div class="fw-700 fs-14" style="margin-bottom:4px;">${_ownerAppLinksList.length ? 'No matching App Links' : 'No App Links Added Yet'}</div>
+        <div class="fw-700 fs-14" style="margin-bottom:4px;">${_ownerAppLinksMeta.all_count ? 'No matching App Links' : 'No App Links Added Yet'}</div>
         <div class="fs-12 text-muted" style="margin-bottom:14px;">Upload your Services Excel file (.xlsx / .csv) or click "+ Add App Link" to get started.</div>
         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
           <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('owner-applinks-excel').click()"><i class="fas fa-file-excel" style="color:#059669;"></i> Upload Excel</button>
@@ -9714,24 +9700,37 @@ function zyRenderOwnerAppLinksBody() {
     return;
   }
 
+  const offset = (_ownerAppLinksMeta.page - 1) * _ownerAppLinksMeta.limit;
+  const pagerHtml = typeof window.zyRenderAppLinksPager === 'function'
+    ? window.zyRenderAppLinksPager({
+        page: _ownerAppLinksMeta.page,
+        totalPages: _ownerAppLinksMeta.total_pages,
+        total: _ownerAppLinksMeta.filtered_total,
+        limit: _ownerAppLinksMeta.limit,
+        onPageFn: 'zyOwnerAppLinksGoPage',
+        idPrefix: 'own-al'
+      })
+    : '';
+
   host.innerHTML = `
     <div class="zy-applinks-tbl-wrap">
       <table class="zy-dt zy-applinks-tbl zy-applinks-excel">
         <thead>
           <tr>
-            <th style="width:60px;text-align:center;">#</th>
-            <th style="width:30%;">App Name</th>
-            <th>App Link</th>
+            <th style="width:66px;text-align:center;">#</th>
+            <th style="width:26%;">App Name</th>
+            <th style="width:34%;">App Link</th>
+            <th style="width:34%;text-align:right;">Actions</th>
           </tr>
         </thead>
         <tbody>
-          ${filtered.map((item, idx) => {
+          ${_ownerAppLinksList.map((item, idx) => {
             const vis = item.visible !== false;
             const safeHref = _safeHttpUrlFrontend(item.url);
             const rawUrl = String(item.url || '').trim();
             return `
               <tr class="${vis ? '' : 'is-hidden-row'}">
-                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${(offset + idx + 1).toLocaleString()}</span></td>
                 <td class="zy-applink-name-td">
                   <div class="zy-applink-name-line">
                     <span class="zy-applink-name-txt">${escapeHtml(item.name || 'App Link')}</span>
@@ -9742,21 +9741,21 @@ function zyRenderOwnerAppLinksBody() {
                   ${item.notes ? `<div class="zy-applink-card-note">${escapeHtml(item.notes)}</div>` : ''}
                 </td>
                 <td class="zy-applink-url-td">
-                  <div class="zy-applink-url-wrap">
-                    <a class="zy-applink-url-anchor" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(rawUrl)}">${escapeHtml(rawUrl || safeHref)}</a>
-                    <div class="zy-applink-row-actions">
-                      <button type="button" class="zy-applink-copy-btn" data-url="${escapeHtml(rawUrl || safeHref)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
-                      <a class="zy-applink-open-btn" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i></a>
-                      <label class="zy-applink-vis-toggle" title="${vis ? 'Visible — click to hide' : 'Hidden — click to show'}">
-                        <input type="checkbox" ${vis ? 'checked' : ''} onchange="zyOwnerToggleAppLinkVisible(${Number(item.id)}, this.checked)">
-                        <span>${vis ? 'Show' : 'Hide'}</span>
-                      </label>
-                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'top')" title="Move to Top">Top</button>
-                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'up')" title="Move Up"><i class="fas fa-arrow-up"></i></button>
-                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'down')" title="Move Down"><i class="fas fa-arrow-down"></i></button>
-                      <button type="button" class="btn btn-outline btn-sm" onclick="zyOpenAppLinkModal(${Number(item.id)})" title="Edit"><i class="fas fa-pen"></i></button>
-                      <button type="button" class="btn btn-danger btn-sm" onclick="zyConfirmDeleteAppLink(${Number(item.id)})" title="Delete"><i class="fas fa-trash"></i></button>
-                    </div>
+                  <a class="zy-applink-url-anchor" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(rawUrl)}">${escapeHtml(rawUrl || safeHref)}</a>
+                </td>
+                <td style="text-align:right;white-space:nowrap;">
+                  <div class="zy-applink-row-actions" style="justify-content:flex-end;">
+                    <button type="button" class="zy-applink-copy-btn" data-url="${escapeHtml(rawUrl || safeHref)}" onclick="zyCopyAppLinkUrl(this)" title="Copy Link"><i class="far fa-copy"></i> Copy</button>
+                    <a class="zy-applink-open-btn" href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" title="Open Link"><i class="fas fa-arrow-up-right-from-square"></i></a>
+                    <label class="zy-applink-vis-toggle" title="${vis ? 'Visible to All Agents — click to hide' : 'Hidden — click to show'}">
+                      <input type="checkbox" ${vis ? 'checked' : ''} onchange="zyOwnerToggleAppLinkVisible(${Number(item.id)}, this.checked)">
+                      <span>${vis ? 'Show' : 'Hide'}</span>
+                    </label>
+                    <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'top')" title="Move to Top">Top</button>
+                    <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'up')" title="Move Up"><i class="fas fa-arrow-up"></i></button>
+                    <button type="button" class="btn btn-outline btn-sm" onclick="zyOwnerReorderAppLink(${Number(item.id)}, 'down')" title="Move Down"><i class="fas fa-arrow-down"></i></button>
+                    <button type="button" class="btn btn-outline btn-sm" onclick="zyOpenAppLinkModal(${Number(item.id)})" title="Edit"><i class="fas fa-pen"></i></button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="zyConfirmDeleteAppLink(${Number(item.id)})" title="Delete"><i class="fas fa-trash"></i></button>
                   </div>
                 </td>
               </tr>
@@ -9765,6 +9764,7 @@ function zyRenderOwnerAppLinksBody() {
         </tbody>
       </table>
     </div>
+    ${pagerHtml}
   `;
 }
 
@@ -9772,12 +9772,14 @@ async function zyOwnerUploadAppLinksExcel(input) {
   const file = input?.files?.[0];
   if (!file) return;
   try {
+    toast('Uploading and importing App Links…', 'info');
     const fd = new FormData();
     fd.append('file', file);
     const res = await apiFetch('/api/app-links/import-excel', { method: 'POST', body: fd });
     if (res && res.success) {
       toast(res.message || `Imported ${res.added || 0} app link(s)`, 'success');
-      renderOwnerAppLinks('links');
+      _ownerAppLinksPage = 1;
+      await zyLoadOwnerAppLinksPage();
     }
   } finally {
     if (input) input.value = '';
@@ -9808,7 +9810,7 @@ function zyOpenAppLinkModal(id) {
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;background:var(--bg-hover);padding:10px 12px;border-radius:8px;">
         <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600;margin:0;">
-          <input type="checkbox" id="al-visible" ${existing ? (existing.visible !== false ? 'checked' : '') : 'checked'}> Show to Authorized Users
+          <input type="checkbox" id="al-visible" ${existing ? (existing.visible !== false ? 'checked' : '') : 'checked'}> Visible to All Agents
         </label>
         <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600;margin:0;">
           <input type="checkbox" id="al-pinned" ${existing?.pinned_top ? 'checked' : ''}> Pin to Top
@@ -9843,7 +9845,7 @@ async function zySaveAppLinkForm(event, id) {
   if (res && res.success) {
     closeModal();
     toast(id != null ? 'App link updated.' : 'App link added.', 'success');
-    renderOwnerAppLinks('links');
+    await zyLoadOwnerAppLinksPage();
   }
 }
 
@@ -9853,10 +9855,8 @@ async function zyOwnerToggleAppLinkVisible(id, visible) {
     body: JSON.stringify({ visible: Boolean(visible) })
   });
   if (res && res.success) {
-    const it = _ownerAppLinksList.find(x => Number(x.id) === Number(id));
-    if (it) it.visible = Boolean(visible);
-    toast(visible ? 'App is now visible to authorized users.' : 'App hidden from users.', 'info');
-    renderOwnerAppLinks('links');
+    toast(visible ? 'App is now visible to all Agents.' : 'App hidden from Agents.', 'info');
+    await zyLoadOwnerAppLinksPage();
   }
 }
 
@@ -9866,8 +9866,7 @@ async function zyOwnerReorderAppLink(id, action) {
     body: JSON.stringify({ id, action })
   });
   if (res && res.success) {
-    _ownerAppLinksList = Array.isArray(res.data) ? res.data : _ownerAppLinksList;
-    zyRenderOwnerAppLinksBody();
+    await zyLoadOwnerAppLinksPage();
   }
 }
 
@@ -9888,18 +9887,7 @@ async function zyExecuteDeleteAppLink(id) {
   if (res && res.success) {
     closeModal();
     toast('App link deleted.', 'warning');
-    renderOwnerAppLinks('links');
-  }
-}
-
-async function zyOwnerToggleAgentAppLinks(agentId, enable) {
-  const res = await apiFetch(`/api/agents/${agentId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ app_links_access: Boolean(enable) })
-  });
-  if (res && (res.id || res.success)) {
-    toast(enable ? 'Apps Links enabled for this Agent.' : 'Apps Links disabled for this Agent.', 'success');
-    renderOwnerAppLinks('access');
+    await zyLoadOwnerAppLinksPage();
   }
 }
 

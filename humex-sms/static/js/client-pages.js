@@ -1854,92 +1854,146 @@ window.zyClientWipeNotifications = async function() {
   if (window.HumexNotifications) return window.HumexNotifications.clearAll();
 };
 
-/* ── Apps Links Directory (Client View — Latest & All Links Excel Grid) ─ */
+/* ── Apps Links Directory (Client View — 25/Page Server Pagination) ─ */
 let _clientAppLinksTab = 'latest';
 let _clientAppLinksData = [];
 let _clientAppLinksQuery = '';
+let _clientAppLinksPage = 1;
+let _clientAppLinksMeta = { total: 0, filtered_total: 0, page: 1, limit: 25, total_pages: 1, all_count: 0, latest_count: 0 };
+let _clientAppLinksSearchTimer = null;
 
 function _clientSafeUrl(raw) {
   const s = String(raw || '').trim();
   return /^https?:\/\//i.test(s) ? s : '#';
 }
 
-function _clientPickLatestAppLinks(list) {
-  const arr = Array.isArray(list) ? list : [];
-  const pinned = arr.filter(x => x && x.pinned_top);
-  const rest = arr.filter(x => x && !x.pinned_top).sort((a, b) => {
-    const ta = Date.parse(a.updated_at || a.created_at || a.created || 0) || Number(a.id || 0);
-    const tb = Date.parse(b.updated_at || b.created_at || b.created || 0) || Number(b.id || 0);
-    return tb - ta;
-  });
-  return [...pinned, ...rest].slice(0, 12);
-}
-
-async function pgAppLinks(tabOverride) {
-  if (tabOverride) _clientAppLinksTab = tabOverride;
+async function pgAppLinks(tabOverride, pageOverride) {
+  if (tabOverride) {
+    const nextTab = tabOverride === 'links' ? 'all' : tabOverride;
+    if (nextTab !== _clientAppLinksTab) {
+      _clientAppLinksTab = nextTab;
+      _clientAppLinksPage = 1;
+    }
+  }
+  if (pageOverride != null) {
+    _clientAppLinksPage = Math.max(1, Number(pageOverride) || 1);
+  }
   const c = document.getElementById('page-content');
   if (!c) return;
-  const me = await apiFetch('/api/auth/me', { silent: true }).catch(() => null);
-  if (me && typeof window.zyRefreshWhitenoiseNav === 'function') window.zyRefreshWhitenoiseNav(me);
-  if (!me || !me.app_links_access) {
-    c.innerHTML = `<div class="zy-card"><div class="zy-empty" style="padding:36px 18px;">
-      <i class="fas fa-lock" style="font-size:28px;color:#94a3b8;margin-bottom:10px;"></i>
-      <div style="font-weight:700;font-size:15px;margin-bottom:6px;">Apps Links Access Not Enabled</div>
-      <div style="color:#64748b;font-size:13px;">Ask your Agent to enable Apps Links for your account.</div>
-    </div></div>`;
-    return;
+
+  if (!document.getElementById('client-applinks-body')) {
+    const me = await apiFetch('/api/auth/me', { silent: true }).catch(() => null);
+    if (me && typeof window.zyRefreshWhitenoiseNav === 'function') window.zyRefreshWhitenoiseNav(me);
+    if (!me || !me.app_links_access) {
+      c.innerHTML = `<div class="zy-card"><div class="zy-empty" style="padding:36px 18px;">
+        <i class="fas fa-lock" style="font-size:28px;color:#94a3b8;margin-bottom:10px;"></i>
+        <div style="font-weight:700;font-size:15px;margin-bottom:6px;">Apps Links Access Not Enabled</div>
+        <div style="color:#64748b;font-size:13px;">Ask your Agent to enable Apps Links for your account.</div>
+      </div></div>`;
+      return;
+    }
+
+    c.innerHTML = `
+      <div class="zy-card" style="padding:16px 18px;">
+        <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
+          <button type="button" id="cl-al-tab-latest" class="zy-applinks-tab" onclick="pgAppLinks('latest', 1)">
+            <i class="fas fa-bolt"></i> Latest (<span id="cl-al-cnt-latest">0</span>)
+          </button>
+          <button type="button" id="cl-al-tab-all" class="zy-applinks-tab" onclick="pgAppLinks('all', 1)">
+            <i class="fas fa-table-cells"></i> All Links (<span id="cl-al-cnt-all">0</span>)
+          </button>
+          <div style="margin-left:auto;min-width:210px;">
+            <input type="search" id="client-applinks-search" class="zy-input" placeholder="Search apps…" value="${zyEsc(_clientAppLinksQuery)}" oninput="zyClientFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
+          </div>
+        </div>
+        <div id="client-applinks-body"></div>
+      </div>
+    `;
   }
 
-  const res = await apiFetch('/api/app-links', { silent: true }).catch(() => ({ data: [] }));
-  _clientAppLinksData = Array.isArray(res?.data) ? res.data : [];
-  const latestCount = _clientPickLatestAppLinks(_clientAppLinksData).length;
-
-  c.innerHTML = `
-    <div class="zy-card" style="padding:16px 18px;">
-      <div class="zy-applinks-tabbar" style="flex-wrap:wrap;gap:8px;">
-        <button type="button" class="zy-applinks-tab ${_clientAppLinksTab === 'latest' ? 'active' : ''}" onclick="pgAppLinks('latest')">
-          <i class="fas fa-bolt"></i> Latest (${latestCount})
-        </button>
-        <button type="button" class="zy-applinks-tab ${_clientAppLinksTab === 'all' ? 'active' : ''}" onclick="pgAppLinks('all')">
-          <i class="fas fa-table-cells"></i> All Links (${_clientAppLinksData.length})
-        </button>
-        <div style="margin-left:auto;min-width:210px;">
-          <input type="search" class="zy-input" placeholder="Search apps…" value="${zyEsc(_clientAppLinksQuery)}" oninput="zyClientFilterAppLinks(this.value)" style="margin:0;padding:7px 10px;">
-        </div>
-      </div>
-      <div id="client-applinks-body"></div>
-    </div>
-  `;
-  zyRenderClientAppLinksBody();
+  await zyLoadClientAppLinksPage();
 }
 window.pgAppLinks = pgAppLinks;
 
+async function zyLoadClientAppLinksPage() {
+  const host = document.getElementById('client-applinks-body');
+  if (!host) return;
+
+  const tLat = document.getElementById('cl-al-tab-latest');
+  const tAll = document.getElementById('cl-al-tab-all');
+  if (tLat) tLat.classList.toggle('active', _clientAppLinksTab === 'latest');
+  if (tAll) tAll.classList.toggle('active', _clientAppLinksTab !== 'latest');
+
+  host.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-muted,#64748b);font-size:13px;"><i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>Loading apps…</div>`;
+
+  const qs = new URLSearchParams({
+    tab: _clientAppLinksTab || 'latest',
+    page: String(_clientAppLinksPage || 1),
+    limit: '25'
+  });
+  if (_clientAppLinksQuery.trim()) qs.set('search', _clientAppLinksQuery.trim());
+
+  const res = await apiFetch('/api/app-links?' + qs.toString(), { silent: true }).catch(() => null);
+  _clientAppLinksData = Array.isArray(res?.data) ? res.data : [];
+  _clientAppLinksMeta = {
+    total: Number(res?.total || 0),
+    filtered_total: Number(res?.filtered_total ?? res?.total ?? _clientAppLinksData.length),
+    page: Number(res?.page || _clientAppLinksPage || 1),
+    limit: Number(res?.limit || 25),
+    total_pages: Number(res?.total_pages || 1),
+    all_count: Number(res?.all_count ?? res?.total ?? 0),
+    latest_count: Number(res?.latest_count || 0)
+  };
+  _clientAppLinksPage = _clientAppLinksMeta.page;
+
+  const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt('cl-al-cnt-latest', _clientAppLinksMeta.latest_count.toLocaleString());
+  setTxt('cl-al-cnt-all', _clientAppLinksMeta.all_count.toLocaleString());
+
+  zyRenderClientAppLinksBody();
+}
+
+window.zyClientAppLinksGoPage = function(p) {
+  _clientAppLinksPage = Math.max(1, Number(p) || 1);
+  zyLoadClientAppLinksPage();
+};
+
 window.zyClientFilterAppLinks = function(q) {
   _clientAppLinksQuery = String(q || '');
-  zyRenderClientAppLinksBody();
+  clearTimeout(_clientAppLinksSearchTimer);
+  _clientAppLinksSearchTimer = setTimeout(() => {
+    _clientAppLinksPage = 1;
+    zyLoadClientAppLinksPage();
+  }, 240);
 };
 
 function zyRenderClientAppLinksBody() {
   const host = document.getElementById('client-applinks-body');
   if (!host) return;
-  const q = _clientAppLinksQuery.trim().toLowerCase();
-  const baseList = _clientAppLinksTab === 'latest' ? _clientPickLatestAppLinks(_clientAppLinksData) : _clientAppLinksData;
-  const items = baseList.filter(it =>
-    !q
-    || String(it.name || '').toLowerCase().includes(q)
-    || String(it.url || '').toLowerCase().includes(q)
-    || String(it.category || '').toLowerCase().includes(q)
-  );
+  const items = _clientAppLinksData;
   if (!items.length) {
-    host.innerHTML = `<div class="zy-empty" style="padding:36px;">No apps available right now.</div>`;
+    host.innerHTML = `<div class="zy-empty" style="padding:36px;">${_clientAppLinksMeta.all_count ? 'No matching apps found.' : 'No apps allowed by your Agent yet.'}</div>`;
     return;
   }
+
+  const offset = (_clientAppLinksMeta.page - 1) * _clientAppLinksMeta.limit;
+  const pagerHtml = typeof window.zyRenderAppLinksPager === 'function'
+    ? window.zyRenderAppLinksPager({
+        page: _clientAppLinksMeta.page,
+        totalPages: _clientAppLinksMeta.total_pages,
+        total: _clientAppLinksMeta.filtered_total,
+        limit: _clientAppLinksMeta.limit,
+        onPageFn: 'zyClientAppLinksGoPage',
+        idPrefix: 'cl-al'
+      })
+    : '';
+
   host.innerHTML = `
     <div class="zy-applinks-tbl-wrap">
       <table class="zy-dt zy-applinks-tbl zy-applinks-excel">
         <thead>
           <tr>
-            <th style="width:60px;text-align:center;">#</th>
+            <th style="width:66px;text-align:center;">#</th>
             <th style="width:32%;">App Name</th>
             <th>App Link</th>
           </tr>
@@ -1950,11 +2004,11 @@ function zyRenderClientAppLinksBody() {
             const rawUrl = String(it.url || '').trim();
             return `
               <tr>
-                <td class="zy-applink-num-td"><span class="zy-applink-num">${idx + 1}</span></td>
+                <td class="zy-applink-num-td"><span class="zy-applink-num">${(offset + idx + 1).toLocaleString()}</span></td>
                 <td class="zy-applink-name-td">
                   <div class="zy-applink-name-line">
                     <span class="zy-applink-name-txt">${zyEsc(it.name || 'App Link')}</span>
-                    ${it.pinned_top ? `<span class="zy-applink-top-tag">TOP</span>` : ''}
+                    ${(it.agent_latest || it.pinned_top) ? `<span class="zy-applink-top-tag">LATEST</span>` : ''}
                     ${it.category ? `<span class="zy-applink-cat-tag">${zyEsc(it.category)}</span>` : ''}
                   </div>
                   ${it.notes ? `<div class="zy-applink-card-note">${zyEsc(it.notes)}</div>` : ''}
@@ -1974,6 +2028,7 @@ function zyRenderClientAppLinksBody() {
         </tbody>
       </table>
     </div>
+    ${pagerHtml}
   `;
 }
 

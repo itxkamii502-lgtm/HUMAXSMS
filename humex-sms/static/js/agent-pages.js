@@ -434,14 +434,15 @@ function zyCrsRenderTopCards() {
   const avgPkr = publishedRanges.length
     ? (publishedRanges.reduce((s, r) => s + Number(r.client_rate_pkr || 0), 0) / publishedRanges.length)
     : 0;
-  const totalPool = (st.ranges || []).reduce((s, r) => s + Number(r.pool_available || 0), 0);
+  const totalOwnerPool = (st.ranges || []).reduce((s, r) => s + Number(r.owner_pool_available ?? r.pool_available ?? 0), 0);
+  const totalAgentHeld = (st.ranges || []).reduce((s, r) => s + Number(r.agent_held_count || 0), 0);
 
   el.innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:10px;">
       <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
         <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Total Ranges</div>
         <div class="zy-crs-num" style="font-size:20px;font-weight:800;color:var(--sp-text-primary);margin-top:2px;">${totalRanges}</div>
-        <div style="font-size:11px;color:var(--sp-text-muted);margin-top:2px;">${totalPool.toLocaleString()} Numbers in Pool</div>
+        <div style="font-size:11px;color:var(--sp-text-muted);margin-top:2px;">My Nums: <b>${totalAgentHeld.toLocaleString()}</b> · Owner Pool: <b style="color:#059669;">${totalOwnerPool.toLocaleString()}</b></div>
       </div>
       <div class="zy-theme-card" style="border-radius:8px;padding:10px 14px;">
         <div style="font-size:11px;font-weight:700;color:var(--sp-text-muted);text-transform:uppercase;letter-spacing:0.5px;">Published to Clients</div>
@@ -653,7 +654,7 @@ function zyCrsRenderTable() {
                 <td>
                   <div class="${isWnRow ? 'zy-wn-range-name' : ''}" style="font-weight:700;${isWnRow ? '' : 'color:var(--sp-text-primary);'}">${zyEsc(r.range_name)}</div>
                   <div style="font-size:11px;color:var(--sp-text-muted);">
-                    Pool: <strong>${Number(r.pool_available || 0).toLocaleString()}</strong>
+                    My Nums: <strong>${Number(r.agent_held_count || 0).toLocaleString()}</strong> · Owner Pool: <strong style="color:${Number(r.owner_pool_available ?? r.pool_available ?? 0) > 0 ? '#059669' : '#dc2626'};">${Number(r.owner_pool_available ?? r.pool_available ?? 0).toLocaleString()}</strong>
                   </div>
                 </td>
                 <td style="text-align:right;">
@@ -756,7 +757,8 @@ window.zyCrsViewRangeSpec = function(rangeId) {
           <div><span style="color:#64748b;">Batch Size:</span> <b>${batchSize} numbers</b></div>
           <div><span style="color:#64748b;">Daily Limit:</span> <b>${dailyAdds} add(s) / day (${batchSize * dailyAdds} nums/day)</b></div>
           <div><span style="color:#64748b;">Max Hold / Client:</span> <b>${maxHold} active numbers</b></div>
-          <div><span style="color:#64748b;">Pool Ready:</span> <b style="color:#10b981;">${Number(r.pool_available || 0).toLocaleString()} numbers</b></div>
+          <div><span style="color:#64748b;">My Numbers:</span> <b>${Number(r.agent_held_count || 0).toLocaleString()} numbers</b></div>
+          <div><span style="color:#64748b;">Owner Pool Left:</span> <b style="color:${Number(r.owner_pool_available ?? r.pool_available ?? 0) > 0 ? '#10b981' : '#dc2626'};">${Number(r.owner_pool_available ?? r.pool_available ?? 0).toLocaleString()} numbers</b></div>
           <div><span style="color:#64748b;">Allowed CLIs:</span> <small style="display:block;color:#64748b;line-height:1.3;">${zyEsc(r.cli_list || 'All CLIs')}</small></div>
         </div>
       </div>
@@ -4105,7 +4107,7 @@ window.zyAgtFulfillReq = function(id) {
   let stockNotice = '';
   if (freeCnt === 0) {
     stockNotice = `<div style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:8px;padding:10px 12px;font-size:12.5px;font-weight:600;margin-bottom:12px;">
-      <i class="fas fa-circle-exclamation"></i> 0 free numbers available in your Agent Pool for "${rangeName}". Request numbers from Owner first.
+      <i class="fas fa-circle-exclamation"></i> 0 free numbers available in Owner Pool for "${rangeName}".
     </div>`;
   } else if (freeCnt < reqQty) {
     stockNotice = `<div style="background:#fffbeb;border:1px solid #fde68a;color:#b45309;border-radius:8px;padding:10px 12px;font-size:12.5px;font-weight:600;margin-bottom:12px;">

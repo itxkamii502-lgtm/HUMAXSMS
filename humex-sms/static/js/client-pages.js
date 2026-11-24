@@ -102,7 +102,7 @@ async function pgSmsRanges() {
         if (reqBlocked) {
           actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas fa-lock"></i> ${zyEsc(lockLabel)}</button>`;
         } else if (roomCount <= 0) {
-          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available from your Agent in this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
+          actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="No free numbers are currently available in this range."><i class="fas fa-ban"></i> Out of Stock</button>`;
         } else {
           actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])" title="Self-Allocate Numbers (${roomCount.toLocaleString()} free)"><i class="fas fa-bolt"></i> Self-Allocate</button>`;
         }
@@ -152,7 +152,7 @@ async function pgSmsRanges() {
       return [
         { v: rName, h: `<strong class="zy-cl-rc-rname ${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
         { v: paytermSortVal, h: paytermCellHtml },
-        `<span class="monospace zy-cl-rc-hp" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> <span class="zy-cl-rc-dot">·</span> <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:800;">${roomCount.toLocaleString()}</span></span>`,
+        `<span class="monospace zy-cl-rc-hp" title="Your Held: ${heldCount}/${maxHoldNums} · Available Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> <span class="zy-cl-rc-dot">·</span> <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:800;">${roomCount.toLocaleString()}</span></span>`,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
         { v: '', h: `<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
@@ -233,7 +233,7 @@ window.zyOpenClientRateCardRequestModal = function(i) {
         </div>
       </div>
       <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--sp-border-subtle);font-size:11.5px;color:var(--sp-text-secondary);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
-        <span>Agent Free Pool: <b style="color:${Number(r.available || 0) > 0 ? '#10b981' : '#ef4444'};">${Number(r.available || 0).toLocaleString()}</b></span>
+        <span>Available Pool: <b style="color:${Number(r.available || 0) > 0 ? '#10b981' : '#ef4444'};">${Number(r.available || 0).toLocaleString()}</b></span>
         <span>Held: <b>${heldCount}/${maxHoldNums}</b></span>
         <span>Daily Adds: <b>${todayAddsUsed}/${dailyAddsLimit}</b></span>
         <span>Today Nums: <b>${todayNums}/${dailyLimitNums}</b></span>

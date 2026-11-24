@@ -9110,7 +9110,7 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
       const effAllowedQty = lim.allowed_quantities;
       const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
       const poolAvailable = rangeNums.filter(n =>
-        myAgentId ? (Number(n.agent_id) === Number(myAgentId) && !n.client_id) : (!n.agent_id && !n.client_id)
+        !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked'
       ).length;
 
       const visRangeName = scrubWhitenoiseName(rangeName, isOwner);
@@ -9286,9 +9286,15 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
     const clientRatePkr = (acr && Number(acr.client_rate_pkr) > 0) ? round2(acr.client_rate_pkr) : null;
     const isConfigured = Boolean(acr && acr.published !== false && clientRatePkr !== null && clientRatePkr > 0);
     const marginPkr = (clientRatePkr !== null && agentRatePkr > 0) ? round2(agentRatePkr - clientRatePkr) : null;
-    const poolAvailable = numbers.filter(n =>
-      (n.range_id ? Number(n.range_id) === Number(r.id) : (n.range_name === rangeName)) &&
+    const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
+    const ownerPoolAvailable = rangeNums.filter(n =>
+      !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked'
+    ).length;
+    const agentFreeCount = rangeNums.filter(n =>
       Number(n.agent_id) === agentId && !n.client_id
+    ).length;
+    const agentHeldCount = rangeNums.filter(n =>
+      Number(n.agent_id) === agentId
     ).length;
 
     const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
@@ -9318,7 +9324,10 @@ app.get('/api/agent/client-rates', requireAuth, (req, res) => {
       allowed_quantities: lim.allowed_quantities,
       daily_request_limit: lim.daily_request_limit,
       max_hold_limit: lim.max_hold_limit,
-      pool_available: poolAvailable,
+      pool_available: ownerPoolAvailable,
+      owner_pool_available: ownerPoolAvailable,
+      agent_free_count: agentFreeCount,
+      agent_held_count: agentHeldCount,
       updated_at: acr ? (acr.updated_at || acr.created || '') : ''
     };
   });
@@ -9628,7 +9637,7 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
     const allowedQty = lim.allowed_quantities;
     const poolAvailable = numbers.filter(n =>
       n && matchesRangeRef(n, r.id, rangeName) &&
-      (targetAgentId ? (Number(n.agent_id) === Number(targetAgentId) && !n.client_id) : (!n.agent_id && !n.client_id))
+      !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked'
     ).length;
 
     const quota = role === 'client'
@@ -16092,6 +16101,9 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
       const clRec = (readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
       const clAgentId = Number(clRec.agent_id || sessionUser.agent_id || 0);
       const acr = clAgentId ? findAgentClientRate(clAgentId, effRid, effRname) : null;
+      if (clAgentId && (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0))) {
+        return res.status(400).json({ error: 'This range is not enabled by your Agent yet.' });
+      }
       const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
       const quota = getClientRangeQuota(sessionUser.id, effRid, effRname, { numbers, agentId: clAgentId }, lim);
       if (qty > lim.batch_size) {
@@ -16123,20 +16135,13 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
       if (String(n.status || '').toLowerCase() === 'blocked') return false;
       if (!isOwner && !wnAllowed && isWhitenoiseRecord(n, wnRangesMap, wnTags)) return false;
       if (!matchesRangeRef(n, effMatchRid, effMatchRname)) return false;
-
-      if (isClient) {
-        if (sessionUser.agent_id) {
-          return Number(n.agent_id) === Number(sessionUser.agent_id) && !n.client_id;
-        }
-        return !n.agent_id && !n.client_id;
-      }
       return !n.agent_id && !n.client_id;
     });
 
     if (available.length === 0) {
       return res.status(400).json({
         error: isClient
-          ? 'No free numbers are currently available in this range from your Agent. Please choose another range or try again later.'
+          ? 'No free numbers are currently available in this range. Please choose another range or try again later.'
           : 'No free numbers are currently available in the Owner pool for this range.'
       });
     }
@@ -16147,15 +16152,23 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const clRecForStamp = isClient
       ? ((readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser)
       : null;
+    const effClientAgentId = isClient
+      ? (Number(sessionUser.agent_id || (clRecForStamp && clRecForStamp.agent_id) || 0) || null)
+      : null;
+    const agRecForStamp = effClientAgentId
+      ? ((readDb('agents') || []).find(a => Number(a.id) === Number(effClientAgentId)) || null)
+      : null;
 
     toAllocate.forEach(n => {
       const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
       const effTerm = isWn ? 'Monthly' : targetPayterm;
       const ptMeta = getPaytermMeta(effTerm);
       if (isClient) {
-        const effAgId = Number(sessionUser.agent_id || (clRecForStamp && clRecForStamp.agent_id) || n.agent_id || 0) || null;
+        const effAgId = effClientAgentId || (n.agent_id ? Number(n.agent_id) : null);
         const rngForStamp = (n.range_id != null && wnRangesMap.get(`id:${Number(n.range_id)}`)) || matchedRng || null;
-        const agentRateUsd = Number(n.agent_rate || (rngForStamp && (rngForStamp.agent_rate || rngForStamp.rate || rngForStamp.payout)) || 0);
+        const agentRateUsd = Number(n.agent_rate || 0)
+          || (rngForStamp ? getRangeAgentRate(rngForStamp, ptMeta.key) : 0)
+          || Number((rngForStamp && (rngForStamp.agent_rate || rngForStamp.rate || rngForStamp.payout)) || 0);
         const rp = resolveClientRatePair({
           agentId: effAgId,
           rangeId: n.range_id || (rngForStamp && rngForStamp.id) || effMatchRid,
@@ -16169,6 +16182,14 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
         n.client_name = sessionUser.full_name || sessionUser.username;
         n.user = sessionUser.username;
         n.agent_id = effAgId;
+        if (agRecForStamp) {
+          n.agent_username = agRecForStamp.username || n.agent_username || '';
+          n.agent_name = agRecForStamp.full_name || agRecForStamp.name || agRecForStamp.username || n.agent_name || '';
+        }
+        if (agentRateUsd > 0) {
+          n.agent_rate = agentRateUsd;
+          n.payout = agentRateUsd;
+        }
         n.client_payterm = ptMeta.key;
         n.client_assigned_at = now;
         if (rp && !rp.error && Number(rp.client_rate_pkr) > 0) {
@@ -16202,7 +16223,7 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const history = readDb('allocation_history') || [];
     const historyEntry = {
       id: nextId(history, 'allocation_history'),
-      from_user: isClient ? (sessionUser.agent_id ? 'Agent' : 'Owner') : 'Owner',
+      from_user: 'Owner',
       to_user_id: sessionUser.id,
       to_user: sessionUser.username,
       to_role: sessionUser.role,
@@ -17223,8 +17244,8 @@ app.delete('/api/notifications/:id', (req, res) => {
 function getRangeFreePool(numbers, { isAgent, agentId, rangeId, rangeName, country, provider }) {
   const list = Array.isArray(numbers) ? numbers : [];
   const basePool = isAgent
-    ? list.filter(n => n && Number(n.agent_id) === Number(agentId) && !n.client_id)
-    : list.filter(n => n && !n.agent_id && !n.client_id);
+    ? list.filter(n => n && Number(n.agent_id) === Number(agentId) && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked')
+    : list.filter(n => n && !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked');
 
   const rIdNum = rangeId ? Number(rangeId) : null;
   const rNameLow = String(rangeName || '').trim().toLowerCase();
@@ -17290,8 +17311,8 @@ app.get('/api/agent-requests', requireAuth, (req, res) => {
     const enriched = list.map(r => {
       const rg = r.range_id ? rangeById.get(Number(r.range_id)) : null;
       const pool = getRangeFreePool(allNumbers, {
-        isAgent: isAgent && scope !== 'mine',
-        agentId: isAgent ? sessionUser.id : null,
+        isAgent: false,
+        agentId: null,
         rangeId: r.range_id || (rg && rg.id) || null,
         rangeName: r.range_name || (rg && (rg.range_name || rg.name)) || '',
         country: r.country || (rg && rg.country) || '',
@@ -17649,8 +17670,10 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
       return {
         ...n,
         agent_id: effAgentId,
+        agent_username: (isAgent ? sessionUser.username : (reqItem.agent_username || n.agent_username || '')),
         agent_name: reqItem.agent_username || (isAgent ? sessionUser.username : ''),
         agent_rate: agRate || n.agent_rate,
+        payout: agRate || n.payout,
         client_id: reqItem.client_id,
         client_name: reqItem.client_username || '',
         client_username: reqItem.client_username || '',
@@ -17683,8 +17706,8 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
           if (n.client_id || (!isClientReq && n.agent_id)) {
             return res.status(400).json({ error: `Number ${n.number} is already allocated.` });
           }
-          if (isAgent && Number(n.agent_id) !== Number(sessionUser.id)) {
-            return res.status(403).json({ error: `Number ${n.number} does not belong to your agent pool.` });
+          if (isAgent && n.agent_id && Number(n.agent_id) !== Number(sessionUser.id)) {
+            return res.status(403).json({ error: `Number ${n.number} belongs to another Agent.` });
           }
         }
       }
@@ -17719,8 +17742,8 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
       });
     } else {
       const pool = getRangeFreePool(numbers, {
-        isAgent,
-        agentId: isAgent ? sessionUser.id : null,
+        isAgent: false,
+        agentId: null,
         rangeId,
         rangeName: rangeLabel,
         country,

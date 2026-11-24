@@ -84,7 +84,10 @@ function zyColClass(colName) {
   if (cn === 'status' || cn === 'cause' || cn === 'state' || cn === 'type' || cn === 'provider') {
     return 'col-status text-center';
   }
-  if (cn === 'sms' || cn === 'message' || cn === 'sms message' || cn === 'range' || cn === 'agent' || cn === 'client') {
+  if (cn === 'client' || cn === 'client username' || cn === 'username' || cn === 'agent') {
+    return 'col-client text-left';
+  }
+  if (cn === 'sms' || cn === 'message' || cn === 'sms message' || cn === 'range') {
     return 'text-left';
   }
   if (cn === 'currency' || cn === 'curr.' || cn === 'curr') {
@@ -2625,12 +2628,36 @@ function zyNormalizePayterm(term) {
   return 'Weekly';
 }
 
+function zyGetMonthlyHoldDays() {
+  try {
+    const bs = (typeof window !== 'undefined' && window.__BRAND_SETTINGS__) ? window.__BRAND_SETTINGS__ : null;
+    const h = bs?.monthly_cycle?.hold_days;
+    if (h !== undefined && h !== null && h !== '' && Number.isFinite(Number(h))) {
+      return Math.max(0, Math.min(90, Math.round(Number(h))));
+    }
+    if (typeof localStorage !== 'undefined') {
+      const saved = JSON.parse(localStorage.getItem('app_brand_settings') || '{}');
+      const sh = saved?.monthly_cycle?.hold_days;
+      if (sh !== undefined && sh !== null && sh !== '' && Number.isFinite(Number(sh))) {
+        return Math.max(0, Math.min(90, Math.round(Number(sh))));
+      }
+    }
+  } catch (_) {}
+  return 5;
+}
+
+function zyGetMonthlyScheduleLabel() {
+  const hd = zyGetMonthlyHoldDays();
+  return hd === 5 ? 'Monthly (30/5) {W}' : `Monthly (30/${hd}) {W}`;
+}
+
 function zyRenderPaytermOptions(selectedTerm = '', customList = null) {
   const norm = zyNormalizePayterm(selectedTerm);
   const isMonthly = norm === 'Monthly';
+  const mLabel = zyGetMonthlyScheduleLabel();
   return `
     <option value="Weekly" ${!isMonthly ? 'selected' : ''}>Weekly (7/3)</option>
-    <option value="Monthly" ${isMonthly ? 'selected' : ''}>Monthly (30/5) {W}</option>
+    <option value="Monthly" ${isMonthly ? 'selected' : ''}>${mLabel}</option>
   `;
 }
 
@@ -2638,7 +2665,7 @@ function zyPaytermBadge(term) {
   if (!term) return '';
   const norm = zyNormalizePayterm(term);
   const isMonthly = norm === 'Monthly';
-  const label = isMonthly ? 'Monthly (30/5) {W}' : 'Weekly (7/3)';
+  const label = isMonthly ? zyGetMonthlyScheduleLabel() : 'Weekly (7/3)';
   const slug = isMonthly ? 'monthly' : 'weekly';
   const icon = isMonthly ? 'fa-calendar-check' : 'fa-calendar-week';
   return `<span class="zy-payterm-badge zy-pt-${slug}"><i class="fas ${icon}"></i> ${label}</span>`;
@@ -2832,14 +2859,25 @@ function zyRenderCdrFilterGrid(options = {}) {
 function zyHandleCdrSearchInput(inputEl, clearBtnId, reloadCb) {
   const clearBtn = clearBtnId ? document.getElementById(clearBtnId) : null;
   if (clearBtn) clearBtn.style.display = (inputEl && inputEl.value.trim()) ? 'inline-flex' : 'none';
+  window._zyCdrSearchTimers = window._zyCdrSearchTimers || {};
+  const key = (inputEl && inputEl.id) || '_default';
+  if (window._zyCdrSearchTimers[key]) clearTimeout(window._zyCdrSearchTimers[key]);
   if (window._zyCdrSearchTimer) clearTimeout(window._zyCdrSearchTimer);
-  window._zyCdrSearchTimer = setTimeout(() => {
+  const t = setTimeout(() => {
+    delete window._zyCdrSearchTimers[key];
     if (typeof reloadCb === 'function') reloadCb();
-  }, 350);
+  }, 250);
+  window._zyCdrSearchTimers[key] = t;
+  window._zyCdrSearchTimer = t;
 }
 window.zyHandleCdrSearchInput = zyHandleCdrSearchInput;
 
 function zyClearCdrSearch(inputId, clearBtnId, reloadCb) {
+  window._zyCdrSearchTimers = window._zyCdrSearchTimers || {};
+  if (inputId && window._zyCdrSearchTimers[inputId]) {
+    clearTimeout(window._zyCdrSearchTimers[inputId]);
+    delete window._zyCdrSearchTimers[inputId];
+  }
   if (window._zyCdrSearchTimer) clearTimeout(window._zyCdrSearchTimer);
   const inp = inputId ? document.getElementById(inputId) : null;
   if (inp) {
@@ -4030,6 +4068,36 @@ window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
         ? `<span class="zy-cdr2-status-pill is-wait"><i class="far fa-clock"></i> ${isUr ? 'Upload mein waqt' : 'Next Upload'}: <strong id="zy-cdr2-noon-cd">${formatHMS(secsNow)}</strong></span>`
         : `<span class="zy-cdr2-status-pill is-pending"><i class="fas fa-hourglass-half"></i> ${isUr ? 'Upload ka intezar' : 'Awaiting 12:00 PM Upload'}</span>`);
 
+  const mc = (status && status.monthly_cycle) ? status.monthly_cycle : null;
+  const mcHoldDays = mc && Number.isFinite(Number(mc.hold_days)) ? Number(mc.hold_days) : 5;
+  const mcCycleDays = mc && Number.isFinite(Number(mc.cycle_days)) ? Number(mc.cycle_days) : 30;
+  const mcTag = mcHoldDays === 5 ? 'Monthly (30/5) {W}' : `Monthly (${mcCycleDays}/${mcHoldDays}) {W}`;
+  const completedCycles = (status && Array.isArray(status.completed_cycles)) ? status.completed_cycles : [];
+  const mcStripHtml = mc
+    ? `<div class="zy-cdr2-notice-meta" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+         <span><i class="fas fa-rotate"></i> <strong>Cycle #${mc.cycle_number || 1}:</strong> ${zyEsc(mc.start_date)} → ${zyEsc(mc.end_date)}</span>
+         <span>· <strong>Day ${mc.day_in_cycle || 1}/${mcCycleDays}</strong> (${mc.days_remaining ?? mcCycleDays}d left)</span>
+         <span>· <strong>${mcHoldDays}d Hold</strong> → Clears <strong>${zyEsc(mc.clear_date)}</strong></span>
+         <span>· Next auto: <strong>${zyEsc(mc.next_cycle_start || '—')}</strong></span>
+       </div>`
+    : '';
+  const completedStripHtml = completedCycles.length
+    ? `<div style="margin-top:8px;padding:8px 12px;border:1px solid var(--border-color,#c7d2fe);border-radius:8px;background:var(--bg-card,#f8fafc);font-size:11.5px;">
+         <div style="font-weight:700;margin-bottom:5px;display:flex;align-items:center;gap:6px;">
+           <i class="fas fa-archive" style="color:#4f46e5;"></i>
+           <span>${isUr ? 'Mukammal Shuda 30-Din Whitenoise Cycles (Alag Record)' : 'Completed 30-Day Whitenoise Cycles (Auto-Archived)'} (${completedCycles.length})</span>
+         </div>
+         <div style="display:flex;flex-wrap:wrap;gap:6px;">
+           ${completedCycles.slice(0, 4).map(cy => `
+             <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-color,#e2e8f0);background:var(--bg-surface,#fff);">
+               <strong>#${cy.cycle_number}</strong> (${zyEsc(cy.start_date)}→${zyEsc(cy.end_date)}) · <b>${Number(cy.sms_count || 0).toLocaleString()} SMS</b> ·
+               ${cy.is_cleared ? '<span style="color:#059669;font-weight:700;">Cleared</span>' : `<span style="color:#d97706;font-weight:700;">Hold ${cy.days_until_clear}d → ${zyEsc(cy.clear_date)}</span>`}
+             </span>
+           `).join('')}
+         </div>
+       </div>`
+    : '';
+
   host.innerHTML = `
     <div class="zy-cdr2-notice-banner ${uploaded ? 'is-ready' : 'is-waiting'}">
       <div class="zy-cdr2-notice-ico">
@@ -4041,7 +4109,8 @@ window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
           ${badgeHtml}
         </div>
         <div class="zy-cdr2-notice-desc">${descText}</div>
-        ${latestDate ? `<div class="zy-cdr2-notice-meta"><i class="fas fa-database"></i> ${isUr ? 'Aakhri uploaded report date' : 'Latest uploaded report'}: <strong>${zyEsc(latestDate)}</strong> · Monthly (30/5) {W}</div>` : ''}
+        ${latestDate ? `<div class="zy-cdr2-notice-meta"><i class="fas fa-database"></i> ${isUr ? 'Aakhri uploaded report date' : 'Latest uploaded report'}: <strong>${zyEsc(latestDate)}</strong> · ${zyEsc(mcTag)}</div>` : ''}
+        ${mcStripHtml}
       </div>
       <div class="zy-cdr2-notice-actions">
         <button type="button" class="btn btn-outline btn-sm" onclick="window.zyOpenCdr2TermsModal({ viewOnly: true })">
@@ -4049,6 +4118,7 @@ window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
         </button>
       </div>
     </div>
+    ${completedStripHtml}
   `;
 
   if (!uploaded && secsNow > 0) {
@@ -4098,11 +4168,11 @@ window.zyOpenCdr2TermsModal = function (opts) {
         <div class="zy-cdr2-term-item">
           <div class="zy-cdr2-term-num">1</div>
           <div>
-            <div class="zy-cdr2-term-h">${isUr ? 'Monthly Basis Settlement (30/5)' : 'Monthly Basis Settlement (30/5)'}</div>
+            <div class="zy-cdr2-term-h">${isUr ? `Monthly Basis Settlement (30/${zyGetMonthlyHoldDays()})` : `Monthly Basis Settlement (30/${zyGetMonthlyHoldDays()})`}</div>
             <div class="zy-cdr2-term-p">
               ${isUr
-                ? 'Ye route strictly <strong>Monthly (30/5)</strong> settlement cycle par chalta hai — is ka payout weekly nahi balkay monthly closing ke baad clear hota hai.'
-                : 'This route operates strictly on a <strong>Monthly (30/5)</strong> settlement cycle rather than weekly payouts.'}
+                ? `Ye route strictly <strong>Monthly (30/${zyGetMonthlyHoldDays()})</strong> auto-rolling 30-din settlement cycle par chalta hai — har 30 din baad cycle mukammal ho kar <strong>${zyGetMonthlyHoldDays} din hold</strong> ke baad clear hota hai.`
+                : `This route operates strictly on an auto-rolling <strong>Monthly (30/${zyGetMonthlyHoldDays()})</strong> settlement cycle (every 30 days + <strong>${zyGetMonthlyHoldDays}-day hold</strong>) rather than weekly payouts.`}
             </div>
           </div>
         </div>

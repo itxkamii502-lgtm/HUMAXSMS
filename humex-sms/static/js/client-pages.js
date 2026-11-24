@@ -1438,6 +1438,8 @@ async function pgClientPaymentRequests() {
   const mw = payInfo?.monthly_wallet || null;
   const weeklyAvailPkr = ww ? Number(ww.available_pkr || 0) : availBalPkr;
   const weeklyPendingPkr = ww ? Number(ww.pending_pkr || 0) : pendingHoldPkr;
+  const weeklyThisWeekLockedPkr = ww && ww.this_week_pkr != null ? Number(ww.this_week_pkr || 0) : thisWeekPkr;
+  const weeklyNextMonday = ww?.next_monday_date || 'Next Monday';
   const monthlyAvailPkr = mw ? Number(mw.available_pkr || 0) : 0;
   const monthlyHeldPkr = mw ? Number(mw.held_pkr || 0) : 0;
   const monthlyPendingPkr = mw ? Number(mw.pending_pkr || 0) : 0;
@@ -1445,24 +1447,52 @@ async function pgClientPaymentRequests() {
   const hs = payInfo && payInfo.hold_summary ? payInfo.hold_summary : null;
   const m305 = payInfo && payInfo.monthly30_5 ? payInfo.monthly30_5 : null;
   const mc = (payInfo && payInfo.monthly_cycle) ? payInfo.monthly_cycle : {};
+  const holdDays = Number.isFinite(Number(m305?.hold_days ?? mc.hold_days)) ? Number(m305?.hold_days ?? mc.hold_days) : 5;
+  const cycleDays = Number.isFinite(Number(m305?.cycle_days ?? mc.cycle_days)) ? Number(m305?.cycle_days ?? mc.cycle_days) : 30;
+  const daysLeft = Number.isFinite(Number(m305?.days_remaining ?? mc.days_remaining)) ? Number(m305?.days_remaining ?? mc.days_remaining) : cycleDays;
+  const dayInCycle = Number(m305?.day_in_cycle ?? mc.day_in_cycle ?? 1);
+  const mcBoxTitle = holdDays === 5
+    ? 'Monthly Cycle (30/5) {W} Settlement Box'
+    : `Monthly Cycle (${cycleDays}/${holdDays}) {W} Settlement Box`;
+  const mcLabel = holdDays === 5 ? 'Monthly (30/5) {W}' : `Monthly (${cycleDays}/${holdDays}) {W}`;
+  const mcBadgeUpper = `MONTHLY (${cycleDays}/${holdDays}) {W}`;
+
   const holdNoticeHtml = hs
     ? `<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#1e293b;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
          <span><i class="fas fa-hourglass-half" style="color:#d97706;margin-right:6px;"></i> <b>Payterm Hold Summary (PKR):</b> Cleared: <b style="color:#059669;">Rs. ${zyFmtMoney(Number(hs.cleared_pkr || 0), 4)}</b> · On Hold: <b style="color:#d97706;">Rs. ${zyFmtMoney(Number(hs.held_pkr || 0), 4)}</b> (Next release: <b>${zyEsc(hs.next_release_date || '—')}</b>)</span>
-         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (API) · Monthly 30/5 {W}</span>
+         <span style="font-size:11px;color:#64748b;">Weekly 7/3 (API) · ${zyEsc(mcLabel)}</span>
        </div>`
     : '';
   const m305Start = m305?.cycle_start || mc.start_date || '—';
   const m305End = m305?.cycle_end || mc.end_date || '—';
   const m305Clear = mw?.clear_date || m305?.clear_date || mc.clear_date || m305?.next_release_date || 'End of cycle';
   const showMonthlyCard = Boolean(payInfo?.whitenoise_access || window.ZY_WHITENOISE_ACCESS || (mw && (Number(mw.earned_pkr || 0) > 0 || monthlyAvailPkr > 0 || monthlyHeldPkr > 0)));
+  const completedCycles = Array.isArray(m305?.completed_cycles) ? m305.completed_cycles : (Array.isArray(payInfo?.completed_cycles) ? payInfo.completed_cycles : []);
+  const completedRowsHtml = completedCycles.length ? `
+         <div style="margin-top:10px;padding-top:8px;border-top:1px dashed #c7d2fe;">
+           <div style="font-size:11px;font-weight:800;color:#312e81;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.3px;">
+             <i class="fas fa-archive" style="margin-right:4px;"></i> Completed 30-Day Whitenoise Cycles (${completedCycles.length})
+           </div>
+           <div style="display:flex;flex-direction:column;gap:5px;">
+             ${completedCycles.slice(0, 4).map(cy => `
+               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;background:#fff;border:1px solid #e0e7ff;border-radius:6px;padding:6px 10px;font-size:11.5px;">
+                 <span><b>Cycle #${cy.cycle_number}</b> · ${zyEsc(cy.start_date)} → ${zyEsc(cy.end_date)} · <b>${Number(cy.sms_count || 0).toLocaleString()}</b> SMS</span>
+                 <span><b>Rs. ${zyFmtMoney(Number(cy.earned_pkr || 0), 2)}</b> · ${cy.is_cleared ? '<span style="color:#059669;font-weight:700;">Cleared</span>' : `<span style="color:#d97706;font-weight:700;">Hold (${cy.days_until_clear}d left · Clears ${zyEsc(cy.clear_date)})</span>`}</span>
+               </div>
+             `).join('')}
+           </div>
+         </div>` : '';
 
   const wnNoticeHtml = holdNoticeHtml + (showMonthlyCard && m305
     ? `<div style="background:linear-gradient(135deg,#eef2ff,#f8fafc);border:1.5px solid #c7d2fe;border-radius:10px;padding:12px 14px;margin-bottom:14px;color:#1e1b4b;">
          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
            <span style="font-size:13px;font-weight:800;color:#312e81;">
-             <i class="fas fa-calendar-check" style="color:#4f46e5;margin-right:6px;"></i> Monthly Cycle (30/5) {W} Settlement Box
+             <i class="fas fa-calendar-check" style="color:#4f46e5;margin-right:6px;"></i> ${zyEsc(mcBoxTitle)}
            </span>
-           <span class="badge" style="background:#fff;color:#4338ca;border:1px solid #c7d2fe;font-weight:700;">Cycle: ${zyEsc(m305Start)} → ${zyEsc(m305End)}</span>
+           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+             <span class="badge" style="background:#fff;color:#4338ca;border:1px solid #c7d2fe;font-weight:700;">Cycle: ${zyEsc(m305Start)} → ${zyEsc(m305End)}</span>
+             <span class="badge" style="background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;font-weight:700;">Day ${dayInCycle}/${cycleDays} · ${daysLeft}d left</span>
+           </div>
          </div>
          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;font-size:12px;">
            <div style="background:#fff;border:1px solid #e0e7ff;border-radius:8px;padding:8px 10px;">
@@ -1470,7 +1500,7 @@ async function pgClientPaymentRequests() {
              <div style="font-size:15px;font-weight:800;color:#059669;margin-top:2px;">Rs. ${zyFmtMoney(Number(m305.cleared_pkr || 0), 4)}</div>
            </div>
            <div style="background:#fff;border:1px solid #e0e7ff;border-radius:8px;padding:8px 10px;">
-             <div style="color:#64748b;font-size:10.5px;font-weight:700;text-transform:uppercase;">Held in Cycle (5d Hold)</div>
+             <div style="color:#64748b;font-size:10.5px;font-weight:700;text-transform:uppercase;">Held in Cycle (${holdDays}d Hold)</div>
              <div style="font-size:15px;font-weight:800;color:#d97706;margin-top:2px;">Rs. ${zyFmtMoney(Number(m305.held_pkr || 0), 4)}</div>
            </div>
            <div style="background:#fff;border:1px solid #e0e7ff;border-radius:8px;padding:8px 10px;">
@@ -1482,7 +1512,8 @@ async function pgClientPaymentRequests() {
              <div style="font-size:15px;font-weight:800;color:#0f172a;margin-top:2px;">${Number(m305.sms_count || 0).toLocaleString()}</div>
            </div>
          </div>
-         <div style="font-size:11px;color:#4338ca;margin-top:8px;">Monthly (30/5) {W} earnings are tracked separately from Weekly (API) earnings and unlock for payout request on <b>${zyEsc(m305Clear)}</b> once the cycle completes.</div>
+         <div style="font-size:11px;color:#4338ca;margin-top:8px;">${zyEsc(mcLabel)} auto-advances every ${cycleDays} days (Next: <b>${zyEsc(m305.next_cycle_start || mc.next_cycle_start || 'Auto')}</b>) and unlocks after <b>${holdDays} days hold</b> on <b>${zyEsc(m305Clear)}</b>.</div>
+         ${completedRowsHtml}
        </div>`
     : '');
 
@@ -1491,11 +1522,11 @@ async function pgClientPaymentRequests() {
         <div>
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <div style="font-size:11.5px;font-weight:700;color:#4338ca;text-transform:uppercase;letter-spacing:0.3px;">Monthly {W} Balance (PKR)</div>
-            <span class="badge" style="background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;">MONTHLY (30/5) {W}</span>
+            <span class="badge" style="background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;">${zyEsc(mcBadgeUpper)}</span>
           </div>
           <div style="font-size:24px;font-weight:800;color:${monthlyAvailPkr > 0 ? '#059669' : '#0f172a'};margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-monthly-bal-val">${monthlyAvailPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span> <span style="font-size:11.5px;font-weight:600;color:#64748b;">matured</span></div>
           <div style="font-size:11.5px;color:#64748b;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-            <span><i class="fas fa-lock" style="color:#d97706;"></i> Held in Cycle: <strong>Rs. ${zyFmtMoney(monthlyHeldPkr, 2)}</strong></span>
+            <span><i class="fas fa-lock" style="color:#d97706;"></i> Held (${holdDays}d): <strong>Rs. ${zyFmtMoney(monthlyHeldPkr, 2)}</strong></span>
             ${monthlyPendingPkr > 0 ? `<span style="color:#7c3aed;">· Pending: <b>Rs. ${zyFmtMoney(monthlyPendingPkr, 2)}</b></span>` : ''}
             <span>· Unlocks: <strong>${zyEsc(m305Clear)}</strong></span>
           </div>
@@ -1506,7 +1537,7 @@ async function pgClientPaymentRequests() {
               <i class="fas fa-calendar-check"></i> Request Monthly {W} Payout
             </button>
           ` : `
-            <button type="button" disabled style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#e2e8f0;border:none;color:#64748b;cursor:not-allowed;" title="Monthly (30/5) {W} payout unlocks once the monthly cycle completes on ${zyEsc(m305Clear)}">
+            <button type="button" disabled style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#e2e8f0;border:none;color:#64748b;cursor:not-allowed;" title="${zyEsc(mcLabel)} payout unlocks once the monthly cycle completes on ${zyEsc(m305Clear)}">
               <i class="fas fa-lock"></i> Unlocks on ${zyEsc(m305Clear)}
             </button>
           `}
@@ -1541,17 +1572,23 @@ async function pgClientPaymentRequests() {
             <div style="font-size:11.5px;font-weight:700;color:#1d4ed8;text-transform:uppercase;letter-spacing:0.3px;">Weekly (API) Balance (PKR)</div>
             <span class="badge badge-blue" style="font-size:10px;font-weight:700;">WEEKLY (7/3) · API</span>
           </div>
-          <div style="font-size:24px;font-weight:800;color:#0f172a;margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-bal-val">${weeklyAvailPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>
+          <div style="font-size:24px;font-weight:800;color:${weeklyAvailPkr > 0 ? '#059669' : '#0f172a'};margin:4px 0 6px;font-variant-numeric:tabular-nums;">Rs. <span id="cpr-bal-val">${weeklyAvailPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span> <span style="font-size:11.5px;font-weight:600;color:#64748b;">previous weeks</span></div>
           <div style="font-size:11.5px;color:#64748b;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <span><i class="fas fa-info-circle" style="color:#0ea5e9;"></i> Min payout: <strong>Rs. ${zyFmtMoney(minPayoutPkr, 2)} PKR</strong></span>
-            <span>· This Week: <b>Rs. ${thisWeekPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></span>
+            <span>· <i class="fas fa-lock" style="color:#d97706;"></i> This Week (Unlocks Mon ${zyEsc(weeklyNextMonday)}): <b>Rs. ${weeklyThisWeekLockedPkr.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></span>
             ${weeklyPendingPkr > 0 ? `<span style="color:#d97706;">· Pending: <b>Rs. ${zyFmtMoney(weeklyPendingPkr, 2)}</b></span>` : ''}
           </div>
         </div>
         <div style="margin-top:12px;">
-          <button type="button" class="sp-btn-primary" style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#10b981;border:none;color:#fff;cursor:pointer;" onclick="zyClientRequestPayoutModal(${weeklyAvailPkr}, ${minPayoutPkr}, 'weekly')">
-            <i class="fas fa-paper-plane"></i> Request Weekly (API) Payout
-          </button>
+          ${weeklyAvailPkr > 0 ? `
+            <button type="button" class="sp-btn-primary" style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#10b981;border:none;color:#fff;cursor:pointer;" onclick="zyClientRequestPayoutModal(${weeklyAvailPkr}, ${minPayoutPkr}, 'weekly')">
+              <i class="fas fa-paper-plane"></i> Request Weekly (API) Payout
+            </button>
+          ` : `
+            <button type="button" disabled style="height:32px;padding:0 14px;font-size:12px;font-weight:700;border-radius:6px;display:inline-flex;align-items:center;gap:6px;background:#e2e8f0;border:none;color:#64748b;cursor:not-allowed;" title="Current week's earnings unlock on Monday (${zyEsc(weeklyNextMonday)}) after this week finishes">
+              <i class="fas fa-lock"></i> ${weeklyThisWeekLockedPkr > 0 ? `Unlocks Mon ${zyEsc(weeklyNextMonday)}` : 'No Completed-Week Balance'}
+            </button>
+          `}
         </div>
       </div>
 

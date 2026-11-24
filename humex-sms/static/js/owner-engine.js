@@ -112,6 +112,7 @@ async function apiFetch(path, opts = {}, retries = 2) {
     }
     return data;
   } catch (err) {
+    if (err && err.name === 'AbortError') return null;
     if (retries > 0 && (err.name === 'TypeError' || String(err.message).toLowerCase().includes('failed to fetch'))) {
       await new Promise(r => setTimeout(r, 350));
       return apiFetch(path, opts, retries - 1);
@@ -720,25 +721,53 @@ function loadPage(page) {
 //  PROVIDERS — CR API, WEB SCRAPING PANELS & WHITENOISE EXCEL REPORTS
 // ════════════════════════════════════════════════════════════════════
 
+function fmtCrTzOffset(mins) {
+  const m = Number(mins || 0);
+  if (!Number.isFinite(m) || m === 0) return 'UTC (0)';
+  const sign = m > 0 ? '+' : '-';
+  const abs = Math.abs(Math.round(m));
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  return `UTC${sign}${hh}:${mm}`;
+}
+
 function buildCrApiTableHtml(connections) {
+  window._crApiConnsCache = Array.isArray(connections) ? connections : [];
   return connections.length ? buildTable(
-    ['#', 'Panel Name', 'Panel URL', 'Token', 'Auto-Pull', 'Last Pull', 'Status', 'Total Pulled', 'Active', 'Actions'],
-    connections.map(cn => [
-      cn.id,
-      `<strong>${escapeHtml(cn.panel_name || '—')}</strong>`,
-      `<span class="fs-12 text-muted">${escapeHtml((cn.panel_url || '').length > 40 ? cn.panel_url.slice(0, 40) + '…' : (cn.panel_url || ''))}</span>`,
-      `<span class="monospace">${escapeHtml(cn.token_masked || '—')}</span>`,
-      `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${Number(cn.interval) || 10}s</span>`,
-      cn.last_pulled_at ? fmtShort(cn.last_pulled_at) : '<span class="text-muted">Not polled yet</span>',
-      `<span class="fs-12 ${String(cn.last_status || '').startsWith('Error') ? 'text-danger' : 'text-success'}">${escapeHtml(cn.last_status || '—')}</span>`,
-      Number(cn.total_pulled) || 0,
-      statusBadge(cn.active ? 'active' : 'paused'),
-      `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
-        <button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id})" title="Pull latest OTPs now"><i class="fas fa-rotate"></i> Pull</button>
-        <button class="btn btn-${cn.active ? 'warning' : 'success'} btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Stop / Pause connection' : 'Start / Resume connection'}"><i class="fas fa-${cn.active ? 'stop' : 'play'}"></i> ${cn.active ? 'Stop' : 'Resume'}</button>
-        ${cn.active ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteCrApiConn(${cn.id}, '${escapeHtml(String(cn.panel_name || 'CR API Connection')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
-      </div>`
-    ])
+    ['#', 'Panel Name', 'Panel URL', 'Token', 'Auto-Pull', 'Last Pull', 'Sync Status & Diagnostics', 'Total Pulled', 'Active', 'Actions'],
+    connections.map(cn => {
+      const fetched = Number(cn.last_fetched_rows || 0);
+      const dupCnt = Number(cn.last_dup_skipped || 0);
+      const invCnt = Number(cn.last_invalid_skipped || 0);
+      const tzOff = Number(cn.tz_offset_minutes || 0);
+      const isErr = String(cn.last_status || '').startsWith('Error');
+      const diagBadges = [];
+      if (fetched > 0) diagBadges.push(`<span class="fs-11 text-muted">Batch: <b>${fetched.toLocaleString()}</b></span>`);
+      if (dupCnt > 0) diagBadges.push(`<span class="fs-11 text-muted">Dup: ${dupCnt.toLocaleString()}</span>`);
+      if (invCnt > 0) diagBadges.push(`<span class="fs-11 text-danger">Invalid: <b>${invCnt}</b></span>`);
+      if (cn.last_saturated) diagBadges.push(`<span class="badge badge-warning" style="font-size:10px;padding:1px 6px;">Cap Hit — Use Sync Today</span>`);
+      return [
+        cn.id,
+        `<div><strong>${escapeHtml(cn.panel_name || '—')}</strong><div class="fs-11 text-muted">TZ: ${escapeHtml(fmtCrTzOffset(tzOff))}</div></div>`,
+        `<span class="fs-12 text-muted">${escapeHtml((cn.panel_url || '').length > 40 ? cn.panel_url.slice(0, 40) + '…' : (cn.panel_url || ''))}</span>`,
+        `<span class="monospace">${escapeHtml(cn.token_masked || '—')}</span>`,
+        `<span class="badge badge-blue"><i class="fas fa-bolt"></i> ${Number(cn.interval) || 10}s</span>`,
+        cn.last_pulled_at ? fmtShort(cn.last_pulled_at) : '<span class="text-muted">Not polled yet</span>',
+        `<div>
+          <div class="fs-12 ${isErr ? 'text-danger' : 'text-success'}">${escapeHtml(cn.last_status || '—')}</div>
+          ${diagBadges.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:3px;">${diagBadges.join('')}</div>` : ''}
+        </div>`,
+        Number(cn.total_pulled) || 0,
+        statusBadge(cn.active ? 'active' : 'paused'),
+        `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
+          <button class="btn btn-outline btn-sm" onclick="pullCrApiConnNow(${cn.id}, false)" title="Pull latest 2,000 OTPs now"><i class="fas fa-rotate"></i> Pull</button>
+          <button class="btn btn-primary btn-sm" onclick="pullCrApiConnNow(${cn.id}, true)" title="Deep Sync Today (up to 5,000 OTPs + date range backfill)"><i class="fas fa-cloud-arrow-down"></i> Sync Today</button>
+          <button class="btn btn-outline btn-sm" onclick="openEditCrApiModal(${cn.id})" title="Edit interval & upstream timezone"><i class="fas fa-sliders"></i></button>
+          <button class="btn btn-${cn.active ? 'warning' : 'success'} btn-sm" onclick="toggleCrApiConn(${cn.id}, ${!cn.active})" title="${cn.active ? 'Stop / Pause connection' : 'Start / Resume connection'}"><i class="fas fa-${cn.active ? 'stop' : 'play'}"></i> ${cn.active ? 'Stop' : 'Resume'}</button>
+          ${cn.active ? '' : `<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fecaca;" onclick="deleteCrApiConn(${cn.id}, '${escapeHtml(String(cn.panel_name || 'CR API Connection')).replace(/'/g, "\\'")}')" title="Protected Remove (Owner Password Required)"><i class="fas fa-shield-halved"></i></button>`}
+        </div>`
+      ];
+    })
   ) : `<div class="empty-state"><i class="fas fa-link"></i><p>No CR API connections yet — click "Add Connection" to pull OTPs in from another panel.</p></div>`;
 }
 
@@ -752,7 +781,7 @@ async function renderCrApiPanels() {
       <div class="page-header">
         <div>
           <div class="page-title">CR API Connected Panel</div>
-          <div class="page-subtitle">Auto-pulling OTPs from provider panels with deduplication &amp; backoff protection</div>
+          <div class="page-subtitle">Auto-pulling up to 2,000 OTPs/poll (5,000 on Today Sync) with lossless occurrence deduplication &amp; timezone alignment</div>
         </div>
         <div class="page-actions" style="display:flex;align-items:center;gap:8px;">
           <span class="badge badge-blue" style="font-size:11px;padding:5px 9px;">
@@ -789,10 +818,29 @@ async function renderCrApiPanels() {
   }
 }
 
+function crTzSelectOptionsHtml(selectedMin = 0) {
+  const opts = [
+    [0, 'UTC / GMT (+00:00) — Default'],
+    [60, 'UTC+01:00 (CET / Europe)'],
+    [120, 'UTC+02:00 (EET / Cairo)'],
+    [180, 'UTC+03:00 (MSK / Riyadh)'],
+    [240, 'UTC+04:00 (Dubai / GST)'],
+    [300, 'UTC+05:00 (Pakistan / PKT)'],
+    [330, 'UTC+05:30 (India / IST)'],
+    [360, 'UTC+06:00 (Bangladesh / BST)'],
+    [480, 'UTC+08:00 (Singapore / CST)'],
+    [-240, 'UTC-04:00 (EDT / AST)'],
+    [-300, 'UTC-05:00 (EST / US East)'],
+    [-360, 'UTC-06:00 (CST / US Central)']
+  ];
+  const sel = Number(selectedMin || 0);
+  return opts.map(([val, lbl]) => `<option value="${val}" ${val === sel ? 'selected' : ''}>${lbl}</option>`).join('');
+}
+
 function openAddCrApiModal() {
   openModal('Add CR API Connection', `
     <form id="cr-api-form" onsubmit="submitAddCrApi(event)">
-      <p class="fs-12 text-muted" style="margin-bottom:14px;">Connect external panel's CR API — incoming OTPs are auto-pulled into your panel cleanly without duplicates.</p>
+      <p class="fs-12 text-muted" style="margin-bottom:14px;">Connect external panel's CR API — incoming OTPs are auto-pulled cleanly without losing same-second or high-volume bursts.</p>
       <div class="form-group">
         <label class="form-label">Panel Name *</label>
         <input id="cr-panel-name" placeholder="e.g. HUMAX SMS / Remote Panel" required>
@@ -809,6 +857,11 @@ function openAddCrApiModal() {
         <label class="form-label">Auto-Pull Every (seconds, min 5s)</label>
         <input id="cr-interval" type="number" min="5" value="10" placeholder="10">
       </div>
+      <div class="form-group">
+        <label class="form-label">Upstream Panel Timezone</label>
+        <select id="cr-tz-offset">${crTzSelectOptionsHtml(0)}</select>
+        <div class="fs-11 text-muted" style="margin-top:4px;">Match the main upstream panel's clock so Today's UTC count aligns 100% with the main panel.</div>
+      </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
         <button type="submit" class="btn btn-primary" id="cr-api-submit-btn"><i class="fas fa-link"></i> Connect</button>
@@ -817,16 +870,61 @@ function openAddCrApiModal() {
   `);
 }
 
+function openEditCrApiModal(id) {
+  const cn = (window._crApiConnsCache || []).find(x => Number(x.id) === Number(id));
+  if (!cn) { toast('Connection not found', 'error'); return; }
+  openModal(`Edit CR API — ${escapeHtml(cn.panel_name || '')}`, `
+    <form id="cr-api-edit-form" onsubmit="submitEditCrApi(event, ${Number(cn.id)})">
+      <div class="form-group">
+        <label class="form-label">Panel Name *</label>
+        <input id="cr-edit-name" value="${escapeHtml(cn.panel_name || '')}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Auto-Pull Interval (seconds, min 5s)</label>
+        <input id="cr-edit-interval" type="number" min="5" value="${Number(cn.interval) || 10}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Upstream Panel Timezone</label>
+        <select id="cr-edit-tz">${crTzSelectOptionsHtml(cn.tz_offset_minutes || 0)}</select>
+        <div class="fs-11 text-muted" style="margin-top:4px;">If the main panel shows timestamps in a non-UTC timezone (e.g. PKT/CET/EET), select it here so daily counts match exactly.</div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary"><i class="fas fa-check"></i> Save Changes</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitEditCrApi(event, id) {
+  event.preventDefault();
+  const panel_name = document.getElementById('cr-edit-name')?.value.trim();
+  const interval = Math.max(5, parseInt(document.getElementById('cr-edit-interval')?.value) || 10);
+  const tz_offset_minutes = parseInt(document.getElementById('cr-edit-tz')?.value || '0', 10) || 0;
+  try {
+    await apiFetch(`/api/cr-api-connections/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ panel_name, interval, tz_offset_minutes })
+    });
+    closeModal();
+    toast('✅ CR API settings saved', 'success');
+    await renderCrApiPanels();
+  } catch (err) {
+    toast(err?.message || 'Failed to update CR API settings', 'error');
+  }
+}
+
 async function submitAddCrApi(event) {
   event.preventDefault();
   const panel_name = document.getElementById('cr-panel-name')?.value.trim();
   const panel_url = document.getElementById('cr-panel-url')?.value.trim();
   const token = document.getElementById('cr-token')?.value.trim();
   const interval = Math.max(5, parseInt(document.getElementById('cr-interval')?.value) || 10);
+  const tz_offset_minutes = parseInt(document.getElementById('cr-tz-offset')?.value || '0', 10) || 0;
   if (!panel_name || !panel_url || !token) { toast('Fill in all required fields', 'error'); return; }
   try {
     await apiFetch('/api/cr-api-connections', {
-      method: 'POST', body: JSON.stringify({ panel_name, panel_url, token, interval })
+      method: 'POST', body: JSON.stringify({ panel_name, panel_url, token, interval, tz_offset_minutes })
     });
     closeModal();
     toast('✅ Connected! Auto-pulling every ' + interval + 's...', 'success');
@@ -837,12 +935,15 @@ async function submitAddCrApi(event) {
   }
 }
 
-async function pullCrApiConnNow(id) {
-  toast('Pulling latest OTPs from remote panel...', 'info');
+async function pullCrApiConnNow(id, backfill = false) {
+  toast(backfill ? 'Running Today Deep Sync (up to 5,000 OTPs)...' : 'Pulling latest OTPs from remote panel...', 'info');
   try {
-    const res = await apiFetch(`/api/cr-api-connections/${id}/pull`, { method: 'POST' });
+    const res = await apiFetch(`/api/cr-api-connections/${id}/pull`, {
+      method: 'POST',
+      body: JSON.stringify({ backfill: Boolean(backfill) })
+    });
     if (res && res.success) {
-      toast(`✅ Pulled ${res.pulled} new OTP(s). Status: ${res.status}`, 'success');
+      toast(`✅ ${backfill ? 'Today Sync' : 'Pull'}: +${res.pulled} new (fetched ${res.fetched || 0}, dup ${res.dup_skipped || 0})`, 'success');
     } else {
       toast(`⚠️ ${res?.error || res?.status || 'Failed'}`, 'error');
     }
@@ -963,7 +1064,14 @@ async function renderWhitenoisePanels() {
     ]);
     const connections = Array.isArray(raw) ? raw : (raw?.data || []);
     _whitenoiseCache = connections;
-    const mc = mcRes?.monthly_cycle || { start_date: '', end_date: '', clear_date: '' };
+    const mc = mcRes?.monthly_cycle || { start_date: '', end_date: '', clear_date: '', cycle_days: 30, hold_days: 5, auto_advance: true };
+    const mcCycles = Array.isArray(mcRes?.monthly_cycles) ? mcRes.monthly_cycles : [];
+    const mcHoldDays = Number.isFinite(Number(mc.hold_days)) ? Number(mc.hold_days) : 5;
+    const mcCycleDays = Number.isFinite(Number(mc.cycle_days)) ? Number(mc.cycle_days) : 30;
+    const mcLabelText = mcHoldDays === 5 ? 'Monthly (30/5) {W}' : `Monthly (${mcCycleDays}/${mcHoldDays}) {W}`;
+    const mcCountdownText = mc.days_remaining != null
+      ? `Day ${mc.day_in_cycle || 1}/${mcCycleDays} · ${mc.days_remaining}d left`
+      : 'Strict 30-Day Rolling';
 
     const c = document.getElementById('page-content');
     c.innerHTML = `
@@ -973,7 +1081,7 @@ async function renderWhitenoisePanels() {
             <i class="fas fa-file-excel" style="color:#2563eb;"></i>
             <span>Whitenoise Excel Reports &amp; Monthly Cycle</span>
           </div>
-          <div class="page-subtitle">Excel-Only Daily Stats mode · Background polling disabled · Monthly (30/5) {W} settlement window &amp; batch history.</div>
+          <div class="page-subtitle">Excel-Only Daily Stats mode · Auto-Advancing Strict 30-Day Rolling Cycle · ${escapeHtml(mcLabelText)} settlement window &amp; cycle ledger.</div>
         </div>
         <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" onclick="if(typeof openWhitenoiseExcelUploadModal==='function')openWhitenoiseExcelUploadModal()"><i class="fas fa-cloud-arrow-up"></i> Upload Excel Stats</button>
@@ -981,29 +1089,71 @@ async function renderWhitenoisePanels() {
       </div>
       <div class="card" style="margin-bottom:14px;border:1px solid #e2e8f0;padding:14px 16px;">
         <div style="font-size:12.5px;color:#334155;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
-          <div><strong><i class="fas fa-calendar-check" style="color:#2563eb;"></i> Monthly (30/5) {W} Settlement Rule:</strong> All Whitenoise ranges and daily Excel stats clear on the configured company clear date.</div>
-          <div style="font-size:12px;color:#059669;font-weight:600;">Zero VPS Polling · Date-Dependent Ownership Active</div>
+          <div>
+            <strong><i class="fas fa-calendar-check" style="color:#2563eb;"></i> ${escapeHtml(mcLabelText)} Auto-Rolling Settlement:</strong>
+            Set Start Date once — cycle auto-advances every <b>${mcCycleDays} days</b> &amp; Hold Days (<b>${mcHoldDays}d</b>) apply system-wide across Owner, Agent &amp; Client payouts.
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-weight:700;"><i class="fas fa-rotate"></i> Auto 30-Day Cycle #${mc.cycle_number || 1}</span>
+            <span class="badge" style="background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;font-weight:700;"><i class="fas fa-hourglass-half"></i> ${escapeHtml(mcCountdownText)}</span>
+          </div>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;align-items:end;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;">
           <div>
-            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Monthly Cycle Start</label>
-            <input type="date" id="wn-mc-start" value="${escapeHtml(mc.start_date || '')}" style="width:100%;height:34px;">
+            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Cycle Anchor Start</label>
+            <input type="date" id="wn-mc-start" value="${escapeHtml(mc.anchor_start_date || mc.start_date || '')}" oninput="zySyncMonthlyCycleInputs('wn-mc')" style="width:100%;height:34px;">
           </div>
           <div>
-            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Monthly Cycle End</label>
-            <input type="date" id="wn-mc-end" value="${escapeHtml(mc.end_date || '')}" style="width:100%;height:34px;">
+            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Hold Days (System-Wide)</label>
+            <input type="number" id="wn-mc-hold" min="0" max="90" step="1" value="${mcHoldDays}" oninput="zySyncMonthlyCycleInputs('wn-mc')" style="width:100%;height:34px;" placeholder="e.g. 5, 10, 15">
           </div>
           <div>
-            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Company Clear Date</label>
-            <input type="date" id="wn-mc-clear" value="${escapeHtml(mc.clear_date || '')}" style="width:100%;height:34px;">
+            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Active 30d End (Auto)</label>
+            <input type="date" id="wn-mc-end" value="${escapeHtml(mc.end_date || '')}" readonly style="width:100%;height:34px;opacity:0.85;cursor:not-allowed;">
+          </div>
+          <div>
+            <label class="form-label" style="font-size:11.5px;margin-bottom:4px;">Clear Date (+${mcHoldDays}d Auto)</label>
+            <input type="date" id="wn-mc-clear" value="${escapeHtml(mc.clear_date || '')}" readonly style="width:100%;height:34px;opacity:0.85;cursor:not-allowed;">
           </div>
           <div>
             <button type="button" class="btn btn-primary btn-sm" id="wn-mc-save-btn" onclick="zySaveMonthlyCycleFromPanels()" style="height:34px;width:100%;">
-              <i class="fas fa-calendar-check"></i> Save Cycle Window
+              <i class="fas fa-calendar-check"></i> Save Cycle &amp; Hold
             </button>
           </div>
         </div>
+        <div id="wn-mc-preview-line" style="font-size:11.5px;color:#475569;margin-top:8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+          <span>Active Cycle: <b>${escapeHtml(mc.start_date || '—')} → ${escapeHtml(mc.end_date || '—')}</b> (${mcCycleDays} days) · Unlocks: <b>${escapeHtml(mc.clear_date || '—')}</b> (${mcHoldDays}d hold)</span>
+          <span>Next Auto Cycle Starts: <b>${escapeHtml(mc.next_cycle_start || '—')}</b></span>
+        </div>
       </div>
+
+      ${mcCycles.length ? `
+      <div class="card" style="margin-bottom:14px;padding:14px 16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#0f172a;"><i class="fas fa-layer-group" style="color:#4f46e5;margin-right:6px;"></i> Whitenoise 30-Day Cycle Ledger (Active &amp; Completed)</div>
+            <div style="font-size:11.5px;color:#64748b;">Completed 30-day cycles automatically roll over into separate closed records below with live ${mcHoldDays}-day hold tracking.</div>
+          </div>
+        </div>
+        ${buildTable(
+          ['Cycle', '30-Day Window', 'Status', 'SMS Count', 'Earnings (USD)', 'Clear Date'],
+          mcCycles.map(cy => {
+            const stBadge = cy.status === 'cleared'
+              ? '<span class="badge badge-green">Cleared / Ready</span>'
+              : (cy.status === 'holding'
+                  ? `<span class="badge badge-yellow">Completed · Hold (${cy.days_until_clear}d left)</span>`
+                  : '<span class="badge badge-blue">Active 30d Cycle</span>');
+            return [
+              `<strong>Cycle #${cy.cycle_number}</strong>`,
+              `<span class="monospace">${escapeHtml(cy.start_date)} → ${escapeHtml(cy.end_date)}</span>`,
+              stBadge,
+              `<strong>${Number(cy.sms_count || 0).toLocaleString()}</strong>`,
+              `<span class="monospace" style="color:#059669;font-weight:700;">$${Number(cy.earned_usd || 0).toFixed(4)}</span>`,
+              `<span class="monospace">${escapeHtml(cy.clear_date)}</span>`
+            ];
+          })
+        )}
+      </div>` : ''}
 
       <div class="card" style="margin-bottom:14px;padding:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
@@ -1052,12 +1202,46 @@ async function renderWhitenoisePanels() {
   }
 }
 
+function zyComputeRollingCycleClient(anchorStartYmd, holdDaysRaw) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(anchorStartYmd || ''))) return null;
+  const addD = (ymd, d) => {
+    const dt = new Date(`${ymd}T00:00:00.000Z`);
+    dt.setUTCDate(dt.getUTCDate() + d);
+    return dt.toISOString().slice(0, 10);
+  };
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  const diffD = Math.round((Date.parse(`${todayYmd}T00:00:00.000Z`) - Date.parse(`${anchorStartYmd}T00:00:00.000Z`)) / 86400000);
+  const holdDays = Math.max(0, Math.min(90, Number.isFinite(Number(holdDaysRaw)) ? Math.round(Number(holdDaysRaw)) : 5));
+  const cycleIndex = diffD >= 0 ? Math.floor(diffD / 30) : 0;
+  const start_date = addD(anchorStartYmd, cycleIndex * 30);
+  const end_date = addD(start_date, 29);
+  const clear_date = addD(end_date, holdDays);
+  const next_cycle_start = addD(start_date, 30);
+  return { anchor_start_date: anchorStartYmd, start_date, end_date, clear_date, hold_days: holdDays, cycle_number: cycleIndex + 1, next_cycle_start };
+}
+
+function zySyncMonthlyCycleInputs(prefix) {
+  const startEl = document.getElementById(`${prefix}-start`);
+  const holdEl = document.getElementById(`${prefix}-hold`);
+  const endEl = document.getElementById(`${prefix}-end`);
+  const clearEl = document.getElementById(`${prefix}-clear`);
+  const previewEl = document.getElementById(`${prefix}-preview-line`);
+  if (!startEl || !startEl.value) return;
+  const calc = zyComputeRollingCycleClient(startEl.value, holdEl ? holdEl.value : 5);
+  if (!calc) return;
+  if (endEl) endEl.value = calc.end_date;
+  if (clearEl) clearEl.value = calc.clear_date;
+  if (previewEl) {
+    previewEl.innerHTML = `<span>Active Cycle #${calc.cycle_number}: <b>${escapeHtml(calc.start_date)} → ${escapeHtml(calc.end_date)}</b> (30 days) · Unlocks: <b>${escapeHtml(calc.clear_date)}</b> (${calc.hold_days}d hold)</span><span>Next Auto Cycle Starts: <b>${escapeHtml(calc.next_cycle_start)}</b></span>`;
+  }
+}
+
 async function zySaveMonthlyCycleFromPanels() {
   const start_date = document.getElementById('wn-mc-start')?.value || '';
-  const end_date = document.getElementById('wn-mc-end')?.value || '';
-  const clear_date = document.getElementById('wn-mc-clear')?.value || '';
-  if (!start_date || !end_date || !clear_date) {
-    toast('Please fill Start Date, End Date, and Clear Date.', 'error');
+  const holdRaw = document.getElementById('wn-mc-hold')?.value;
+  const hold_days = (holdRaw !== '' && holdRaw != null && Number.isFinite(Number(holdRaw))) ? Math.max(0, Math.min(90, Math.round(Number(holdRaw)))) : 5;
+  if (!start_date) {
+    toast('Please choose a Cycle Start Date.', 'error');
     return;
   }
   const btn = document.getElementById('wn-mc-save-btn');
@@ -1065,17 +1249,19 @@ async function zySaveMonthlyCycleFromPanels() {
   try {
     const res = await apiFetch('/api/monthly-cycle', {
       method: 'POST',
-      body: JSON.stringify({ start_date, end_date, clear_date })
+      body: JSON.stringify({ anchor_start_date: start_date, start_date, cycle_days: 30, hold_days, auto_advance: true })
     });
     if (res && res.success) {
-      toast(`Monthly Cycle updated: ${res.monthly_cycle.start_date} → ${res.monthly_cycle.end_date} (Clears ${res.monthly_cycle.clear_date})`, 'success');
+      const m = res.monthly_cycle;
+      toast(`Auto 30-Day Cycle saved: ${m.start_date} → ${m.end_date} · Hold ${m.hold_days}d (Clears ${m.clear_date})`, 'success');
+      renderWhitenoisePanels();
     } else {
       toast(res?.error || 'Failed to save Monthly Cycle', 'error');
     }
   } catch (err) {
     toast(err.message || 'Failed to save Monthly Cycle', 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-calendar-check"></i> Save Cycle Window'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-calendar-check"></i> Save Cycle &amp; Hold'; }
   }
 }
 
@@ -6996,25 +7182,36 @@ async function renderGeneralSettings() {
               <div class="text-muted fs-11" style="margin-top:4px;">Active schedules: Weekly (7/3 · 3d hold) for standard routes, Monthly (30/5 {W} · 5d hold) for Whitenoise routes.</div>
             </div>
             <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:12px 14px;margin-top:14px;">
-              <div style="font-size:12.5px;font-weight:700;color:#312e81;margin-bottom:8px;">
-                <i class="fas fa-calendar-check" style="margin-right:5px;color:#4f46e5;"></i> Monthly Cycle Window (30/5 {W} Settlement)
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <div style="font-size:12.5px;font-weight:700;color:#312e81;">
+                  <i class="fas fa-calendar-check" style="margin-right:5px;color:#4f46e5;"></i> Auto-Advancing 30-Day Monthly Cycle (${Number.isFinite(Number(data.monthly_cycle?.hold_days)) ? data.monthly_cycle.hold_days : 5}d Hold {W})
+                </div>
+                <span class="badge" style="background:#fff;color:#4338ca;border:1px solid #c7d2fe;font-weight:700;font-size:10.5px;">Cycle #${data.monthly_cycle?.cycle_number || 1} · ${data.monthly_cycle?.days_remaining ?? 30}d left</span>
               </div>
               <div class="form-row" style="align-items:end;margin-bottom:8px;">
                 <div class="form-group" style="margin-bottom:0;">
-                  <label class="form-label" style="font-size:11.5px;">Cycle Start Date</label>
-                  <input type="date" id="s-mc-start" value="${escapeHtml(data.monthly_cycle?.start_date || '')}">
+                  <label class="form-label" style="font-size:11.5px;">Cycle Anchor Start</label>
+                  <input type="date" id="s-mc-start" value="${escapeHtml(data.monthly_cycle?.anchor_start_date || data.monthly_cycle?.start_date || '')}" oninput="zySyncMonthlyCycleInputs('s-mc')">
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
-                  <label class="form-label" style="font-size:11.5px;">Cycle End Date</label>
-                  <input type="date" id="s-mc-end" value="${escapeHtml(data.monthly_cycle?.end_date || '')}">
+                  <label class="form-label" style="font-size:11.5px;">Hold Days (5 / 10 / 15…)</label>
+                  <input type="number" id="s-mc-hold" min="0" max="90" step="1" value="${Number.isFinite(Number(data.monthly_cycle?.hold_days)) ? data.monthly_cycle.hold_days : 5}" oninput="zySyncMonthlyCycleInputs('s-mc')">
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
-                  <label class="form-label" style="font-size:11.5px;">Company Clear Date</label>
-                  <input type="date" id="s-mc-clear" value="${escapeHtml(data.monthly_cycle?.clear_date || '')}">
+                  <label class="form-label" style="font-size:11.5px;">Active 30d End (Auto)</label>
+                  <input type="date" id="s-mc-end" value="${escapeHtml(data.monthly_cycle?.end_date || '')}" readonly style="opacity:0.85;cursor:not-allowed;">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                  <label class="form-label" style="font-size:11.5px;">Company Clear Date (Auto)</label>
+                  <input type="date" id="s-mc-clear" value="${escapeHtml(data.monthly_cycle?.clear_date || '')}" readonly style="opacity:0.85;cursor:not-allowed;">
                 </div>
               </div>
+              <div id="s-mc-preview-line" style="font-size:11px;color:#312e81;margin-bottom:8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+                <span>Active Window: <b>${escapeHtml(data.monthly_cycle?.start_date || '—')} → ${escapeHtml(data.monthly_cycle?.end_date || '—')}</b> (Strict 30d) · Unlocks: <b>${escapeHtml(data.monthly_cycle?.clear_date || '—')}</b></span>
+                <span>Next Auto Cycle: <b>${escapeHtml(data.monthly_cycle?.next_cycle_start || '—')}</b></span>
+              </div>
               <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-                <div class="text-muted fs-11" style="color:#4338ca;">Controls the settlement window shown in Agent &amp; Client Monthly Payment Boxes.</div>
+                <div class="text-muted fs-11" style="color:#4338ca;">Set once — auto-rolls every 30 days &amp; Hold Days update Owner, Agent &amp; Client payouts system-wide.</div>
                 <button type="button" class="btn btn-primary btn-sm" id="s-save-mc-btn" onclick="zySaveMonthlyCycleOnly()"><i class="fas fa-check"></i> Save Monthly Cycle</button>
               </div>
             </div>
@@ -8185,10 +8382,10 @@ async function saveSettings(event) {
       payload.min_payout_pkr = Math.round(mpPkr * 100) / 100;
     }
     const mcStart = document.getElementById('s-mc-start')?.value || '';
-    const mcEnd = document.getElementById('s-mc-end')?.value || '';
-    const mcClear = document.getElementById('s-mc-clear')?.value || '';
-    if (mcStart && mcEnd && mcClear) {
-      payload.monthly_cycle = { start_date: mcStart, end_date: mcEnd, clear_date: mcClear };
+    const mcHoldRaw = document.getElementById('s-mc-hold')?.value;
+    const mcHold = (mcHoldRaw !== '' && mcHoldRaw != null && Number.isFinite(Number(mcHoldRaw))) ? Math.max(0, Math.min(90, Math.round(Number(mcHoldRaw)))) : 5;
+    if (mcStart) {
+      payload.monthly_cycle = { anchor_start_date: mcStart, start_date: mcStart, cycle_days: 30, hold_days: mcHold, auto_advance: true };
     }
 
     const result = await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(payload) });
@@ -8280,18 +8477,23 @@ async function zySaveFxRateOnly() {
 
 async function zySaveMonthlyCycleOnly() {
   const start_date = document.getElementById('s-mc-start')?.value || '';
-  const end_date = document.getElementById('s-mc-end')?.value || '';
-  const clear_date = document.getElementById('s-mc-clear')?.value || '';
-  if (!start_date || !end_date || !clear_date) {
-    toast('Start Date, End Date, and Clear Date are required.', 'error');
+  const holdRaw = document.getElementById('s-mc-hold')?.value;
+  const hold_days = (holdRaw !== '' && holdRaw != null && Number.isFinite(Number(holdRaw))) ? Math.max(0, Math.min(90, Math.round(Number(holdRaw)))) : 5;
+  if (!start_date) {
+    toast('Cycle Start Date is required.', 'error');
     return;
   }
   const btn = document.getElementById('s-save-mc-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Saving...'; }
   try {
-    const res = await apiFetch('/api/monthly-cycle', { method: 'POST', body: JSON.stringify({ start_date, end_date, clear_date }) });
+    const res = await apiFetch('/api/monthly-cycle', {
+      method: 'POST',
+      body: JSON.stringify({ anchor_start_date: start_date, start_date, cycle_days: 30, hold_days, auto_advance: true })
+    });
     if (res && res.success) {
-      toast(`Monthly Cycle saved: ${res.monthly_cycle.start_date} → ${res.monthly_cycle.end_date} (Clears ${res.monthly_cycle.clear_date})`, 'success');
+      const m = res.monthly_cycle;
+      zySyncMonthlyCycleInputs('s-mc');
+      toast(`Auto 30-Day Monthly Cycle saved: ${m.start_date} → ${m.end_date} · Hold ${m.hold_days}d (Clears ${m.clear_date})`, 'success');
     } else {
       toast(res?.error || 'Failed to save Monthly Cycle', 'error');
     }

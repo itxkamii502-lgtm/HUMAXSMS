@@ -113,6 +113,7 @@ async function apiFetch(path, opts = {}, retries = 2) {
     }
     return data;
   } catch (err) {
+    if (err && err.name === 'AbortError') return null;
     if (retries > 0 && (err.name === 'TypeError' || String(err.message).toLowerCase().includes('failed to fetch'))) {
       await new Promise(r => setTimeout(r, 350));
       return apiFetch(path, opts, retries - 1);

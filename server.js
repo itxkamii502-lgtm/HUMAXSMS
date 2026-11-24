@@ -505,10 +505,13 @@ function smsIndexSync(log) {
     smsIdx.len = log.length;
   }
 }
-function smsIndexHas(log, dedupeKey, smsId, { number = '', message = '', rawTimestamp = '', hasRealTimestamp = true } = {}) {
+function smsIndexHas(log, dedupeKey, smsId, { number = '', message = '', rawTimestamp = '', hasRealTimestamp = true, hasUniqueExtId = false } = {}) {
   smsIndexSync(log);
   if (dedupeKey && smsIdx.set.has('k:' + dedupeKey)) return true;
   if (smsId && smsIdx.set.has('i:' + smsId)) return true;
+  // When the upstream provider supplies a unique record ID (or explicit per-batch occurrence slot),
+  // NEVER falsely drop a distinct SMS record via a same-second/content-hash collision.
+  if (hasUniqueExtId && (dedupeKey || smsId)) return false;
   if (number && message) {
     if (hasRealTimestamp && rawTimestamp) {
       const cKey = buildSmsContentKey(number, message, rawTimestamp);
@@ -1628,33 +1631,154 @@ function addDaysYmd(ymd, days) {
   return dt.toISOString().slice(0, 10);
 }
 
+function diffDaysYmd(ymdA, ymdB) {
+  const a = normalizeYmd(ymdA);
+  const b = normalizeYmd(ymdB);
+  if (!a || !b) return 0;
+  const msA = Date.parse(`${a}T00:00:00.000Z`);
+  const msB = Date.parse(`${b}T00:00:00.000Z`);
+  return Math.round((msB - msA) / 86400000);
+}
+
 function getDefaultMonthlyCycle(refDate = new Date()) {
   const y = refDate.getUTCFullYear();
   const m = refDate.getUTCMonth();
-  const startDt = new Date(Date.UTC(y, m, 1));
-  const endDt = new Date(Date.UTC(y, m + 1, 0));
-  const clearDt = new Date(Date.UTC(y, m + 1, 5));
-  const start_date = startDt.toISOString().slice(0, 10);
-  const end_date = endDt.toISOString().slice(0, 10);
-  const clear_date = clearDt.toISOString().slice(0, 10);
+  const anchorDt = new Date(Date.UTC(y, m, 1));
+  const anchor_start_date = anchorDt.toISOString().slice(0, 10);
+  const cycle_days = 30;
+  const hold_days = 5;
+  const start_date = anchor_start_date;
+  const end_date = addDaysYmd(start_date, cycle_days - 1);
+  const clear_date = addDaysYmd(end_date, hold_days);
   return {
+    anchor_start_date,
     start_date,
     end_date,
     clear_date,
+    cycle_days,
+    hold_days,
+    auto_advance: true,
+    label: `${start_date} to ${end_date}`
+  };
+}
+
+function resolveMonthlyCycleBucket(dateYmd, cfg) {
+  const anchor = normalizeYmd(cfg?.anchor_start_date) || normalizeYmd(cfg?.start_date) || new Date().toISOString().slice(0, 10);
+  const cycleDays = Math.max(1, Math.min(365, parseInt(cfg?.cycle_days, 10) || 30));
+  const holdDays = Math.max(0, Math.min(90, Number.isFinite(Number(cfg?.hold_days)) ? Math.round(Number(cfg.hold_days)) : 5));
+  const cleanDate = normalizeYmd(dateYmd) || anchor;
+  const diff = diffDaysYmd(anchor, cleanDate);
+  const cycleIndex = Math.floor(diff / cycleDays);
+  const start_date = addDaysYmd(anchor, cycleIndex * cycleDays);
+  const end_date = addDaysYmd(start_date, cycleDays - 1);
+  const clear_date = addDaysYmd(end_date, holdDays);
+  return {
+    cycle_index: cycleIndex,
+    cycle_number: cycleIndex + 1,
+    cycle_key: `${start_date}_${end_date}`,
+    start_date,
+    end_date,
+    clear_date,
+    cycle_days: cycleDays,
+    hold_days: holdDays,
     label: `${start_date} to ${end_date}`
   };
 }
 
 function normalizeMonthlyCycleInput(raw, fallbackRef = new Date()) {
   const def = getDefaultMonthlyCycle(fallbackRef);
-  if (!raw || typeof raw !== 'object') return def;
-  const start_date = normalizeYmd(raw.start_date) || def.start_date;
-  let end_date = normalizeYmd(raw.end_date) || def.end_date;
-  if (end_date < start_date) end_date = start_date;
-  let clear_date = normalizeYmd(raw.clear_date) || addDaysYmd(end_date, 5) || def.clear_date;
-  if (clear_date < end_date) clear_date = end_date;
-  const label = String(raw.label || '').trim() || `${start_date} to ${end_date}`;
-  return { start_date, end_date, clear_date, label };
+  const todayYmd = fallbackRef.toISOString().slice(0, 10);
+  const src = (raw && typeof raw === 'object') ? raw : def;
+
+  const anchor_start_date = normalizeYmd(src.anchor_start_date) || normalizeYmd(src.start_date) || def.anchor_start_date;
+  const cycle_days = (src.cycle_days !== undefined && src.cycle_days !== null && src.cycle_days !== '' && Number.isFinite(Number(src.cycle_days)))
+    ? Math.max(1, Math.min(365, Math.round(Number(src.cycle_days))))
+    : 30;
+
+  let hold_days = 5;
+  if (src.hold_days !== undefined && src.hold_days !== null && src.hold_days !== '' && Number.isFinite(Number(src.hold_days))) {
+    hold_days = Math.max(0, Math.min(90, Math.round(Number(src.hold_days))));
+  } else {
+    const rawEnd = normalizeYmd(src.end_date);
+    const rawClear = normalizeYmd(src.clear_date);
+    if (rawEnd && rawClear && rawClear >= rawEnd) {
+      hold_days = Math.max(0, Math.min(90, diffDaysYmd(rawEnd, rawClear)));
+    }
+  }
+
+  const auto_advance = src.auto_advance === false ? false : true;
+  let cycleIndex = 0;
+  let start_date;
+  let end_date;
+  let clear_date;
+
+  if (auto_advance) {
+    const elapsedDays = diffDaysYmd(anchor_start_date, todayYmd);
+    cycleIndex = elapsedDays >= 0 ? Math.floor(elapsedDays / cycle_days) : 0;
+    start_date = addDaysYmd(anchor_start_date, cycleIndex * cycle_days);
+    end_date = addDaysYmd(start_date, cycle_days - 1);
+    clear_date = addDaysYmd(end_date, hold_days);
+  } else {
+    start_date = normalizeYmd(src.start_date) || anchor_start_date;
+    end_date = normalizeYmd(src.end_date) || addDaysYmd(start_date, cycle_days - 1);
+    if (end_date < start_date) end_date = addDaysYmd(start_date, cycle_days - 1);
+    clear_date = normalizeYmd(src.clear_date) || addDaysYmd(end_date, hold_days);
+    if (clear_date < end_date) clear_date = addDaysYmd(end_date, hold_days);
+  }
+
+  const day_in_cycle = todayYmd < start_date
+    ? 0
+    : Math.min(cycle_days, Math.max(1, diffDaysYmd(start_date, todayYmd) + 1));
+  const days_remaining = todayYmd < start_date
+    ? cycle_days
+    : Math.max(0, diffDaysYmd(todayYmd, end_date) + 1);
+  const days_until_clear = Math.max(0, diffDaysYmd(todayYmd, clear_date));
+  const next_cycle_start = addDaysYmd(start_date, cycle_days);
+  const next_cycle_end = addDaysYmd(next_cycle_start, cycle_days - 1);
+  const next_cycle_clear = addDaysYmd(next_cycle_end, hold_days);
+
+  let previous_cycle = null;
+  if (auto_advance && cycleIndex > 0) {
+    const prevStart = addDaysYmd(anchor_start_date, (cycleIndex - 1) * cycle_days);
+    const prevEnd = addDaysYmd(prevStart, cycle_days - 1);
+    const prevClear = addDaysYmd(prevEnd, hold_days);
+    previous_cycle = {
+      cycle_number: cycleIndex,
+      cycle_key: `${prevStart}_${prevEnd}`,
+      start_date: prevStart,
+      end_date: prevEnd,
+      clear_date: prevClear,
+      hold_days,
+      is_cleared: todayYmd >= prevClear,
+      days_until_clear: Math.max(0, diffDaysYmd(todayYmd, prevClear)),
+      label: `${prevStart} to ${prevEnd}`
+    };
+  }
+
+  const code = `${cycle_days}/${hold_days} {W}`;
+  const schedule_label = `Monthly (${cycle_days}/${hold_days}) {W}`;
+  const label = `${start_date} to ${end_date}`;
+
+  return {
+    anchor_start_date,
+    start_date,
+    end_date,
+    clear_date,
+    cycle_days,
+    hold_days,
+    auto_advance,
+    cycle_number: cycleIndex + 1,
+    day_in_cycle,
+    days_remaining,
+    days_until_clear,
+    next_cycle_start,
+    next_cycle_end,
+    next_cycle_clear,
+    previous_cycle,
+    code,
+    schedule_label,
+    label
+  };
 }
 
 function getMonthlyCycleConfig(refDate = new Date()) {
@@ -1672,15 +1796,15 @@ function computeMonthlyClearIso(timestampIso, refDate = new Date()) {
   const cfg = getMonthlyCycleConfig(refDate);
   const tsStr = String(timestampIso || '').trim();
   const tsYmd = normalizeYmd(tsStr.replace('T', ' ').slice(0, 10)) || refDate.toISOString().slice(0, 10);
+  if (cfg.auto_advance !== false) {
+    const bucket = resolveMonthlyCycleBucket(tsYmd, cfg);
+    return `${bucket.clear_date}T00:00:00.000Z`;
+  }
   if (tsYmd >= cfg.start_date && tsYmd <= cfg.end_date) {
     return `${cfg.clear_date}T00:00:00.000Z`;
   }
-  const dt = new Date(`${tsYmd}T00:00:00.000Z`);
-  if (!Number.isNaN(dt.getTime())) {
-    const clearDt = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 5));
-    return clearDt.toISOString();
-  }
-  return `${cfg.clear_date}T00:00:00.000Z`;
+  const bucket = resolveMonthlyCycleBucket(tsYmd, cfg);
+  return `${bucket.clear_date}T00:00:00.000Z`;
 }
 
 function phoneDigitsVariantsMatch(storedRaw, queryRaw) {
@@ -1851,18 +1975,77 @@ function maskOtpInSmsBody(rawMessage, knownOtp = '') {
   return text;
 }
 
+function getUtcWeekMondayYmd(dateOrYmd) {
+  let ymd;
+  if (dateOrYmd instanceof Date) {
+    ymd = dateOrYmd.toISOString().slice(0, 10);
+  } else {
+    ymd = normalizeYmd(String(dateOrYmd || '').slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  }
+  const dt = new Date(`${ymd}T00:00:00.000Z`);
+  const day = dt.getUTCDay(); // 0=Sun, 1=Mon, ... 6=Sat
+  const diffToMon = day === 0 ? 6 : day - 1;
+  return addDaysYmd(ymd, -diffToMon);
+}
+
 function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date()) {
   const nowMs = refDate.getTime();
+  const todayYmd = refDate.toISOString().slice(0, 10);
   const sRole = normRole(role);
   const monthlyCfg = getMonthlyCycleConfig(refDate);
   const byTerm = {
     Weekly: { ...PAYTERM_DEFINITIONS.Weekly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null },
-    Monthly: { ...PAYTERM_DEFINITIONS.Monthly, sms_count: 0, cleared_usd: 0, held_usd: 0, cleared_pkr: 0, held_pkr: 0, next_release_at: null }
+    Monthly: {
+      ...PAYTERM_DEFINITIONS.Monthly,
+      code: monthlyCfg.code || '30/5 {W}',
+      label: monthlyCfg.schedule_label || 'Monthly (30/5) {W}',
+      cycle_days: monthlyCfg.cycle_days || 30,
+      hold_days: Number.isFinite(Number(monthlyCfg.hold_days)) ? Number(monthlyCfg.hold_days) : 5,
+      sms_count: 0,
+      cleared_usd: 0,
+      held_usd: 0,
+      cleared_pkr: 0,
+      held_pkr: 0,
+      next_release_at: null
+    }
   };
   let clearedUsd = 0, heldUsd = 0, clearedPkr = 0, heldPkr = 0;
   let wnUsd = 0, wnHeldUsd = 0, wnClearedUsd = 0, wnPkr = 0, wnHeldPkr = 0, wnClearedPkr = 0;
   let wnSmsCount = 0;
   let nextReleaseMs = null;
+  const cycleBucketsMap = new Map();
+
+  const ensureCycleBucket = (bucketInfo) => {
+    let entry = cycleBucketsMap.get(bucketInfo.cycle_key);
+    if (!entry) {
+      const isCurrent = todayYmd >= bucketInfo.start_date && todayYmd <= bucketInfo.end_date;
+      const isCompleted = todayYmd > bucketInfo.end_date;
+      const isCleared = todayYmd >= bucketInfo.clear_date;
+      entry = {
+        cycle_key: bucketInfo.cycle_key,
+        cycle_number: bucketInfo.cycle_number,
+        start_date: bucketInfo.start_date,
+        end_date: bucketInfo.end_date,
+        clear_date: bucketInfo.clear_date,
+        cycle_days: bucketInfo.cycle_days,
+        hold_days: bucketInfo.hold_days,
+        is_current: isCurrent,
+        is_completed: isCompleted,
+        is_cleared: isCleared,
+        status: isCleared ? 'cleared' : (isCompleted ? 'holding' : 'active'),
+        days_until_clear: Math.max(0, diffDaysYmd(todayYmd, bucketInfo.clear_date)),
+        sms_count: 0,
+        earned_usd: 0,
+        earned_pkr: 0,
+        cleared_usd: 0,
+        held_usd: 0,
+        cleared_pkr: 0,
+        held_pkr: 0
+      };
+      cycleBucketsMap.set(bucketInfo.cycle_key, entry);
+    }
+    return entry;
+  };
 
   for (const s of (smsList || [])) {
     if (!s) continue;
@@ -1884,16 +2067,19 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
       : amtUsd * fxRate;
 
     const tsMs = s.timestamp ? new Date(s.timestamp).getTime() : nowMs;
-    const tsYmd = normalizeYmd(String(s.timestamp || s.date || '').replace('T', ' ').slice(0, 10));
+    const tsYmd = normalizeYmd(String(s.timestamp || s.date || '').replace('T', ' ').slice(0, 10)) || todayYmd;
     let clearsMs;
+    let monthlyBucket = null;
     if (isWn || ptKey === 'Monthly') {
-      if (tsYmd && tsYmd >= monthlyCfg.start_date && tsYmd <= monthlyCfg.end_date) {
-        clearsMs = new Date(`${monthlyCfg.clear_date}T00:00:00.000Z`).getTime();
-      } else {
-        clearsMs = s.clears_at ? new Date(s.clears_at).getTime() : new Date(computeMonthlyClearIso(s.timestamp || s.date, refDate)).getTime();
-      }
+      // ALWAYS compute clearance dynamically from the Owner's live 30-day rolling cycle & hold_days
+      // so changing hold_days (e.g. 5 -> 10 or 15) immediately propagates across Owner, Agent, and Client!
+      monthlyBucket = resolveMonthlyCycleBucket(tsYmd, monthlyCfg);
+      clearsMs = Date.parse(`${monthlyBucket.clear_date}T00:00:00.000Z`);
     } else {
-      clearsMs = s.clears_at ? new Date(s.clears_at).getTime() : ((Number.isFinite(tsMs) ? tsMs : nowMs) + meta.hold_days * 86400000);
+      // Weekly (API) rule: current Mon–Sun week earnings stay locked until the following Monday 00:00 UTC
+      const smsWeekMondayYmd = getUtcWeekMondayYmd(tsYmd);
+      const smsNextMondayYmd = addDaysYmd(smsWeekMondayYmd, 7);
+      clearsMs = Date.parse(`${smsNextMondayYmd}T00:00:00.000Z`);
     }
     const isCleared = nowMs >= clearsMs;
 
@@ -1916,10 +2102,25 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
       if (!b.next_release_at || relIso < b.next_release_at) b.next_release_at = relIso;
       if (nextReleaseMs === null || clearsMs < nextReleaseMs) nextReleaseMs = clearsMs;
     }
-    if (isWn) {
-      wnSmsCount += rowWeight;
-      wnUsd += amtUsd;
-      wnPkr += amtPkr;
+    if (isWn || ptKey === 'Monthly') {
+      if (isWn) {
+        wnSmsCount += rowWeight;
+        wnUsd += amtUsd;
+        wnPkr += amtPkr;
+      }
+      if (monthlyBucket) {
+        const cEntry = ensureCycleBucket(monthlyBucket);
+        cEntry.sms_count += rowWeight;
+        cEntry.earned_usd += amtUsd;
+        cEntry.earned_pkr += amtPkr;
+        if (isCleared) {
+          cEntry.cleared_usd += amtUsd;
+          cEntry.cleared_pkr += amtPkr;
+        } else {
+          cEntry.held_usd += amtUsd;
+          cEntry.held_pkr += amtPkr;
+        }
+      }
     }
   }
 
@@ -1929,6 +2130,20 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
     byTerm[k].cleared_pkr = round2(byTerm[k].cleared_pkr);
     byTerm[k].held_pkr = round2(byTerm[k].held_pkr);
   }
+
+  const monthlyCycles = Array.from(cycleBucketsMap.values())
+    .map(c => ({
+      ...c,
+      earned_usd: round4(c.earned_usd),
+      earned_pkr: round2(c.earned_pkr),
+      cleared_usd: round4(c.cleared_usd),
+      held_usd: round4(c.held_usd),
+      cleared_pkr: round2(c.cleared_pkr),
+      held_pkr: round2(c.held_pkr)
+    }))
+    .sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
+
+  const completedCycles = monthlyCycles.filter(c => c.is_completed);
 
   return {
     cleared_usd: round4(clearedUsd),
@@ -1943,6 +2158,8 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
     whitenoise_cleared_pkr: round2(wnClearedPkr),
     whitenoise_sms_count: wnSmsCount,
     monthly_cycle: monthlyCfg,
+    monthly_cycles: monthlyCycles,
+    completed_cycles: completedCycles,
     next_release_date: nextReleaseMs ? new Date(nextReleaseMs).toISOString().slice(0, 10) : monthlyCfg.clear_date,
     by_payterm: byTerm
   };
@@ -1951,12 +2168,23 @@ function computeUserHoldSummary(smsList, role, fxRate = 280, refDate = new Date(
 function getMonthly30_5ScheduleInfo(holdSummary = null, refDate = new Date()) {
   const cfg = (holdSummary && holdSummary.monthly_cycle) ? holdSummary.monthly_cycle : getMonthlyCycleConfig(refDate);
   const mHold = holdSummary && holdSummary.by_payterm ? holdSummary.by_payterm.Monthly : null;
+  const cycleDays = Number.isFinite(Number(cfg.cycle_days)) ? Number(cfg.cycle_days) : 30;
+  const holdDays = Number.isFinite(Number(cfg.hold_days)) ? Number(cfg.hold_days) : 5;
+  const dynamicCode = `${cycleDays}/${holdDays} {W}`;
+  const dynamicLabel = `Monthly (${cycleDays}/${holdDays}) {W}`;
   return {
     payterm: 'Monthly',
-    code: '30/5 {W}',
-    label: 'Monthly (30/5) {W}',
-    cycle_days: 30,
-    hold_days: 5,
+    code: dynamicCode,
+    label: dynamicLabel,
+    cycle_days: cycleDays,
+    hold_days: holdDays,
+    auto_advance: cfg.auto_advance !== false,
+    cycle_number: cfg.cycle_number || 1,
+    day_in_cycle: cfg.day_in_cycle || 1,
+    days_remaining: Number.isFinite(Number(cfg.days_remaining)) ? Number(cfg.days_remaining) : cycleDays,
+    days_until_clear: Number.isFinite(Number(cfg.days_until_clear)) ? Number(cfg.days_until_clear) : holdDays,
+    next_cycle_start: cfg.next_cycle_start || '',
+    previous_cycle: cfg.previous_cycle || null,
     schedule: 'monthly30_5',
     cycle_start: cfg.start_date,
     cycle_end: cfg.end_date,
@@ -1964,11 +2192,13 @@ function getMonthly30_5ScheduleInfo(holdSummary = null, refDate = new Date()) {
     cycle_label: cfg.label,
     is_cleared_window: Boolean(cfg.is_cleared_window),
     sms_count: holdSummary ? (holdSummary.whitenoise_sms_count || 0) : 0,
-    next_release_date: cfg.clear_date || (mHold && mHold.next_release_at ? mHold.next_release_at.slice(0, 10) : cfg.clear_date),
+    next_release_date: (mHold && mHold.next_release_at ? mHold.next_release_at.slice(0, 10) : cfg.clear_date),
     held_usd: holdSummary ? holdSummary.whitenoise_held_usd : 0,
     cleared_usd: holdSummary ? holdSummary.whitenoise_cleared_usd : 0,
     held_pkr: holdSummary ? holdSummary.whitenoise_held_pkr : 0,
-    cleared_pkr: holdSummary ? holdSummary.whitenoise_cleared_pkr : 0
+    cleared_pkr: holdSummary ? holdSummary.whitenoise_cleared_pkr : 0,
+    monthly_cycles: holdSummary ? (holdSummary.monthly_cycles || []) : [],
+    completed_cycles: holdSummary ? (holdSummary.completed_cycles || []) : []
   };
 }
 
@@ -2338,7 +2568,8 @@ function ingestSms({
   client_rate: customClientRate = undefined,
   whitenoise_sms_id = null,
   conversion_sent = false,
-  conversion_at = null
+  conversion_at = null,
+  has_unique_ext_id = false
 }) {
   try {
     const cleanTo = String(to_number || '').trim();
@@ -2360,7 +2591,8 @@ function ingestSms({
       number: cleanTo,
       message: cleanMsg,
       rawTimestamp: hasRealTimestamp ? rawTsStr : '',
-      hasRealTimestamp
+      hasRealTimestamp,
+      hasUniqueExtId: Boolean(has_unique_ext_id)
     })) {
       return { status: 'ok', duplicate: true, sms_id: sms_id || dedupeKey };
     }
@@ -3156,7 +3388,124 @@ async function pollSingleLoginPanel(panelId, force = false) {
   return added;
 }
 
-async function pollSingleCrApiConnection(connId, force = false) {
+function looksLikeCrApiPhone(val) {
+  const cleaned = String(val || '').trim().replace(/[\s()-]/g, '');
+  return /^\+?\d{6,16}$/.test(cleaned);
+}
+
+function applyCrApiTimezoneOffset(rawDt, offsetMinutes) {
+  const s = String(rawDt || '').trim();
+  const off = Number(offsetMinutes || 0);
+  if (!s || !Number.isFinite(off) || off === 0) return s;
+  // Already carries explicit timezone offset (Z or +/-HH:MM) — leave untouched
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(s)) return s;
+  const parsedIso = normalizeIsoTimestamp(s);
+  const ms = Date.parse(parsedIso);
+  if (!Number.isFinite(ms)) return s;
+  // Wall-clock timestamp was in UTC+off, so true UTC = parsedUtcMs - off*60000
+  return new Date(ms - off * 60000).toISOString();
+}
+
+function parseCrApiRow(row) {
+  let num = '';
+  let cli = '';
+  let msg = '';
+  let dt = '';
+  let rowRange = '';
+  let rowCountry = '';
+  let rowProvider = '';
+  let rowCurrency = '';
+  let rowExtId = '';
+  let payoutVal;
+
+  if (Array.isArray(row)) {
+    // Handle all column layouts accurately regardless of trailing status/payout/range columns:
+    // Case A: [dt, num, cli, msg, ...] (row[1] is a phone number)
+    // Case B: [dt, range, num, cli, msg, ...] (row[1] is not a phone, row[2] is a phone number)
+    // Case C: fallback [dt, num, cli, msg]
+    if (row.length >= 4 && looksLikeCrApiPhone(row[1])) {
+      dt = String(row[0] ?? '').trim();
+      num = String(row[1] ?? '').trim();
+      cli = String(row[2] ?? '').trim();
+      msg = String(row[3] ?? '').trim();
+      payoutVal = extractCrApiRate(row);
+    } else if (row.length >= 5 && looksLikeCrApiPhone(row[2])) {
+      dt = String(row[0] ?? '').trim();
+      rowRange = String(row[1] ?? '').trim();
+      num = String(row[2] ?? '').trim();
+      cli = String(row[3] ?? '').trim();
+      msg = String(row[4] ?? '').trim();
+      payoutVal = extractCrApiRate(row);
+    } else if (row.length >= 4) {
+      dt = String(row[0] ?? '').trim();
+      num = String(row[1] ?? '').trim();
+      cli = String(row[2] ?? '').trim();
+      msg = String(row[3] ?? '').trim();
+      payoutVal = extractCrApiRate(row);
+    }
+  } else if (row && typeof row === 'object') {
+    rowExtId = String(
+      row.id ?? row.sms_id ?? row.record_id ?? row.log_id ?? row.cdr_id ?? row.uid ?? row.uuid ?? row.msgid ?? row.message_id ?? row.ref ?? ''
+    ).trim();
+    num = String(
+      row.num ?? row.number ?? row.to ?? row.to_number ?? row.to_num ?? row.phone_number ?? row.destination ?? row.dest ?? row.dst ?? row.msisdn ?? row.phone ?? row.mobile ?? row.did ?? row.called ?? row.receiver ?? row.recipient ?? row.target ?? ''
+    ).trim();
+    cli = String(
+      row.cli ?? row.sender ?? row.from ?? row.sender_id ?? row.sid ?? row.originator ?? row.src ?? row.service ?? row.app ?? ''
+    ).trim();
+    const rawMsg = row.message ?? row.sms ?? row.sms_text ?? row.sms_body ?? row.text ?? row.text_message ?? row.msg ?? row.body ?? row.content ?? row.otp_message ?? row.description ?? '';
+    msg = String(rawMsg).trim();
+    if (!msg && row.otp != null && String(row.otp).trim()) {
+      msg = String(row.otp).trim();
+    }
+    dt = String(
+      row.dt ?? row.timestamp ?? row.date ?? row.created_at ?? row.received_at ?? row.time_received ?? row.sent_at ?? row.created ?? row.time ?? row.datetime ?? row.date_time ?? ''
+    ).trim();
+    rowRange = String(row.range_name ?? row.range ?? row.range_label ?? row.termination ?? '').trim();
+    rowCountry = String(row.country ?? row.country_name ?? '').trim();
+    rowProvider = String(row.provider ?? row.carrier ?? row.route ?? '').trim();
+    rowCurrency = String(row.currency ?? row.curr ?? row.cur ?? '').trim().toUpperCase();
+    payoutVal = extractCrApiRate(row);
+  }
+
+  return { num, cli, msg, dt, rowRange, rowCountry, rowProvider, rowCurrency, rowExtId, payoutVal };
+}
+
+function buildCrApiPollUrl(base, token, { recordsLimit = 2000, backfill = false, tzOffsetMinutes = 0 } = {}) {
+  const hasTokenParam = /[?&]token=/i.test(base);
+  const hasRecordsParam = /[?&]records=/i.test(base);
+  const hasDtRange = /[?&](dt1|fdate1|from)=/i.test(base);
+  const params = [];
+  if (!hasTokenParam) params.push(`token=${encodeURIComponent(token)}`);
+  if (!hasRecordsParam && recordsLimit > 0) params.push(`records=${recordsLimit}`);
+  if (backfill && !hasDtRange) {
+    // Compute today's date in the upstream panel's timezone (or UTC if 0)
+    const nowShifted = new Date(Date.now() + Number(tzOffsetMinutes || 0) * 60000);
+    const todayYmd = nowShifted.toISOString().slice(0, 10);
+    params.push(`dt1=${encodeURIComponent(`${todayYmd} 00:00:00`)}`);
+    params.push(`dt2=${encodeURIComponent(`${todayYmd} 23:59:59`)}`);
+  }
+  if (!params.length) return base;
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}${params.join('&')}`;
+}
+
+async function fetchCrApiJson(url, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let resp;
+  try {
+    resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'HUMEX-SMS/1.0' } });
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
+async function pollSingleCrApiConnection(connId, force = false, options = {}) {
   const conns = readDb('cr_api_connections') || [];
   const conn = conns.find(c => Number(c.id) === Number(connId));
   if (!conn || (!force && !conn.active)) return 0;
@@ -3168,34 +3517,71 @@ async function pollSingleCrApiConnection(connId, force = false) {
     if (bo && Date.now() < bo.nextAllowedAt) return 0;
   }
   crApiInFlight.add(connId);
+  const isBackfill = Boolean(options && options.backfill);
+  const tzOffsetMin = Number(conn.tz_offset_minutes || 0);
   let pulled = 0;
+  let fetchedRows = 0;
+  let dupSkipped = 0;
+  let invalidSkipped = 0;
+  let usedLimit = isBackfill ? 5000 : 2000;
+  let saturated = false;
   let lastStatus = '';
   const pulledAt = new Date().toISOString();
 
   try {
     const base = assertSafeExternalUrl(conn.panel_url, 'CR API Panel URL');
-    const sep = base.includes('?') ? '&' : '?';
-    // Use records=500 so high-volume OTP bursts never overflow a single poll window
-    const hasTokenParam = /[?&]token=/i.test(base);
-    const hasRecordsParam = /[?&]records=/i.test(base);
-    const pollUrl = hasTokenParam
-      ? (hasRecordsParam ? base : `${base}${sep}records=500`)
-      : `${base}${sep}token=${encodeURIComponent(conn.token)}${hasRecordsParam ? '' : '&records=500'}`;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-    let resp;
-    try {
-      resp = await fetch(pollUrl, { signal: controller.signal, headers: { 'User-Agent': 'HUMEX-SMS/1.0' } });
-    } finally {
-      clearTimeout(timeout);
+    // Attempt higher fetch window (2000 normal, 5000 + dt1/dt2 on backfill) with automatic graceful fallback to 500
+    const candidatePlans = isBackfill
+      ? [
+          { recordsLimit: 5000, backfill: true },
+          { recordsLimit: 5000, backfill: false },
+          { recordsLimit: 2000, backfill: false },
+          { recordsLimit: 500, backfill: false }
+        ]
+      : [
+          { recordsLimit: 2000, backfill: false },
+          { recordsLimit: 500, backfill: false }
+        ];
+
+    let json = null;
+    let lastFetchErr = null;
+    for (let pi = 0; pi < candidatePlans.length; pi++) {
+      const plan = candidatePlans[pi];
+      const pollUrl = buildCrApiPollUrl(base, conn.token, {
+        recordsLimit: plan.recordsLimit,
+        backfill: plan.backfill,
+        tzOffsetMinutes: tzOffsetMin
+      });
+      try {
+        const candidateJson = await fetchCrApiJson(pollUrl, plan.recordsLimit >= 5000 ? 35000 : 25000);
+        const rowsCand = Array.isArray(candidateJson)
+          ? candidateJson
+          : (candidateJson && (candidateJson.data || candidateJson.aaData || candidateJson.rows || candidateJson.records || candidateJson.messages || candidateJson.list || candidateJson.result));
+        const stStr = candidateJson && candidateJson.status != null ? String(candidateJson.status).trim().toLowerCase() : '';
+        const okSt = Array.isArray(candidateJson)
+          || stStr === 'success'
+          || stStr === 'ok'
+          || candidateJson?.status === true
+          || candidateJson?.status === 1
+          || (!stStr && Array.isArray(rowsCand) && !candidateJson?.error);
+        const errTxt = (candidateJson && (candidateJson.msg || candidateJson.message || candidateJson.error)) || '';
+        const isEmptyNoRecords = !okSt && errTxt && /no records found|no data|empty/i.test(errTxt);
+        if (okSt || isEmptyNoRecords || pi === candidatePlans.length - 1) {
+          json = candidateJson;
+          usedLimit = plan.recordsLimit;
+          lastFetchErr = null;
+          break;
+        }
+        // Non-success on high limit/dt1 -> retry with safer fallback plan
+        lastFetchErr = new Error(errTxt || 'Panel returned non-success status');
+      } catch (e) {
+        lastFetchErr = e;
+        if (pi === candidatePlans.length - 1) throw e;
+      }
     }
+    if (lastFetchErr && !json) throw lastFetchErr;
 
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-    }
-
-    const json = await resp.json();
     const rowsCandidate = Array.isArray(json)
       ? json
       : (json && (json.data || json.aaData || json.rows || json.records || json.messages || json.list || json.result));
@@ -3218,7 +3604,13 @@ async function pollSingleCrApiConnection(connId, force = false) {
           allConns[idx] = {
             ...allConns[idx],
             last_pulled_at: pulledAt,
-            last_status: lastStatus
+            last_status: lastStatus,
+            last_fetched_rows: 0,
+            last_pulled_new: 0,
+            last_dup_skipped: 0,
+            last_invalid_skipped: 0,
+            last_fetch_limit: usedLimit,
+            last_saturated: false
           };
           writeDb('cr_api_connections', allConns);
         }
@@ -3228,64 +3620,56 @@ async function pollSingleCrApiConnection(connId, force = false) {
     }
 
     const rows = Array.isArray(rowsCandidate) ? rowsCandidate : [];
+    fetchedRows = rows.length;
+    saturated = Boolean(usedLimit > 0 && fetchedRows >= usedLimit);
+
     // Process oldest -> newest so newest unshifts to the top of sms_log
     const rowsToProcess = [...rows].reverse();
-    for (const row of rowsToProcess) {
-      let num = '';
-      let cli = '';
-      let msg = '';
-      let dt = '';
-      let rowRange = '';
-      let rowCountry = '';
-      let rowProvider = '';
-      let rowCurrency = '';
-      let rowExtId = '';
-      let payoutVal;
+    // Per-batch occurrence counters ensure legitimate duplicate/same-second/minute-precision OTPs
+    // returned as separate rows by the upstream panel are NEVER dropped, while repeated polls of
+    // the exact same batch still deduplicate 100% cleanly.
+    const batchOccMap = new Map();
+    const batchContentOccMap = new Map();
 
-      if (Array.isArray(row)) {
-        // Support [dt, num, cli, msg], [dt, num, cli, msg, payout], [dt, range, num, cli, msg, payout?]
-        if (row.length === 5 && /^\+?\d{6,16}$/.test(String(row[1] || '').trim().replace(/[\s()-]/g, '')) && isLikelyRateToken(row[4])) {
-          dt = String(row[0] || '').trim();
-          num = String(row[1] || '').trim();
-          cli = String(row[2] || '').trim();
-          msg = String(row[3] || '').trim();
-          payoutVal = extractCrApiRate(row);
-        } else if (row.length >= 5) {
-          dt = String(row[0] || '').trim();
-          rowRange = String(row[1] || '').trim();
-          num = String(row[2] || '').trim();
-          cli = String(row[3] || '').trim();
-          msg = String(row[4] || '').trim();
-          payoutVal = extractCrApiRate(row);
-        } else {
-          dt = String(row[0] || '').trim();
-          num = String(row[1] || '').trim();
-          cli = String(row[2] || '').trim();
-          msg = String(row[3] || '').trim();
-        }
-      } else if (row && typeof row === 'object') {
-        rowExtId = String(row.id ?? row.sms_id ?? row.uid ?? row.msgid ?? row.message_id ?? '').trim();
-        num = String(row.num ?? row.number ?? row.to ?? row.to_number ?? row.destination ?? row.dst ?? row.msisdn ?? row.phone ?? row.receiver ?? row.recipient ?? '').trim();
-        cli = String(row.cli ?? row.sender ?? row.from ?? row.sender_id ?? row.sid ?? row.originator ?? row.src ?? row.service ?? row.app ?? '').trim();
-        msg = String(row.message ?? row.sms ?? row.sms_text ?? row.text ?? row.msg ?? row.body ?? row.content ?? row.otp_message ?? '').trim();
-        dt = String(row.dt ?? row.timestamp ?? row.date ?? row.created_at ?? row.received_at ?? row.time_received ?? row.sent_at ?? row.created ?? row.time ?? row.datetime ?? row.date_time ?? '').trim();
-        rowRange = String(row.range_name ?? row.range ?? row.range_label ?? row.termination ?? '').trim();
-        rowCountry = String(row.country ?? row.country_name ?? '').trim();
-        rowProvider = String(row.provider ?? row.carrier ?? row.route ?? '').trim();
-        rowCurrency = String(row.currency ?? row.curr ?? row.cur ?? '').trim().toUpperCase();
-        payoutVal = extractCrApiRate(row);
+    for (const row of rowsToProcess) {
+      const parsed = parseCrApiRow(row);
+      const { num, cli, msg, dt, rowRange, rowCountry, rowProvider, rowCurrency, rowExtId, payoutVal } = parsed;
+
+      if (!num || !msg) {
+        invalidSkipped++;
+        continue;
       }
 
-      if (!num || !msg) continue;
-
-      const cleanDt = (dt && !isRelativeTimestampStr(dt)) ? dt : '';
+      const rawCleanDt = (dt && !isRelativeTimestampStr(dt)) ? dt : '';
+      const cleanDt = rawCleanDt ? applyCrApiTimezoneOffset(rawCleanDt, tzOffsetMin) : '';
       const normNum = normalizePhoneKey(num);
       const normMsg = normalizeMsgKey(msg);
-      const smsId = rowExtId
-        ? `crapi-${conn.id}-id-${md5(`${rowExtId}|${normNum}`).slice(0, 16)}`
-        : (cleanDt
-            ? `crapi-${conn.id}-${md5(`${cleanDt}|${normNum}|${cli}|${normMsg}`).slice(0, 16)}`
-            : `crapi-${conn.id}-${md5(`${normNum}|${cli}|${normMsg}|${Math.floor(Date.now() / 20000)}`).slice(0, 16)}`);
+
+      const occKey = `${rawCleanDt || 'nodt'}|${normNum}|${cli}|${normMsg}`;
+      const occ = batchOccMap.get(occKey) || 0;
+      batchOccMap.set(occKey, occ + 1);
+
+      const isoSec = cleanDt ? normalizeIsoTimestamp(cleanDt).slice(0, 19) : 'nodt';
+      const contentOccKey = `${normNum}|${isoSec}|${normMsg}`;
+      const contentOcc = batchContentOccMap.get(contentOccKey) || 0;
+      batchContentOccMap.set(contentOccKey, contentOcc + 1);
+
+      let smsId;
+      if (rowExtId) {
+        smsId = `crapi-${conn.id}-id-${md5(`${rowExtId}|${normNum}`).slice(0, 16)}`;
+      } else if (rawCleanDt) {
+        smsId = occ === 0
+          ? `crapi-${conn.id}-${md5(`${rawCleanDt}|${normNum}|${cli}|${normMsg}`).slice(0, 16)}`
+          : `crapi-${conn.id}-${md5(`${rawCleanDt}|${normNum}|${cli}|${normMsg}|#${occ}`).slice(0, 16)}`;
+      } else {
+        smsId = occ === 0
+          ? `crapi-${conn.id}-${md5(`${normNum}|${cli}|${normMsg}|${Math.floor(Date.now() / 20000)}`).slice(0, 16)}`
+          : `crapi-${conn.id}-${md5(`${normNum}|${cli}|${normMsg}|${Math.floor(Date.now() / 20000)}|#${occ}`).slice(0, 16)}`;
+      }
+
+      // Preserve every row that has a real unique provider ID OR is a 2nd+ same-second occurrence in this batch
+      const hasUniqueExtId = Boolean(rowExtId || occ > 0 || contentOcc > 0);
+
       const ingestRes = ingestSms({
         sender: cli,
         to_number: num,
@@ -3300,15 +3684,36 @@ async function pollSingleCrApiConnection(connId, force = false) {
         panel_id: conn.id,
         panel_name: conn.panel_name,
         timestamp: cleanDt || null,
-        payout: Number.isFinite(payoutVal) ? payoutVal : undefined
+        payout: Number.isFinite(payoutVal) ? payoutVal : undefined,
+        has_unique_ext_id: hasUniqueExtId
       });
       if (ingestRes && ingestRes.logged) {
         pulled++;
+      } else if (ingestRes && ingestRes.duplicate) {
+        dupSkipped++;
+      } else {
+        invalidSkipped++;
       }
     }
 
-    lastStatus = pulled > 0 ? `OK — pulled ${pulled} new message(s)` : 'Active — Up to date';
+    const diagParts = [];
+    if (fetchedRows > 0) diagParts.push(`fetched ${fetchedRows}`);
+    if (dupSkipped > 0) diagParts.push(`${dupSkipped} dup`);
+    if (invalidSkipped > 0) diagParts.push(`${invalidSkipped} invalid`);
+    if (saturated) diagParts.push(`limit ${usedLimit} hit`);
+    const diagSuffix = diagParts.length ? ` (${diagParts.join(', ')})` : '';
+
+    lastStatus = pulled > 0
+      ? `OK — +${pulled} new${diagSuffix}`
+      : `Active — Up to date${diagSuffix}`;
     crApiBackoff.delete(connId);
+
+    // If batch hit the fetch cap AND pulled new messages during normal polling, schedule a fast catch-up poll
+    if (!isBackfill && saturated && pulled > 0) {
+      setTimeout(() => {
+        pollSingleCrApiConnection(connId, false).catch(() => {});
+      }, 2500);
+    }
   } catch (err) {
     lastStatus = `Error — ${String(err.message).slice(0, 180)}`;
     const prev = crApiBackoff.get(connId) || { errors: 0, nextAllowedAt: 0 };
@@ -3328,6 +3733,12 @@ async function pollSingleCrApiConnection(connId, force = false) {
       ...allConns[idx],
       last_pulled_at: pulledAt,
       last_status: lastStatus,
+      last_fetched_rows: fetchedRows,
+      last_pulled_new: pulled,
+      last_dup_skipped: dupSkipped,
+      last_invalid_skipped: invalidSkipped,
+      last_fetch_limit: usedLimit,
+      last_saturated: saturated,
       total_pulled: (allConns[idx].total_pulled || 0) + pulled
     };
     writeDb('cr_api_connections', allConns);
@@ -5840,7 +6251,7 @@ function statRowToVirtualSms(st, fxFallback = 280) {
     agent_amount: agProfit,
     owner_amount: ownerProfit,
     profit: ownerProfit,
-    clears_at: st.clears_at || computeMonthlyClearIso(`${st.date_ymd} 12:00:00`),
+    clears_at: computeMonthlyClearIso(`${st.date_ymd} 12:00:00`),
     batch_id: st.batch_id || '',
     client_deleted: Boolean(st.client_deleted),
     client_deleted_at: st.client_deleted_at || null
@@ -10859,7 +11270,7 @@ function getPayoutRequestType(p) {
   return 'weekly';
 }
 
-function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
+function computeUserSplitWallets(sessionUser, allPayoutsOverride = null, refDate = new Date()) {
   const sRole = (sessionUser?.role || '').toLowerCase();
   const userId = Number(sessionUser?.id);
   const myUsername = String(sessionUser?.username || '').trim().toLowerCase();
@@ -10891,7 +11302,7 @@ function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
     earnedPkr = earned * fxRate;
   }
 
-  const holdSummary = computeUserHoldSummary(scopedSms, sRole, fxRate);
+  const holdSummary = computeUserHoldSummary(scopedSms, sRole, fxRate, refDate);
 
   const userPayouts = allPayouts.filter(p => {
     if (!p) return false;
@@ -10983,10 +11394,46 @@ function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
   )));
 
   // Weekly (API) portion of DB balance strictly excludes ALL Monthly {W} funds (held OR cleared)!
+  // Furthermore, current Mon–Sun week's Weekly earnings are strictly locked until the following Monday 00:00 UTC
+  // (even if the user hits their minimum payout target in 1 day, they can only request previous completed week starting Monday).
+  const currentWeekStartYmd = getUtcWeekMondayYmd(refDate);
+  const currentWeekEndYmd = addDaysYmd(currentWeekStartYmd, 6);
+  const nextMondayYmd = addDaysYmd(currentWeekStartYmd, 7);
+  const todayRefYmd = refDate.toISOString().slice(0, 10);
+
+  let thisWeekWeeklyUsd = 0;
+  let thisWeekWeeklyPkr = 0;
+  for (const s of scopedSms) {
+    if (!s) continue;
+    const isWn = Boolean(
+      s.is_whitenoise ||
+      String(s.source || '').toLowerCase() === 'whitenoise' ||
+      String(s.provider || '').toLowerCase().includes('whitenoise') ||
+      String(s.payout_schedule || '').toLowerCase() === 'monthly30_5'
+    );
+    const rawPt = isWn ? 'Monthly' : migrateLegacyPayterm(s.payterm || s.payterms || 'Weekly');
+    if (isWn || rawPt === 'Monthly') continue;
+    const tsYmd = normalizeYmd(String(s.timestamp || s.date || '').replace('T', ' ').slice(0, 10)) || todayRefYmd;
+    if (tsYmd >= currentWeekStartYmd) {
+      const amtUsd = sRole === 'client'
+        ? (Number(s.client_amount) || 0)
+        : (sRole === 'agent' ? (Number(s.agent_amount) || 0) : (Number(s.owner_amount) || 0));
+      const amtPkr = sRole === 'client'
+        ? (s.client_amount_pkr != null ? Number(s.client_amount_pkr) : amtUsd * (Number(s.fx_usd_to_pkr) || fxRate))
+        : amtUsd * fxRate;
+      thisWeekWeeklyUsd += amtUsd;
+      thisWeekWeeklyPkr += amtPkr;
+    }
+  }
+  thisWeekWeeklyUsd = round4(thisWeekWeeklyUsd);
+  thisWeekWeeklyPkr = round2(thisWeekWeeklyPkr);
+
   const weeklyDbPortionUsd = Math.max(0, round4(dbBalance - monthlyUnpaidLedgerUsd));
   const weeklyDbPortionPkr = Math.max(0, round2(dbBalancePkr - monthlyUnpaidLedgerPkr));
-  const weeklyAvailableUsd = Math.max(0, round4(weeklyDbPortionUsd - weeklyPendingUsd));
-  const weeklyAvailablePkr = Math.max(0, round2(weeklyDbPortionPkr - weeklyPendingPkr));
+  const weeklyMaturedUsd = Math.max(0, round4(weeklyDbPortionUsd - thisWeekWeeklyUsd));
+  const weeklyMaturedPkr = Math.max(0, round2(weeklyDbPortionPkr - thisWeekWeeklyPkr));
+  const weeklyAvailableUsd = Math.max(0, round4(weeklyMaturedUsd - weeklyPendingUsd));
+  const weeklyAvailablePkr = Math.max(0, round2(weeklyMaturedPkr - weeklyPendingPkr));
 
   const monthlyClearDate = moTerm.next_release_at
     ? String(moTerm.next_release_at).slice(0, 10)
@@ -11002,6 +11449,14 @@ function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
     held_usd: round4(Number(wkTerm.held_usd) || 0),
     cleared_pkr: round2(Number(wkTerm.cleared_pkr) || 0),
     held_pkr: round2(Number(wkTerm.held_pkr) || 0),
+    this_week_usd: thisWeekWeeklyUsd,
+    this_week_pkr: thisWeekWeeklyPkr,
+    matured_usd: weeklyMaturedUsd,
+    matured_pkr: weeklyMaturedPkr,
+    week_start_date: currentWeekStartYmd,
+    week_end_date: currentWeekEndYmd,
+    next_monday_date: nextMondayYmd,
+    is_matured: sRole === 'client' ? weeklyAvailablePkr > 0 : weeklyAvailableUsd > 0,
     paid_usd: round4(weeklyPaidUsd),
     paid_pkr: round2(weeklyPaidPkr),
     pending_usd: round4(weeklyPendingUsd),
@@ -11014,7 +11469,10 @@ function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
 
   const monthly_wallet = {
     payout_type: 'monthly',
-    schedule: 'Monthly (30/5) {W}',
+    schedule: holdSummary.monthly_cycle?.schedule_label || 'Monthly (30/5) {W}',
+    hold_days: Number.isFinite(Number(holdSummary.monthly_cycle?.hold_days)) ? Number(holdSummary.monthly_cycle.hold_days) : 5,
+    cycle_days: Number.isFinite(Number(holdSummary.monthly_cycle?.cycle_days)) ? Number(holdSummary.monthly_cycle.cycle_days) : 30,
+    days_remaining: Number.isFinite(Number(holdSummary.monthly_cycle?.days_remaining)) ? Number(holdSummary.monthly_cycle.days_remaining) : 30,
     sms_count: Number(moTerm.sms_count || 0),
     earned_usd: monthlyEarnedUsd,
     earned_pkr: monthlyEarnedPkr,
@@ -11033,7 +11491,9 @@ function computeUserSplitWallets(sessionUser, allPayoutsOverride = null) {
     is_matured: sRole === 'client' ? monthlyAvailablePkr > 0 : monthlyAvailableUsd > 0,
     cycle_start: holdSummary.monthly_cycle?.start_date || '',
     cycle_end: holdSummary.monthly_cycle?.end_date || '',
-    clear_date: monthlyClearDate
+    clear_date: monthlyClearDate,
+    monthly_cycles: holdSummary.monthly_cycles || [],
+    completed_cycles: holdSummary.completed_cycles || []
   };
 
   return {
@@ -11064,6 +11524,17 @@ app.get(['/api/payments', '/api/payments/balance', '/api/payments/summary'], req
   const userId = Number(sessionUser.id);
 
   const w = computeUserSplitWallets(sessionUser);
+  const mcLive = w.holdSummary.monthly_cycle || getMonthlyCycleConfig();
+  const dynamicPaytermSchedules = {
+    ...PAYTERM_DEFINITIONS,
+    Monthly: {
+      ...PAYTERM_DEFINITIONS.Monthly,
+      code: mcLive.code || PAYTERM_DEFINITIONS.Monthly.code,
+      label: mcLive.schedule_label || PAYTERM_DEFINITIONS.Monthly.label,
+      cycle_days: mcLive.cycle_days || 30,
+      hold_days: Number.isFinite(Number(mcLive.hold_days)) ? Number(mcLive.hold_days) : 5
+    }
+  };
 
   res.json({
     success: true,
@@ -11087,9 +11558,11 @@ app.get(['/api/payments', '/api/payments/balance', '/api/payments/summary'], req
     main_balance_pkr: round2(w.dbBalancePkr),
     weekly_wallet: w.weekly_wallet,
     monthly_wallet: w.monthly_wallet,
-    payterm_schedules: PAYTERM_DEFINITIONS,
+    payterm_schedules: dynamicPaytermSchedules,
     hold_summary: w.holdSummary,
-    monthly_cycle: w.holdSummary.monthly_cycle,
+    monthly_cycle: mcLive,
+    monthly_cycles: w.holdSummary.monthly_cycles || [],
+    completed_cycles: w.holdSummary.completed_cycles || [],
     monthly30_5: getMonthly30_5ScheduleInfo(w.holdSummary),
     whitenoise_access: hasWhitenoiseAccess(sessionUser),
     ...(sRole === 'agent' ? { weekly_target: getAgentClientWeeklyPkrStats(userId) } : {}),
@@ -12757,9 +13230,10 @@ function registerPaginatedCrud(routePath, tableName) {
         const splitWallets = computeUserSplitWallets(sessionUser, data);
         if (payoutType === 'monthly') {
           const mw = splitWallets.monthly_wallet;
+          const mLabel = mw.schedule || 'Monthly (30/5) {W}';
           const canUseMonthly = hasWhitenoiseAccess(sessionUser) || mw.earned_usd > 0 || mw.earned_pkr > 0;
           if (!canUseMonthly) {
-            return res.status(403).json({ error: 'Monthly (30/5) {W} payout is not enabled for your account.' });
+            return res.status(403).json({ error: `${mLabel} payout is not enabled for your account.` });
           }
           const availMonthly = reqCurrency === 'PKR' ? mw.available_pkr : mw.available_usd;
           const heldMonthly = reqCurrency === 'PKR' ? mw.held_pkr : mw.held_usd;
@@ -12767,23 +13241,41 @@ function registerPaginatedCrud(routePath, tableName) {
             if (heldMonthly > 0) {
               const heldStr = reqCurrency === 'PKR' ? `Rs. ${cleanMoneyStr(heldMonthly, 2)} PKR` : `$${cleanMoneyStr(heldMonthly, 2)}`;
               return res.status(400).json({
-                error: `Monthly (30/5) {W} cycle is not completed yet. Your held balance (${heldStr}) unlocks on ${mw.clear_date || 'the monthly clear date'}.`
+                error: `${mLabel} cycle is not completed yet. Your held balance (${heldStr}) unlocks on ${mw.clear_date || 'the monthly clear date'}.`
               });
             }
-            return res.status(400).json({ error: 'No matured Monthly (30/5) {W} balance available for payout.' });
+            return res.status(400).json({ error: `No matured ${mLabel} balance available for payout.` });
           }
           if (item.amount > availMonthly + 1e-6) {
             const availStr = reqCurrency === 'PKR' ? `Rs. ${cleanMoneyStr(availMonthly, 4)} PKR` : `$${cleanMoneyStr(availMonthly, 2)}`;
-            return res.status(400).json({ error: `Insufficient matured Monthly (30/5) {W} balance. Available now: ${availStr}` });
+            return res.status(400).json({ error: `Insufficient matured ${mLabel} balance. Available now: ${availStr}` });
           }
         } else {
           const ww = splitWallets.weekly_wallet;
           const availWeekly = reqCurrency === 'PKR' ? ww.available_pkr : ww.available_usd;
-          if (item.amount > availWeekly + 1e-6) {
-            if (reqCurrency === 'PKR') {
-              return res.status(400).json({ error: `Insufficient Weekly (API) PKR balance. Available balance: Rs. ${cleanMoneyStr(availWeekly, 4)} PKR` });
+          const thisWeekLocked = reqCurrency === 'PKR' ? Number(ww.this_week_pkr || 0) : Number(ww.this_week_usd || 0);
+          const unlockMon = ww.next_monday_date || 'next Monday';
+          if (availWeekly <= 0) {
+            if (thisWeekLocked > 0) {
+              const lockedStr = reqCurrency === 'PKR'
+                ? `Rs. ${cleanMoneyStr(thisWeekLocked, 2)} PKR`
+                : `$${cleanMoneyStr(thisWeekLocked, 2)}`;
+              return res.status(400).json({
+                error: `Current week's Weekly (API) earnings (${lockedStr}) cannot be requested until this week ends. You can request payout starting Monday (${unlockMon}).`
+              });
             }
-            return res.status(400).json({ error: `Insufficient Weekly (API) balance. Available balance: $${cleanMoneyStr(availWeekly, 2)}` });
+            return res.status(400).json({ error: 'No completed-week Weekly (API) balance available for payout.' });
+          }
+          if (item.amount > availWeekly + 1e-6) {
+            const lockedSuffix = thisWeekLocked > 0
+              ? (reqCurrency === 'PKR'
+                ? ` (This week's Rs. ${cleanMoneyStr(thisWeekLocked, 2)} PKR unlocks Monday ${unlockMon})`
+                : ` (This week's $${cleanMoneyStr(thisWeekLocked, 2)} unlocks Monday ${unlockMon})`)
+              : '';
+            if (reqCurrency === 'PKR') {
+              return res.status(400).json({ error: `Insufficient matured Weekly (API) PKR balance. Available from completed weeks: Rs. ${cleanMoneyStr(availWeekly, 2)} PKR.${lockedSuffix}` });
+            }
+            return res.status(400).json({ error: `Insufficient matured Weekly (API) balance. Available from completed weeks: $${cleanMoneyStr(availWeekly, 2)}.${lockedSuffix}` });
           }
         }
       }
@@ -16885,15 +17377,25 @@ app.post('/api/cr-api-connections', (req, res) => {
     });
   }
 
+  const rawTzOff = req.body.tz_offset_minutes !== undefined ? Number(req.body.tz_offset_minutes) : 0;
+  const tzOffsetMin = Number.isFinite(rawTzOff) ? Math.max(-720, Math.min(840, Math.round(rawTzOff))) : 0;
+
   const item = {
     id: nextId(data, 'cr_api_connections'),
     panel_name: cleanName,
     panel_url: cleanUrl,
     token: cleanToken,
     interval: req.body.interval ? Math.max(5, parseInt(req.body.interval)) : 10,
+    tz_offset_minutes: tzOffsetMin,
     active: req.body.active !== undefined ? Boolean(req.body.active) : true,
     last_pulled_at: null,
     last_status: 'Connecting...',
+    last_fetched_rows: 0,
+    last_pulled_new: 0,
+    last_dup_skipped: 0,
+    last_invalid_skipped: 0,
+    last_fetch_limit: 2000,
+    last_saturated: false,
     total_pulled: 0,
     created: new Date().toISOString()
   };
@@ -16901,7 +17403,7 @@ app.post('/api/cr-api-connections', (req, res) => {
   writeDb('cr_api_connections', data);
   logAudit('Admin', 'Add CR API Connection', `Connected '${item.panel_name}' (Provider registered)`, 'CR API');
   if (item.active) {
-    pollSingleCrApiConnection(item.id, true).catch(e => console.error('CR API poll error:', e));
+    pollSingleCrApiConnection(item.id, true, { backfill: true }).catch(e => console.error('CR API poll error:', e));
   }
   res.json(sanitizeCrApiConn(item));
 });
@@ -16911,11 +17413,21 @@ app.post('/api/cr-api-connections/:id/pull', async (req, res) => {
   const conns = readDb('cr_api_connections') || [];
   const conn = conns.find(c => Number(c.id) === id);
   if (!conn) return res.status(404).json({ error: 'Connection not found' });
+  const backfill = Boolean((req.body && req.body.backfill) || req.query.backfill === '1' || req.query.backfill === 'true');
   try {
     crApiBackoff.delete(id);
-    const pulled = await pollSingleCrApiConnection(id, true);
+    const pulled = await pollSingleCrApiConnection(id, true, { backfill });
     const updated = (readDb('cr_api_connections') || []).find(c => Number(c.id) === id);
-    res.json({ success: !String(updated?.last_status || '').startsWith('Error'), pulled: pulled || 0, status: updated?.last_status || 'OK' });
+    res.json({
+      success: !String(updated?.last_status || '').startsWith('Error'),
+      pulled: pulled || 0,
+      fetched: Number(updated?.last_fetched_rows || 0),
+      dup_skipped: Number(updated?.last_dup_skipped || 0),
+      invalid_skipped: Number(updated?.last_invalid_skipped || 0),
+      saturated: Boolean(updated?.last_saturated),
+      backfill,
+      status: updated?.last_status || 'OK'
+    });
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -16937,6 +17449,10 @@ app.patch('/api/cr-api-connections/:id', (req, res) => {
   }
   if (req.body.token !== undefined && String(req.body.token).trim()) updates.token = String(req.body.token).trim();
   if (req.body.interval !== undefined) updates.interval = Math.max(5, parseInt(req.body.interval) || 10);
+  if (req.body.tz_offset_minutes !== undefined) {
+    const rawTz = Number(req.body.tz_offset_minutes);
+    if (Number.isFinite(rawTz)) updates.tz_offset_minutes = Math.max(-720, Math.min(840, Math.round(rawTz)));
+  }
   if (req.body.active !== undefined) {
     updates.active = Boolean(req.body.active);
     if (updates.active) crApiBackoff.delete(id);
@@ -17998,11 +18514,11 @@ function buildSmsEnricher() {
 
     const smsType = 'General';
 
-    // Hierarchy: Client -> Agent (preserve historical deleted client names with unique ID!)
+    // Hierarchy: Client -> Agent (clean username only — never expose numeric client IDs in UI!)
     const rawClUname = String(item.client_username || item.client || item.client_name || '').trim();
     const isLegacyTombstone = rawClUname.startsWith('__deleted_client_');
     let clientName = isLegacyTombstone
-      ? `Deleted Client #${rawClUname.split('_')[3] || item.client_id || ''}`.trim()
+      ? 'Deleted Client'
       : (cleanSmsHierarchyName(item.client_username)
         || cleanSmsHierarchyName(item.client)
         || cleanSmsHierarchyName(item.client_name));
@@ -18048,11 +18564,7 @@ function buildSmsEnricher() {
     item.type = smsType;
     item.client = clientName || '';
     item.client_is_deleted = clientIsDeleted;
-    item.client_display = clientName
-      ? (clientIsDeleted
-        ? `${clientName} (Deleted${item.client_id != null ? ` #${item.client_id}` : ''})`
-        : clientName)
-      : '';
+    item.client_display = clientName || '';
     item.agent = agentName || '';
     item.number = numRaw;
     item.cli = String(item.cli || item.app || item.sender || '').trim();
@@ -18181,13 +18693,22 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
     const searchQ = String(search).trim().toLowerCase();
     if (searchQ) {
       const tokens = searchQ.split(/\s+/).filter(Boolean);
+      const isPurePhoneSearch = /^[+\-\(\)\s\d]+$/.test(searchQ);
+      const fullPhoneDigits = isPurePhoneSearch ? searchQ.replace(/\D/g, '') : '';
       const wnTags = getWhitenoiseProviderTags();
       const fmtSearchNum = (v) => (v != null && v !== '' && !Number.isNaN(Number(v)))
         ? `${v} ${cleanMoneyStr(Number(v), 4)}`
         : '';
       list = list.filter(s => {
-        const dtNorm = String(s.timestamp || s.date || s.created || '').replace('T', ' ').slice(0, 19);
-        const rawCli = String(s.cli || s.app || s.from || s.sender || '');
+        const numRawStr = String(s.number || '');
+        const numDigits = numRawStr.replace(/\D/g, '');
+        if (isPurePhoneSearch && fullPhoneDigits.length >= 3) {
+          if (numDigits.includes(fullPhoneDigits) || phoneDigitsVariantsMatch(numRawStr, fullPhoneDigits)) {
+            return true;
+          }
+        }
+        const dtNorm = String(s.timestamp || s.date || s.date_ymd || s.created || '').replace('T', ' ').slice(0, 19);
+        const rawCli = String(s.cli || s.service || s.app || s.from || s.sender || '');
         const visibleCli = isOwner ? rawCli : serverMaskCli(rawCli);
         const visibleProvider = maskProviderLabel(s.provider || '', isOwner, wnTags);
         const statusLower = String(s.status || '').toLowerCase();
@@ -18199,13 +18720,17 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
           dtNorm,
           s.timestamp || '',
           s.date || '',
+          s.date_ymd || '',
           visibleProvider,
           s.range_name || '',
           s.range_label || '',
           s.range || '',
           s.country || '',
-          s.number || '',
+          numRawStr,
+          numDigits,
+          rawCli,
           visibleCli,
+          s.service || '',
           s.message || '',
           causeDisplay,
           s.status || '',
@@ -18232,6 +18757,8 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
             s.client || '',
             s.client_username || '',
             s.client_name || '',
+            s.client_display || '',
+            s.user || '',
             fmtSearchNum(s.agent_payout),
             fmtSearchNum(s.agent_rate),
             fmtSearchNum(s.client_payout),
@@ -18249,7 +18776,8 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
         return tokens.every(t => {
           if (haystack.includes(t)) return true;
           const tDig = t.replace(/\D/g, '');
-          if (tDig.length >= 6 && phoneDigitsVariantsMatch(s.number, tDig)) return true;
+          if (tDig.length >= 3 && (numDigits.includes(tDig) || phoneDigitsVariantsMatch(numRawStr, tDig))) return true;
+          if (tDig.length >= 2 && /^[+\-\(\)\d]+$/.test(t) && numDigits.includes(tDig)) return true;
           return false;
         });
       });
@@ -18308,14 +18836,8 @@ function handleSmsLogsQuery(req, res, { whitenoiseOnly = false } = {}) {
               keyParts.client = '';
             } else {
               const cid = s.client_id != null && s.client_id !== '' ? Number(s.client_id) : null;
-              const baseName = s.client || s.client_username || '';
-              if (s.client_is_deleted && baseName) {
-                keyParts.client = `${baseName} (Deleted${cid != null ? ` #${cid}` : ''})`;
-              } else if (baseName && cid != null) {
-                keyParts.client = `${baseName} (#${cid})`;
-              } else {
-                keyParts.client = baseName;
-              }
+              const baseName = String(s.client || s.client_username || '').replace(/\s*\((?:Deleted\s*)?#\d+\)/gi, '').trim();
+              keyParts.client = baseName;
               keyParts._client_unique_key = cid != null ? `id:${cid}` : `name:${baseName.toLowerCase()}`;
               keyParts.client_id = cid;
               keyParts.client_is_deleted = Boolean(s.client_is_deleted);
@@ -18806,7 +19328,7 @@ function getCdr2UploadStatus(nowDate = new Date()) {
   };
 }
 
-// GET /api/cdr2/status — Daily 12:00 PM PKT report upload status + user's first-time terms state (privacy-safe)
+// GET /api/cdr2/status — Daily 12:00 PM PKT report upload status + live 30-day rolling monthly cycle & completed Whitenoise cycles
 app.get('/api/cdr2/status', requireAuth, (req, res) => {
   if (!hasWhitenoiseAccess(req.sessionUser)) {
     return res.status(403).json({ error: 'Forbidden. CDR 2 access is not enabled for your account.' });
@@ -18815,9 +19337,16 @@ app.get('/api/cdr2/status', requireAuth, (req, res) => {
   const dbUser = (found && found.user) || {};
   const isOwner = normRole(req.sessionUser.role) === 'owner';
   const uploadStatus = getCdr2UploadStatus();
+  const monthlyCycle = getMonthlyCycleConfig();
+  const wnVirtual = getScopedWhitenoiseStatsAsVirtualSms(req.sessionUser);
+  const fx = getUsdToPkrRate();
+  const wnHold = computeUserHoldSummary(wnVirtual, req.sessionUser.role, fx);
   res.json({
     success: true,
     ...uploadStatus,
+    monthly_cycle: monthlyCycle,
+    monthly_cycles: wnHold.monthly_cycles || [],
+    completed_cycles: wnHold.completed_cycles || [],
     terms_version: CDR2_TERMS_VERSION,
     terms_accepted: isOwner ? true : Boolean(dbUser.cdr2_terms_accepted_at),
     terms_accepted_at: dbUser.cdr2_terms_accepted_at || null
@@ -20025,32 +20554,52 @@ app.post('/api/settings', (req, res) => {
   if (req.body.monthly_cycle !== undefined) {
     const mcRaw = req.body.monthly_cycle;
     if (!mcRaw || typeof mcRaw !== 'object') {
-      return res.status(400).json({ error: 'monthly_cycle must be an object with start_date, end_date, clear_date.' });
+      return res.status(400).json({ error: 'monthly_cycle must be an object with start_date and hold_days (or end_date/clear_date).' });
     }
-    const sd = normalizeYmd(mcRaw.start_date);
-    const ed = normalizeYmd(mcRaw.end_date);
-    const cd = normalizeYmd(mcRaw.clear_date);
-    if (!sd || !ed || !cd) {
-      return res.status(400).json({ error: 'monthly_cycle dates must use YYYY-MM-DD format.' });
+    const sd = normalizeYmd(mcRaw.anchor_start_date || mcRaw.start_date);
+    if (!sd) {
+      return res.status(400).json({ error: 'monthly_cycle start_date must use YYYY-MM-DD format.' });
     }
+    const cycleDays = (mcRaw.cycle_days !== undefined && mcRaw.cycle_days !== '' && Number.isFinite(Number(mcRaw.cycle_days)))
+      ? Math.max(1, Math.min(365, Math.round(Number(mcRaw.cycle_days))))
+      : 30;
+    const autoAdvance = mcRaw.auto_advance === false ? false : true;
+    const edInput = normalizeYmd(mcRaw.end_date);
+    const cdInput = normalizeYmd(mcRaw.clear_date);
+    let holdDays;
+    if (mcRaw.hold_days !== undefined && mcRaw.hold_days !== null && mcRaw.hold_days !== '' && Number.isFinite(Number(mcRaw.hold_days))) {
+      holdDays = Math.max(0, Math.min(90, Math.round(Number(mcRaw.hold_days))));
+    } else if (edInput && cdInput && cdInput >= edInput) {
+      holdDays = Math.max(0, Math.min(90, diffDaysYmd(edInput, cdInput)));
+    } else {
+      holdDays = 5;
+    }
+    const ed = autoAdvance ? addDaysYmd(sd, cycleDays - 1) : (edInput || addDaysYmd(sd, cycleDays - 1));
     if (ed < sd) {
       return res.status(400).json({ error: 'Monthly cycle end_date cannot be before start_date.' });
     }
+    const cd = autoAdvance ? addDaysYmd(ed, holdDays) : (cdInput || addDaysYmd(ed, holdDays));
     if (cd < ed) {
       return res.status(400).json({ error: 'Monthly cycle clear_date cannot be before end_date.' });
     }
     req.body.monthly_cycle = {
+      anchor_start_date: sd,
       start_date: sd,
       end_date: ed,
       clear_date: cd,
+      cycle_days: cycleDays,
+      hold_days: holdDays,
+      auto_advance: autoAdvance,
       label: String(mcRaw.label || '').trim() || `${sd} to ${ed}`
     };
   }
   const updated = { ...settings, ...req.body };
   delete updated.theme_catalog;
   writeDb('settings', updated);
+  const liveMc = getMonthlyCycleConfig();
   const responseSettings = {
     ...updated,
+    monthly_cycle: liveMc,
     theme_catalog: getThemeCatalog(updated),
     default_theme_key: (updated.default_theme_key && getThemeCatalog(updated).some(t => t.key === updated.default_theme_key))
       ? updated.default_theme_key
@@ -20063,7 +20612,17 @@ app.post('/api/settings', (req, res) => {
 });
 
 app.get('/api/monthly-cycle', requireAuth, (req, res) => {
-  res.json({ success: true, monthly_cycle: getMonthlyCycleConfig() });
+  const monthlyCycle = getMonthlyCycleConfig();
+  let monthly_cycles = [];
+  let completed_cycles = [];
+  try {
+    const wnVirtual = getScopedWhitenoiseStatsAsVirtualSms(req.sessionUser);
+    const fx = getUsdToPkrRate();
+    const hold = computeUserHoldSummary(wnVirtual, req.sessionUser.role, fx);
+    monthly_cycles = hold.monthly_cycles || [];
+    completed_cycles = hold.completed_cycles || [];
+  } catch (_) {}
+  res.json({ success: true, monthly_cycle: monthlyCycle, monthly_cycles, completed_cycles });
 });
 
 app.post('/api/monthly-cycle', requireAuth, (req, res) => {
@@ -20073,25 +20632,44 @@ app.post('/api/monthly-cycle', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden. Owner only.' });
   }
   const body = req.body || {};
-  const sd = normalizeYmd(body.start_date);
-  const ed = normalizeYmd(body.end_date);
-  const cd = normalizeYmd(body.clear_date);
-  if (!sd || !ed || !cd) {
-    return res.status(400).json({ error: 'start_date, end_date, and clear_date are required (YYYY-MM-DD).' });
+  const sd = normalizeYmd(body.anchor_start_date || body.start_date);
+  if (!sd) {
+    return res.status(400).json({ error: 'start_date is required (YYYY-MM-DD).' });
   }
+  const cycleDays = (body.cycle_days !== undefined && body.cycle_days !== '' && Number.isFinite(Number(body.cycle_days)))
+    ? Math.max(1, Math.min(365, Math.round(Number(body.cycle_days))))
+    : 30;
+  const autoAdvance = body.auto_advance === false ? false : true;
+  const edInput = normalizeYmd(body.end_date);
+  const cdInput = normalizeYmd(body.clear_date);
+  let holdDays;
+  if (body.hold_days !== undefined && body.hold_days !== null && body.hold_days !== '' && Number.isFinite(Number(body.hold_days))) {
+    holdDays = Math.max(0, Math.min(90, Math.round(Number(body.hold_days))));
+  } else if (edInput && cdInput && cdInput >= edInput) {
+    holdDays = Math.max(0, Math.min(90, diffDaysYmd(edInput, cdInput)));
+  } else {
+    holdDays = 5;
+  }
+  const ed = autoAdvance ? addDaysYmd(sd, cycleDays - 1) : (edInput || addDaysYmd(sd, cycleDays - 1));
   if (ed < sd) return res.status(400).json({ error: 'end_date cannot be before start_date.' });
+  const cd = autoAdvance ? addDaysYmd(ed, holdDays) : (cdInput || addDaysYmd(ed, holdDays));
   if (cd < ed) return res.status(400).json({ error: 'clear_date cannot be before end_date.' });
 
   const settings = readDb('settings') || {};
   settings.monthly_cycle = {
+    anchor_start_date: sd,
     start_date: sd,
     end_date: ed,
     clear_date: cd,
+    cycle_days: cycleDays,
+    hold_days: holdDays,
+    auto_advance: autoAdvance,
     label: String(body.label || '').trim() || `${sd} to ${ed}`
   };
   writeDb('settings', settings);
-  broadcastWs({ type: 'settings_updated', settings });
-  res.json({ success: true, monthly_cycle: getMonthlyCycleConfig() });
+  const liveMc = getMonthlyCycleConfig();
+  broadcastWs({ type: 'settings_updated', settings: { ...settings, monthly_cycle: liveMc } });
+  res.json({ success: true, monthly_cycle: liveMc });
 });
 
 // Dedicated Payterms Endpoints (R2)

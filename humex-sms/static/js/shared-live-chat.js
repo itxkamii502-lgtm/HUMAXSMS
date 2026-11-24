@@ -2849,11 +2849,15 @@
       renderWorkspace();
       await fetchBootstrap(false);
       connectWs();
+      const isDesktopVp = window.innerWidth > 768;
       if (state.activeConvId && state.conversations.some(c => Number(c.id) === Number(state.activeConvId))) {
         state.mobileShowThread = true;
         syncChatUrlId(state.activeConvId);
         renderWorkspace();
         await loadMessages(state.activeConvId, { silent: true });
+      } else if (isDesktopVp && state.conversations.length > 0) {
+        // Desktop split-pane: automatically open the most recent thread on the right pane
+        await selectConversation(state.conversations[0].id);
       } else if (urlChatId) {
         syncChatUrlId(null);
       }

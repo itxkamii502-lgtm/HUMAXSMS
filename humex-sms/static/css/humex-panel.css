@@ -16182,8 +16182,11 @@ body.zy-is-live-chat .zy-chat-input {
   body.zy-is-live-chat .zy-chat-feed {
     padding: 12px 16px !important;
   }
-  body.zy-is-live-chat .zy-chat-bubble {
+  body.zy-is-live-chat .zy-chat-bubble-col {
     max-width: min(74%, 700px) !important;
+  }
+  body.zy-is-live-chat .zy-chat-bubble-col > .zy-chat-bubble {
+    max-width: 100% !important;
   }
   body.zy-is-live-chat .zy-chat-composer-wrap {
     padding: 10px 16px 12px !important;
@@ -16195,8 +16198,11 @@ body.zy-is-live-chat .zy-chat-input {
   body.zy-is-live-chat .zy-chat-feed {
     padding: 10px 8px !important;
   }
-  body.zy-is-live-chat .zy-chat-bubble {
+  body.zy-is-live-chat .zy-chat-bubble-col {
     max-width: 88% !important;
+  }
+  body.zy-is-live-chat .zy-chat-bubble-col > .zy-chat-bubble {
+    max-width: 100% !important;
     padding: 9px 12px 7px !important;
   }
   body.zy-is-live-chat .zy-chat-text {
@@ -16207,5 +16213,616 @@ body.zy-is-live-chat .zy-chat-input {
     padding: 8px 10px !important;
   }
 }
+
+/* ==========================================================================
+   LIVE CHAT — ANNOUNCEMENT CHANNELS, UNREAD TAB, DP UPLOAD,
+   WHATSAPP EMOJI REACTIONS & ADMIN-ONLY SEEN/UNSEEN INSPECTOR
+   ========================================================================== */
+.zy-chat-head-create-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.zy-chat-new-grp-btn.is-ch {
+  background: linear-gradient(135deg, #d97706, #b45309) !important;
+  color: #ffffff !important;
+  border-color: transparent !important;
+}
+.zy-chat-new-grp-btn.is-ch:hover {
+  filter: brightness(1.06);
+}
+
+/* Agent Inbox Tabs with Unread Pill & Horizontal Fit */
+.zy-chat-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  gap: 5px;
+}
+.zy-chat-tabs::-webkit-scrollbar {
+  display: none;
+}
+.zy-chat-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.zy-chat-tab-cnt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+.zy-chat-tab.is-active .zy-chat-tab-cnt {
+  background: #ffffff;
+  color: #0f766e;
+}
+
+/* Announcement Channel Badges & Avatar */
+.zy-chat-ch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(217, 119, 6, 0.24));
+  border: 1px solid rgba(217, 119, 6, 0.38);
+  color: #b45309;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.015em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.zy-chat-ch-badge.is-mini {
+  padding: 1px 6px;
+  font-size: 9.5px;
+  margin-left: 4px;
+}
+.zy-chat-ava.is-channel {
+  background: var(--ava-bg, #b45309);
+  color: #ffffff;
+}
+.zy-chat-locked-bar.is-channel-lock {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08));
+  border-top: 1px solid rgba(217, 119, 6, 0.28);
+  color: #92400e;
+}
+.zy-chat-locked-bar.is-channel-lock i {
+  color: #d97706;
+}
+
+/* Bubble Column Wrapper + WhatsApp Reactions */
+.zy-chat-bubble-col {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.zy-chat-bubble-col.is-out {
+  align-items: flex-end;
+}
+.zy-chat-msg-row.has-reactions {
+  margin-bottom: 12px !important;
+}
+.zy-chat-msg-row.has-react-open {
+  z-index: 30;
+}
+.zy-chat-msg-actions.is-force-show {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+.zy-chat-act-btn.is-active {
+  background: rgba(16, 185, 129, 0.18) !important;
+  color: #059669 !important;
+}
+
+/* Floating WhatsApp Quick Reaction Bar */
+.zy-chat-react-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  animation: zyReactPop 0.14s ease-out;
+}
+.zy-chat-react-picker.is-left {
+  left: 0;
+}
+.zy-chat-react-picker.is-right {
+  right: 0;
+}
+@keyframes zyReactPop {
+  from { opacity: 0; transform: translateY(4px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.zy-chat-react-opt {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 50%;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+.zy-chat-react-opt:hover {
+  transform: scale(1.24);
+  background: #f1f5f9;
+}
+.zy-chat-react-opt.is-mine {
+  background: rgba(16, 185, 129, 0.18);
+  box-shadow: inset 0 0 0 1.5px #10b981;
+}
+
+/* Reaction Chips Attached Below Bubble */
+.zy-chat-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: -6px;
+  padding: 0 6px;
+  position: relative;
+  z-index: 2;
+}
+.zy-chat-reactions.is-out {
+  justify-content: flex-end;
+}
+.zy-chat-react-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.zy-chat-react-chip:hover {
+  transform: translateY(-1px);
+  border-color: #10b981;
+}
+.zy-chat-react-chip.is-mine {
+  background: #ecfdf5;
+  border-color: #10b981;
+  color: #065f46;
+}
+.zy-chat-react-em {
+  font-size: 13.5px;
+  line-height: 1;
+}
+.zy-chat-react-cnt {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+/* Admin-Only Seen Pill Inside Message Meta */
+.zy-chat-seen-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 165, 233, 0.32);
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+  font-size: 10.5px;
+  font-weight: 800;
+  cursor: pointer;
+  line-height: 1.3;
+  transition: background 0.14s ease, transform 0.12s ease;
+}
+.zy-chat-seen-pill:hover {
+  background: rgba(14, 165, 233, 0.22);
+  transform: translateY(-0.5px);
+}
+
+/* Group / Channel Photo Uploader & Create Modal Mode Switch */
+.zy-cg-mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.zy-cg-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1.5px solid #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.zy-cg-mode-btn.is-active {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+.zy-cg-mode-btn.is-active.is-ch {
+  background: #b45309;
+  border-color: #b45309;
+  color: #ffffff;
+}
+.zy-cg-clients-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.zy-cg-selall-btn {
+  border: 1px solid #cbd5e1;
+  background: #f1f5f9;
+  color: #0f172a;
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-cg-selall-btn:hover {
+  background: #e2e8f0;
+}
+
+.zy-gd-ava-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.zy-chat-ava.is-gd-preview {
+  width: 56px;
+  height: 56px;
+  font-size: 21px;
+  flex-shrink: 0;
+}
+.zy-gd-ava-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+.zy-gd-btn-ava {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-gd-btn-ava:hover {
+  background: #e2e8f0;
+}
+.zy-gd-btn-ava-rm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(220, 38, 38, 0.32);
+  background: rgba(239, 68, 68, 0.08);
+  color: #dc2626;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-gd-ch-notice {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.zy-gd-ch-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #b45309;
+  margin-bottom: 4px;
+}
+.zy-gd-btn-add-all {
+  margin-top: 8px;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px dashed #0f766e;
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-gd-btn-add-all:hover {
+  background: rgba(15, 118, 110, 0.16);
+}
+
+/* Admin-Only Message Seen Info Modal */
+.zy-chat-seen-modal {
+  max-width: 470px;
+  width: calc(100% - 24px);
+}
+.zy-seen-loading,
+.zy-seen-error {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #64748b;
+}
+.zy-seen-error {
+  color: #dc2626;
+}
+.zy-seen-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.zy-seen-stat {
+  border-radius: 10px;
+  padding: 10px 8px;
+  text-align: center;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.zy-seen-stat.is-seen {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+.zy-seen-stat.is-unseen {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+.zy-seen-stat-val {
+  font-size: 20px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.1;
+}
+.zy-seen-stat.is-seen .zy-seen-stat-val {
+  color: #047857;
+}
+.zy-seen-stat.is-unseen .zy-seen-stat-val {
+  color: #b45309;
+}
+.zy-seen-stat-lbl {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  margin-top: 3px;
+}
+.zy-seen-sec {
+  margin-top: 12px;
+}
+.zy-seen-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #475569;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.zy-seen-sec-head.is-seen {
+  color: #047857;
+}
+.zy-seen-sec-head.is-unseen {
+  color: #b45309;
+}
+.zy-seen-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.zy-seen-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+.zy-seen-info {
+  flex: 1;
+  min-width: 0;
+}
+.zy-seen-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zy-seen-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #2563eb;
+  margin-left: 4px;
+}
+.zy-seen-sub {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 1px;
+}
+.zy-seen-tick.is-ok {
+  color: #0ea5e9;
+  font-size: 13px;
+}
+.zy-seen-tick.is-wait {
+  color: #d97706;
+  font-size: 13px;
+}
+.zy-seen-react-em {
+  font-size: 19px;
+  line-height: 1;
+}
+
+/* Dark Theme Support */
+[data-theme="dark"] .zy-chat-ch-badge,
+body.dark .zy-chat-ch-badge {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(251, 191, 36, 0.42);
+  color: #fcd34d;
+}
+[data-theme="dark"] .zy-chat-locked-bar.is-channel-lock,
+body.dark .zy-chat-locked-bar.is-channel-lock {
+  background: rgba(217, 119, 6, 0.14);
+  border-top-color: rgba(245, 158, 11, 0.3);
+  color: #fde68a;
+}
+[data-theme="dark"] .zy-chat-react-picker,
+body.dark .zy-chat-react-picker {
+  background: #1e293b;
+  border-color: #334155;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+[data-theme="dark"] .zy-chat-react-opt:hover,
+body.dark .zy-chat-react-opt:hover {
+  background: #334155;
+}
+[data-theme="dark"] .zy-chat-react-chip,
+body.dark .zy-chat-react-chip {
+  background: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+[data-theme="dark"] .zy-chat-react-chip.is-mine,
+body.dark .zy-chat-react-chip.is-mine {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: #10b981;
+  color: #6ee7b7;
+}
+[data-theme="dark"] .zy-chat-seen-pill,
+body.dark .zy-chat-seen-pill {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.36);
+  color: #7dd3fc;
+}
+[data-theme="dark"] .zy-cg-mode-btn,
+body.dark .zy-cg-mode-btn,
+[data-theme="dark"] .zy-cg-selall-btn,
+body.dark .zy-cg-selall-btn,
+[data-theme="dark"] .zy-gd-btn-ava,
+body.dark .zy-gd-btn-ava {
+  background: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+[data-theme="dark"] .zy-gd-ch-notice,
+body.dark .zy-gd-ch-notice {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+[data-theme="dark"] .zy-gd-ch-notice-head,
+body.dark .zy-gd-ch-notice-head {
+  color: #fcd34d;
+}
+[data-theme="dark"] .zy-gd-btn-add-all,
+body.dark .zy-gd-btn-add-all {
+  background: rgba(20, 184, 166, 0.12);
+  border-color: #2dd4bf;
+  color: #5eead4;
+}
+[data-theme="dark"] .zy-seen-stat,
+body.dark .zy-seen-stat,
+[data-theme="dark"] .zy-seen-row,
+body.dark .zy-seen-row {
+  background: #1e293b;
+  border-color: #334155;
+}
+[data-theme="dark"] .zy-seen-stat-val,
+body.dark .zy-seen-stat-val,
+[data-theme="dark"] .zy-seen-name,
+body.dark .zy-seen-name {
+  color: #f8fafc;
+}
+[data-theme="dark"] .zy-seen-stat.is-seen .zy-seen-stat-val,
+body.dark .zy-seen-stat.is-seen .zy-seen-stat-val,
+[data-theme="dark"] .zy-seen-sec-head.is-seen,
+body.dark .zy-seen-sec-head.is-seen {
+  color: #34d399;
+}
+[data-theme="dark"] .zy-seen-stat.is-unseen .zy-seen-stat-val,
+body.dark .zy-seen-stat.is-unseen .zy-seen-stat-val,
+[data-theme="dark"] .zy-seen-sec-head.is-unseen,
+body.dark .zy-seen-sec-head.is-unseen {
+  color: #fbbf24;
+}
+[data-theme="dark"] .zy-seen-id,
+body.dark .zy-seen-id {
+  color: #93c5fd;
+}
+[data-theme="dark"] .zy-seen-sec-head,
+body.dark .zy-seen-sec-head {
+  border-bottom-color: #334155;
+}
+
+@media (max-width: 768px) {
+  .zy-chat-react-picker {
+    padding: 4px 6px;
+    gap: 1px;
+  }
+  .zy-chat-react-opt {
+    width: 30px;
+    height: 30px;
+    font-size: 18px;
+  }
+  .zy-chat-head-create-btns .zy-chat-new-grp-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+}
+
 
 

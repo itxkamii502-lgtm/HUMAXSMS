@@ -29,6 +29,8 @@
     }
   ];
 
+  const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '✅'];
+
   const SENDER_COLORS = ['#0f766e', '#1d4ed8', '#b45309', '#7c3aed', '#be123c', '#047857', '#0369a1', '#9333ea'];
 
   const state = {
@@ -40,12 +42,18 @@
     typingByConv: new Map(),   // convId -> Map(actorKey -> { name, timer })
     activeConvId: null,
     search: '',
-    filterTab: 'all',          // 'all' | 'owner' | 'clients' | 'groups' (Agent only)
+    filterTab: 'all',          // 'all' | 'unread' | 'owner' | 'clients' | 'groups' | 'channels' (Agent only)
     replyTo: null,             // { id, sender_name, body }
     emojiOpen: false,
     emojiTab: 0,
     drawerOpen: false,
     createModalOpen: false,
+    createModalMode: 'group',  // 'group' | 'channel'
+    createModalAvatar: '',     // base64 data URI preview during creation
+    createModalSearch: '',
+    reactionPickerMsgId: null,
+    seenModal: null,           // { loading, convId, msgId, data, error }
+    uploadingGroupAvatar: false,
     confirmDeleteGroup: false,
     mobileShowThread: false,
     mounted: false,
@@ -71,6 +79,16 @@
     moreMenuOpen: false,
     viewportCleanup: null
   };
+
+  function isGroupConv(c) {
+    return Boolean(c && c.type === 'agent_group');
+  }
+  function isChannelConv(c) {
+    return Boolean(c && c.type === 'agent_channel');
+  }
+  function isGroupOrChannel(c) {
+    return Boolean(c && (c.type === 'agent_group' || c.type === 'agent_channel'));
+  }
 
   const DEFAULT_CLOSE_MSG = '🌙 Good Night everyone! Group chat is now closed for the night. Rest well and recharge — chat will automatically reopen in the morning. Take care! ✨';
   const DEFAULT_OPEN_MSG = '☀️ Assalam-o-Alaikum everyone! Good morning & welcome back. The group is now open — wishing you a smooth, productive, and successful day ahead! 🚀';
@@ -159,9 +177,18 @@
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
 
-  function renderAvatarInner(avatarUrl, label, isGroup, isOnline) {
-    if (isGroup) {
-      return `<i class="fas fa-users"></i>`;
+  function renderAvatarInner(avatarUrl, label, isGroup, isOnline, isChannelFlag) {
+    if (isGroup || isChannelFlag) {
+      const iconHtml = isChannelFlag
+        ? `<i class="fas fa-bullhorn"></i>`
+        : `<i class="fas fa-users"></i>`;
+      if (avatarUrl) {
+        return `
+          <span class="zy-chat-ava-fallback">${iconHtml}</span>
+          <img class="zy-chat-ava-img" src="${esc(avatarUrl)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">
+        `;
+      }
+      return iconHtml;
     }
     const imgHtml = avatarUrl
       ? `<img class="zy-chat-ava-img" src="${esc(avatarUrl)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`
@@ -282,11 +309,14 @@
       document.body.appendChild(stack);
     }
     const msg = ev.message || {};
+    const isChannel = ev.conversation_type === 'agent_channel';
     const isGroup = ev.conversation_type === 'agent_group';
     const roleTag = msg.sender_role === 'owner' ? 'Owner' : 'Agent Admin';
-    const heading = isGroup
-      ? `${esc(ev.conversation_title || 'Group')} · ${esc(msg.sender_name || roleTag)}`
-      : `${esc(msg.sender_name || roleTag)} · ${roleTag}`;
+    const heading = isChannel
+      ? `Announcement · ${esc(ev.conversation_title || 'Channel')}`
+      : (isGroup
+          ? `${esc(ev.conversation_title || 'Group')} · ${esc(msg.sender_name || roleTag)}`
+          : `${esc(msg.sender_name || roleTag)} · ${roleTag}`);
     const snippetText = msg.image
       ? (msg.body ? `📷 ${String(msg.body).slice(0, 100)}` : '📷 Photo')
       : String(msg.body || '').slice(0, 110);
@@ -297,7 +327,7 @@
     el.setAttribute('role', 'button');
     el.setAttribute('tabindex', '0');
     el.innerHTML = `
-      <div class="zy-chat-alert-ico"><i class="fas fa-comments"></i></div>
+      <div class="zy-chat-alert-ico"><i class="fas ${isChannel ? 'fa-bullhorn' : 'fa-comments'}"></i></div>
       <div class="zy-chat-alert-body">
         <div class="zy-chat-alert-title">${heading}</div>
         <div class="zy-chat-alert-text">${snippet}</div>
@@ -518,17 +548,47 @@
     }
 
     if (ev.type === 'chat:read') {
-      const conv = state.conversations.find(c => Number(c.id) === Number(ev.conversation_id));
+      const convId = Number(ev.conversation_id);
+      const conv = state.conversations.find(c => Number(c.id) === convId);
       if (conv) {
         if (!conv.read_cursors) conv.read_cursors = {};
         conv.read_cursors[ev.actor_key] = Math.max(Number(conv.read_cursors[ev.actor_key] || 0), Number(ev.last_read_id || 0));
         if (state.me && ev.actor_key === state.me.key) {
           conv.unread_count = 0;
           recomputeUnread();
+          if (state.mounted) renderInboxList();
         }
-        if (state.mounted && Number(state.activeConvId) === Number(ev.conversation_id)) {
+        if (state.mounted && Number(state.activeConvId) === convId) {
+          const feed = document.getElementById('zy-chat-feed');
+          const prevScroll = feed ? feed.scrollTop : null;
           renderMessagesPane(false);
+          if (feed && prevScroll != null) feed.scrollTop = prevScroll;
         }
+        if (state.seenModal && Number(state.seenModal.convId) === convId && !state.seenModal.loading) {
+          refreshSeenModalData(convId, state.seenModal.msgId);
+        }
+      }
+      return;
+    }
+
+    if (ev.type === 'chat:reaction') {
+      const convId = Number(ev.conversation_id);
+      const msgId = Number(ev.message_id);
+      const arr = state.messagesByConv.get(convId);
+      if (arr) {
+        const target = arr.find(m => Number(m.id) === msgId);
+        if (target) {
+          target.reactions_summary = Array.isArray(ev.reactions_summary) ? ev.reactions_summary : [];
+        }
+      }
+      if (state.mounted && Number(state.activeConvId) === convId) {
+        const feed = document.getElementById('zy-chat-feed');
+        const prevScroll = feed ? feed.scrollTop : null;
+        renderMessagesPane(false);
+        if (feed && prevScroll != null) feed.scrollTop = prevScroll;
+      }
+      if (state.seenModal && Number(state.seenModal.convId) === convId && Number(state.seenModal.msgId) === msgId) {
+        refreshSeenModalData(convId, msgId);
       }
       return;
     }
@@ -613,19 +673,22 @@
     if (ev.type === 'chat:message_deleted') {
       const convId = Number(ev.conversation_id);
       const msgId = Number(ev.message_id);
+      const silentOrHidden = Boolean(ev.hidden_for_self || ev.silent_removed);
       const arr = state.messagesByConv.get(convId);
       if (arr) {
         const idx = arr.findIndex(m => Number(m.id) === msgId);
         if (idx !== -1) {
-          if (ev.hidden_for_self) {
+          if (silentOrHidden) {
             arr.splice(idx, 1);
             state.selectedMsgIds.delete(msgId);
+            if (Number(state.reactionPickerMsgId) === msgId) state.reactionPickerMsgId = null;
           } else {
             const target = arr[idx];
             target.deleted = true;
             target.body = 'This message was deleted';
             target.image = null;
             target.reply_to = null;
+            target.reactions_summary = [];
             if (ev.can_preview_deleted) {
               target.can_preview_deleted = true;
               target.deleted_preview_body = typeof ev.deleted_preview_body === 'string' ? ev.deleted_preview_body : '';
@@ -642,8 +705,11 @@
           conv.pinned_message_id = null;
           conv.pinned_message = null;
         }
-        if (Number(conv.last_message_id) === msgId) {
-          if (ev.hidden_for_self && arr) {
+        if (silentOrHidden && ev.last_message_preview !== undefined) {
+          conv.last_message_id = Number(ev.last_message_id || 0);
+          conv.last_message_preview = String(ev.last_message_preview || '');
+        } else if (Number(conv.last_message_id) === msgId) {
+          if (silentOrHidden && arr) {
             const latest = arr.length ? arr[arr.length - 1] : null;
             conv.last_message_id = latest ? Number(latest.id) : 0;
             conv.last_message_preview = latest
@@ -729,6 +795,8 @@
     state.selectMode = false;
     state.selectedMsgIds.clear();
     state.emojiOpen = false;
+    state.reactionPickerMsgId = null;
+    state.seenModal = null;
     state.replyTo = null;
     clearPendingImages();
     syncChatUrlId(null);
@@ -748,6 +816,8 @@
     clearPendingImages();
     state.replyTo = null;
     state.emojiOpen = false;
+    state.reactionPickerMsgId = null;
+    state.seenModal = null;
     state.drawerOpen = false;
     state.confirmDeleteGroup = false;
     state.selectMode = false;
@@ -1403,19 +1473,207 @@
     }
   }
 
-  // ── Agent Group Admin Actions ──
+  // ── Reactions, Seen Inspector & Group/Channel Avatar Helpers ──
+  async function fileToAvatarDataUri(file) {
+    if (!file) throw new Error('No image selected');
+    if (!/^image\/(jpeg|jpg|png|webp|gif)$/i.test(file.type || '')) {
+      throw new Error('Only JPG, PNG, WebP or GIF images are allowed');
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('Image is too large (max 10 MB)');
+    }
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      const url = URL.createObjectURL(file);
+      im.onload = () => { URL.revokeObjectURL(url); resolve(im); };
+      im.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Invalid image file')); };
+      im.src = url;
+    });
+    const w = img.naturalWidth || img.width || 1;
+    const h = img.naturalHeight || img.height || 1;
+    const side = Math.min(w, h);
+    const sx = Math.floor((w - side) / 2);
+    const sy = Math.floor((h - side) / 2);
+    const outSize = Math.min(512, Math.max(128, side));
+    const canvas = document.createElement('canvas');
+    canvas.width = outSize;
+    canvas.height = outSize;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, sx, sy, side, side, 0, 0, outSize, outSize);
+    let dataUrl = '';
+    try {
+      dataUrl = canvas.toDataURL('image/webp', 0.86);
+    } catch (_) {}
+    if (!dataUrl || !dataUrl.startsWith('data:image/webp')) {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.86);
+    }
+    return dataUrl;
+  }
+
+  async function uploadGroupAvatar(convId, file) {
+    if (!file || state.uploadingGroupAvatar) return;
+    state.uploadingGroupAvatar = true;
+    renderThreadArea(false);
+    try {
+      const image = await fileToAvatarDataUri(file);
+      const data = await reqJson(`/api/chat/groups/${convId}/avatar`, {
+        method: 'POST',
+        body: JSON.stringify({ image })
+      });
+      if (data.conversation) {
+        const idx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+        if (idx !== -1) state.conversations[idx] = data.conversation;
+      }
+      if (typeof toast === 'function') toast('Photo updated successfully', 'success');
+    } catch (err) {
+      if (typeof toast === 'function') toast(err.message || 'Failed to upload photo', 'error');
+    } finally {
+      state.uploadingGroupAvatar = false;
+      if (state.mounted) {
+        renderInboxList();
+        renderThreadArea(false);
+      }
+    }
+  }
+
+  async function removeGroupAvatar(convId) {
+    if (state.uploadingGroupAvatar) return;
+    state.uploadingGroupAvatar = true;
+    renderThreadArea(false);
+    try {
+      const data = await reqJson(`/api/chat/groups/${convId}/avatar`, {
+        method: 'POST',
+        body: JSON.stringify({ remove: true })
+      });
+      if (data.conversation) {
+        const idx = state.conversations.findIndex(c => Number(c.id) === Number(convId));
+        if (idx !== -1) state.conversations[idx] = data.conversation;
+      }
+      if (typeof toast === 'function') toast('Photo removed', 'success');
+    } catch (err) {
+      if (typeof toast === 'function') toast(err.message || 'Failed to remove photo', 'error');
+    } finally {
+      state.uploadingGroupAvatar = false;
+      if (state.mounted) {
+        renderInboxList();
+        renderThreadArea(false);
+      }
+    }
+  }
+
+  async function toggleMessageReaction(convId, msgId, emoji) {
+    convId = Number(convId);
+    msgId = Number(msgId);
+    state.reactionPickerMsgId = null;
+    const arr = state.messagesByConv.get(convId);
+    const msg = arr ? arr.find(m => Number(m.id) === msgId) : null;
+    const prevSummary = msg && Array.isArray(msg.reactions_summary)
+      ? msg.reactions_summary.map(r => ({ ...r }))
+      : [];
+
+    // Optimistic WhatsApp single-reaction toggle/switch
+    if (msg) {
+      const next = prevSummary.map(r => ({ ...r }));
+      const mineIdx = next.findIndex(r => r.me);
+      let togglingOff = false;
+      if (mineIdx !== -1) {
+        if (next[mineIdx].emoji === emoji) togglingOff = true;
+        next[mineIdx].count = Math.max(0, Number(next[mineIdx].count || 1) - 1);
+        next[mineIdx].me = false;
+        if (next[mineIdx].count <= 0) next.splice(mineIdx, 1);
+      }
+      if (!togglingOff) {
+        const targetIdx = next.findIndex(r => r.emoji === emoji);
+        if (targetIdx !== -1) {
+          next[targetIdx].count = Number(next[targetIdx].count || 0) + 1;
+          next[targetIdx].me = true;
+        } else {
+          next.push({ emoji, count: 1, me: true });
+        }
+      }
+      msg.reactions_summary = next;
+      const feed = document.getElementById('zy-chat-feed');
+      const prevScroll = feed ? feed.scrollTop : null;
+      renderMessagesPane(false);
+      if (feed && prevScroll != null) feed.scrollTop = prevScroll;
+    }
+
+    try {
+      const data = await reqJson(`/api/chat/conversations/${convId}/messages/${msgId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji })
+      });
+      if (msg && Array.isArray(data.reactions_summary)) {
+        msg.reactions_summary = data.reactions_summary;
+        const feed = document.getElementById('zy-chat-feed');
+        const prevScroll = feed ? feed.scrollTop : null;
+        renderMessagesPane(false);
+        if (feed && prevScroll != null) feed.scrollTop = prevScroll;
+      }
+    } catch (err) {
+      if (msg) {
+        msg.reactions_summary = prevSummary;
+        const feed = document.getElementById('zy-chat-feed');
+        const prevScroll = feed ? feed.scrollTop : null;
+        renderMessagesPane(false);
+        if (feed && prevScroll != null) feed.scrollTop = prevScroll;
+      }
+      if (typeof toast === 'function') toast(err.message || 'Could not update reaction', 'error');
+    }
+  }
+
+  async function refreshSeenModalData(convId, msgId) {
+    try {
+      const data = await reqJson(`/api/chat/conversations/${convId}/messages/${msgId}/seen`);
+      if (state.seenModal && Number(state.seenModal.convId) === Number(convId) && Number(state.seenModal.msgId) === Number(msgId)) {
+        state.seenModal.loading = false;
+        state.seenModal.data = data;
+        state.seenModal.error = '';
+        renderSeenModalOverlay();
+      }
+    } catch (err) {
+      if (state.seenModal && Number(state.seenModal.convId) === Number(convId) && Number(state.seenModal.msgId) === Number(msgId)) {
+        state.seenModal.loading = false;
+        state.seenModal.error = err.message || 'Failed to load message info';
+        renderSeenModalOverlay();
+      }
+    }
+  }
+
+  function openMessageSeenModal(convId, msgId) {
+    state.reactionPickerMsgId = null;
+    state.seenModal = {
+      loading: true,
+      convId: Number(convId),
+      msgId: Number(msgId),
+      data: null,
+      error: ''
+    };
+    renderSeenModalOverlay();
+    refreshSeenModalData(convId, msgId);
+  }
+
+  function closeMessageSeenModal() {
+    state.seenModal = null;
+    renderSeenModalOverlay();
+  }
+
+  // ── Agent Group & Announcement Channel Admin Actions ──
   async function createGroupFromModal() {
+    const isChannel = state.createModalMode === 'channel';
     const titleEl = document.getElementById('zy-cg-title');
     const descEl = document.getElementById('zy-cg-desc');
     const adminOnlyEl = document.getElementById('zy-cg-admin-only');
     const checks = Array.from(document.querySelectorAll('.zy-cg-member-cb:checked'));
     const title = titleEl ? titleEl.value.trim() : '';
     const description = descEl ? descEl.value.trim() : '';
-    const admin_only = Boolean(adminOnlyEl && adminOnlyEl.checked);
+    const admin_only = isChannel ? true : Boolean(adminOnlyEl && adminOnlyEl.checked);
     const member_client_ids = checks.map(cb => Number(cb.value)).filter(n => n > 0);
 
     if (!title) {
-      if (typeof toast === 'function') toast('Please enter a group name', 'warning');
+      if (typeof toast === 'function') toast(isChannel ? 'Please enter a channel name' : 'Please enter a group name', 'warning');
       return;
     }
     if (!member_client_ids.length) {
@@ -1423,30 +1681,48 @@
       return;
     }
 
+    const submitBtn = document.getElementById('zy-cg-submit');
+    if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {
+        title,
+        description,
+        admin_only,
+        is_channel: isChannel,
+        type: isChannel ? 'agent_channel' : 'agent_group',
+        member_client_ids
+      };
+      if (state.createModalAvatar) payload.avatar = state.createModalAvatar;
       const data = await reqJson('/api/chat/groups', {
         method: 'POST',
-        body: JSON.stringify({ title, description, admin_only, member_client_ids })
+        body: JSON.stringify(payload)
       });
       state.createModalOpen = false;
+      state.createModalAvatar = '';
+      state.createModalSearch = '';
       if (data.conversation) {
         state.conversations.unshift(data.conversation);
         recomputeUnread();
         await selectConversation(data.conversation.id);
       }
-      if (typeof toast === 'function') toast(`Group "${title}" created`, 'success');
+      if (typeof toast === 'function') {
+        toast(isChannel ? `Announcement Channel "${title}" created` : `Group "${title}" created`, 'success');
+      }
     } catch (err) {
-      if (typeof toast === 'function') toast(err.message || 'Failed to create group', 'error');
+      if (submitBtn) submitBtn.disabled = false;
+      if (typeof toast === 'function') toast(err.message || (isChannel ? 'Failed to create channel' : 'Failed to create group'), 'error');
     }
   }
 
   async function saveGroupMeta(convId) {
+    const conv = state.conversations.find(c => Number(c.id) === Number(convId));
+    const isCh = isChannelConv(conv);
     const titleEl = document.getElementById('zy-gd-title');
     const descEl = document.getElementById('zy-gd-desc');
     const title = titleEl ? titleEl.value.trim() : '';
     const description = descEl ? descEl.value.trim() : '';
     if (!title) {
-      if (typeof toast === 'function') toast('Group name cannot be empty', 'warning');
+      if (typeof toast === 'function') toast(isCh ? 'Channel name cannot be empty' : 'Group name cannot be empty', 'warning');
       return;
     }
     try {
@@ -1459,9 +1735,9 @@
         if (idx !== -1) state.conversations[idx] = data.conversation;
         renderWorkspace();
       }
-      if (typeof toast === 'function') toast('Group info updated', 'success');
+      if (typeof toast === 'function') toast(isCh ? 'Announcement Channel updated' : 'Group info updated', 'success');
     } catch (err) {
-      if (typeof toast === 'function') toast(err.message || 'Failed to update group', 'error');
+      if (typeof toast === 'function') toast(err.message || 'Failed to update settings', 'error');
     }
   }
 
@@ -1477,7 +1753,7 @@
         renderWorkspace();
       }
       if (typeof toast === 'function') {
-        toast(nextVal ? 'Admin-only mode enabled (Clients muted)' : 'All group members can now send messages', 'success');
+        toast(nextVal ? 'Admin-only mode enabled (Clients muted)' : 'Open mode enabled (Members can chat via anonymous ID)', 'success');
       }
     } catch (err) {
       if (typeof toast === 'function') toast(err.message || 'Failed to update setting', 'error');
@@ -1530,6 +1806,8 @@
   }
 
   async function updateGroupMembers(convId, addIds, removeIds) {
+    const conv = state.conversations.find(c => Number(c.id) === Number(convId));
+    const isCh = isChannelConv(conv);
     try {
       const data = await reqJson(`/api/chat/groups/${convId}/members`, {
         method: 'POST',
@@ -1541,7 +1819,9 @@
         renderWorkspace();
       }
       if (typeof toast === 'function') {
-        toast(addIds && addIds.length ? 'Member added to group' : 'Member removed from group', 'success');
+        const addCount = Array.isArray(addIds) ? addIds.length : 0;
+        const lbl = isCh ? 'channel' : 'group';
+        toast(addCount > 0 ? `${addCount} member${addCount === 1 ? '' : 's'} added to ${lbl}` : `Member removed from ${lbl}`, 'success');
       }
     } catch (err) {
       if (typeof toast === 'function') toast(err.message || 'Failed to update members', 'error');
@@ -1549,6 +1829,8 @@
   }
 
   async function deleteGroup(convId) {
+    const conv = state.conversations.find(c => Number(c.id) === Number(convId));
+    const isCh = isChannelConv(conv);
     try {
       await reqJson(`/api/chat/groups/${convId}`, { method: 'DELETE' });
       state.conversations = state.conversations.filter(c => Number(c.id) !== Number(convId));
@@ -1559,9 +1841,9 @@
       state.mobileShowThread = false;
       recomputeUnread();
       renderWorkspace();
-      if (typeof toast === 'function') toast('Group deleted', 'success');
+      if (typeof toast === 'function') toast(isCh ? 'Announcement Channel deleted' : 'Group deleted', 'success');
     } catch (err) {
-      if (typeof toast === 'function') toast(err.message || 'Failed to delete group', 'error');
+      if (typeof toast === 'function') toast(err.message || 'Failed to delete', 'error');
     }
   }
 
@@ -1578,18 +1860,42 @@
     return `${names.slice(0, 2).join(', ')} typing...`;
   }
 
+  function computeLiveAdminSeen(msg, conv) {
+    if (!conv || !conv.can_manage || !isGroupOrChannel(conv) || msg._optimistic || msg.deleted) return null;
+    const joinedAfter = (conv.member_joined_after_id && typeof conv.member_joined_after_id === 'object') ? conv.member_joined_after_id : {};
+    const clientKeys = (conv.participants || []).filter(k =>
+      String(k).startsWith('client:') &&
+      k !== msg.sender_key &&
+      Number(msg.id) > Number(joinedAfter[k] || 0)
+    );
+    const total = clientKeys.length;
+    const cursors = conv.read_cursors || {};
+    let seen = 0;
+    for (let i = 0; i < clientKeys.length; i++) {
+      if (Number(cursors[clientKeys[i]] || 0) >= Number(msg.id)) seen++;
+    }
+    if (typeof msg.seen_count === 'number' && msg.seen_count > seen && msg.seen_count <= total) {
+      seen = msg.seen_count;
+    }
+    return { seen, total };
+  }
+
   function computeTickHtml(msg, conv) {
     if (!state.me || msg.sender_key !== state.me.key) return '';
     if (msg._optimistic) {
       return '<span class="zy-chat-tick is-pending" title="Sending"><i class="far fa-clock"></i></span>';
     }
-    const others = (conv.participants || []).filter(k => k !== state.me.key);
+    const joinedAfter = (conv.member_joined_after_id && typeof conv.member_joined_after_id === 'object') ? conv.member_joined_after_id : {};
+    const others = (conv.participants || []).filter(k =>
+      k !== state.me.key &&
+      (!isGroupOrChannel(conv) || !String(k).startsWith('client:') || Number(msg.id) > Number(joinedAfter[k] || 0))
+    );
     const cursors = conv.read_cursors || {};
     const anySeen = others.some(k => Number(cursors[k] || 0) >= Number(msg.id));
     if (anySeen) {
       return '<span class="zy-chat-tick is-seen" title="Seen"><i class="fas fa-check-double"></i></span>';
     }
-    const peerOnline = conv.type === 'agent_group'
+    const peerOnline = isGroupOrChannel(conv)
       ? (conv.members || []).some(m => m.key !== state.me.key && m.online)
       : Boolean(conv.peer && conv.peer.online);
     if (peerOnline) {
@@ -1598,18 +1904,34 @@
     return '<span class="zy-chat-tick is-sent" title="Sent"><i class="fas fa-check"></i></span>';
   }
 
+  function syncAgentTabBadges() {
+    const unreadTabBadge = document.getElementById('zy-chat-unread-tab-cnt');
+    if (!unreadTabBadge) return;
+    const unreadChats = state.conversations.filter(c => Number(c.unread_count || 0) > 0).length;
+    if (unreadChats > 0) {
+      unreadTabBadge.textContent = unreadChats > 99 ? '99+' : String(unreadChats);
+      unreadTabBadge.style.display = 'inline-flex';
+    } else {
+      unreadTabBadge.textContent = '0';
+      unreadTabBadge.style.display = 'none';
+    }
+  }
+
   function renderInboxList() {
     const listEl = document.getElementById('zy-chat-inbox-list');
     if (!listEl) return;
+    syncAgentTabBadges();
 
     const q = state.search.trim().toLowerCase();
     const isAgent = state.me && state.me.role === 'agent';
 
     const filteredConvs = state.conversations.filter(c => {
       if (isAgent) {
+        if (state.filterTab === 'unread' && Number(c.unread_count || 0) <= 0) return false;
         if (state.filterTab === 'owner' && c.type !== 'owner_agent') return false;
         if (state.filterTab === 'clients' && c.type !== 'agent_client') return false;
         if (state.filterTab === 'groups' && c.type !== 'agent_group') return false;
+        if (state.filterTab === 'channels' && c.type !== 'agent_channel') return false;
       }
       if (!q) return true;
       const hay = `${c.title || ''} ${c.last_message_preview || ''} ${(c.peer && c.peer.username) || ''}`.toLowerCase();
@@ -1619,15 +1941,15 @@
     // Contacts that do not yet have an open 1-to-1 thread
     const existingPeerKeys = new Set(
       state.conversations
-        .filter(c => c.type !== 'agent_group' && c.peer)
+        .filter(c => !isGroupOrChannel(c) && c.peer)
         .map(c => c.peer.key)
     );
     const availableContacts = state.contacts.filter(ct => {
       if (existingPeerKeys.has(ct.key)) return false;
       if (isAgent) {
+        if (state.filterTab === 'unread' || state.filterTab === 'groups' || state.filterTab === 'channels') return false;
         if (state.filterTab === 'owner' && ct.role !== 'owner') return false;
         if (state.filterTab === 'clients' && ct.role !== 'client') return false;
-        if (state.filterTab === 'groups') return false;
       }
       if (!q) return true;
       return `${ct.display_name || ''} ${ct.username || ''}`.toLowerCase().includes(q);
@@ -1639,31 +1961,43 @@
     if (filteredConvs.length) {
       html += filteredConvs.map(c => {
         const active = Number(c.id) === Number(state.activeConvId);
-        const isGroup = c.type === 'agent_group';
+        const isCh = isChannelConv(c);
+        const isGrp = isGroupConv(c);
+        const isMulti = isCh || isGrp;
         const hideMembers = Boolean(isClientActor || c.hide_members);
-        const isOnline = !isGroup && Boolean(c.peer && c.peer.online);
+        const isOnline = !isMulti && Boolean(c.peer && c.peer.online);
         const typingText = getTypingText(c.id);
-        const schedClosed = isGroup && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
-        const roleSub = isGroup
-          ? (hideMembers
-              ? `Group${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
-              : `Group · ${(c.members || []).length} members${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`)
-          : (c.peer && c.peer.role === 'owner' ? 'Owner' : (c.peer && c.peer.role === 'agent' ? 'Agent' : 'Client'));
+        const schedClosed = isGrp && c.schedule_state && c.schedule_state.enabled && c.schedule_state.is_closed;
+
+        let roleSub = '';
+        if (isCh) {
+          roleSub = hideMembers
+            ? 'Announcement Channel'
+            : `Announcement Channel · ${(c.members || []).length} members`;
+        } else if (isGrp) {
+          roleSub = hideMembers
+            ? `Group${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`
+            : `Group · ${(c.members || []).length} members${schedClosed ? ` · Closed until ${formatTime12h(c.schedule_state.open_time)}` : (c.admin_only ? ' · Admin only' : '')}`;
+        } else {
+          roleSub = c.peer && c.peer.role === 'owner' ? 'Owner' : (c.peer && c.peer.role === 'agent' ? 'Agent' : 'Client');
+        }
 
         const previewHtml = typingText
           ? `<span class="zy-chat-typing-mini">${esc(typingText)}</span>`
-          : esc(c.last_message_preview || 'No messages yet');
+          : esc(c.last_message_preview || (isCh ? 'Official announcements from Admin' : 'No messages yet'));
 
-        const peerAvatar = !isGroup && c.peer ? (c.peer.avatar_url || '') : '';
+        const avaUrl = isMulti ? (c.avatar_url || '') : (c.peer ? (c.peer.avatar_url || '') : '');
+        const avaBg = isCh ? '#b45309' : (isGrp ? '#0f766e' : colorForKey(c.peer ? c.peer.key : c.id));
         return `
-          <button type="button" class="zy-chat-row ${active ? 'is-active' : ''}" data-conv-id="${c.id}">
-            <div class="zy-chat-ava ${isGroup ? 'is-group' : ''} ${peerAvatar ? 'has-img' : ''}" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(c.peer ? c.peer.key : c.id)};">
-              ${renderAvatarInner(peerAvatar, c.title, isGroup, isOnline)}
+          <button type="button" class="zy-chat-row ${active ? 'is-active' : ''} ${isCh ? 'is-channel-row' : ''}" data-conv-id="${c.id}">
+            <div class="zy-chat-ava ${isCh ? 'is-channel' : (isGrp ? 'is-group' : '')} ${avaUrl ? 'has-img' : ''}" style="--ava-bg:${avaBg};">
+              ${renderAvatarInner(avaUrl, c.title, isGrp, isOnline, isCh)}
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
                 <span class="zy-chat-row-name-wrap">
                   <span class="zy-chat-row-name">${esc(c.title)}</span>
+                  ${isCh ? `<span class="zy-chat-ch-badge is-mini" title="Announcement Channel"><i class="fas fa-bullhorn"></i> Channel</span>` : ''}
                 </span>
                 <span class="zy-chat-row-time">${esc(formatInboxTime(c.last_message_at))}</span>
               </div>
@@ -1689,7 +2023,7 @@
         return `
           <button type="button" class="zy-chat-row is-contact" data-contact-key="${esc(ct.key)}">
             <div class="zy-chat-ava ${ctAvatar ? 'has-img' : ''}" style="--ava-bg:${colorForKey(ct.key)};">
-              ${renderAvatarInner(ctAvatar, ct.display_name || ct.username, false, Boolean(ct.online))}
+              ${renderAvatarInner(ctAvatar, ct.display_name || ct.username, false, Boolean(ct.online), false)}
             </div>
             <div class="zy-chat-row-body">
               <div class="zy-chat-row-top">
@@ -1706,14 +2040,18 @@
     }
 
     if (!html) {
-      const emptyMsg = state.me && state.me.role === 'owner'
-        ? 'No agents available yet.'
-        : (state.me && state.me.role === 'agent'
-            ? 'No chats match your filter. Add clients or start a chat with Owner.'
-            : 'No assigned agent or groups found for your account.');
+      let emptyMsg = 'No assigned agent or groups found for your account.';
+      if (state.me && state.me.role === 'owner') {
+        emptyMsg = 'No agents available yet.';
+      } else if (state.me && state.me.role === 'agent') {
+        if (state.filterTab === 'unread') emptyMsg = 'All caught up! No unread messages right now.';
+        else if (state.filterTab === 'channels') emptyMsg = 'No Announcement Channels yet. Tap "+ Channel" to create one.';
+        else if (state.filterTab === 'groups') emptyMsg = 'No Client Groups yet. Tap "+ Group" to create one.';
+        else emptyMsg = 'No chats match your filter. Add clients or start a chat with Owner.';
+      }
       html = `
         <div class="zy-chat-inbox-empty">
-          <i class="far fa-comments"></i>
+          <i class="far ${state.filterTab === 'unread' ? 'fa-circle-check' : 'fa-comments'}"></i>
           <div>${esc(emptyMsg)}</div>
         </div>
       `;
@@ -1739,8 +2077,18 @@
       subEl.innerHTML = `<span class="zy-chat-typing-mini">${esc(typing)}</span>`;
       return;
     }
-    if (conv.type === 'agent_group') {
-      const hideMembers = Boolean((state.me && state.me.role === 'client') || conv.hide_members);
+    const hideMembers = Boolean((state.me && state.me.role === 'client') || conv.hide_members);
+    if (isChannelConv(conv)) {
+      if (hideMembers) {
+        subEl.textContent = 'Announcement Channel · Official updates from Admin';
+      } else {
+        const subCnt = Math.max(0, (conv.members || []).filter(m => m.role === 'client').length);
+        const onlineCnt = (conv.members || []).filter(m => m.role === 'client' && m.online).length;
+        const parts = ['Announcement Channel', `${subCnt} client${subCnt === 1 ? '' : 's'}`];
+        if (onlineCnt > 0) parts.push(`${onlineCnt} online`);
+        subEl.textContent = parts.join(' · ');
+      }
+    } else if (isGroupConv(conv)) {
       const parts = [];
       if (!hideMembers) {
         const onlineCnt = (conv.members || []).filter(m => m.online).length;
@@ -1779,16 +2127,24 @@
     }
 
     const msgs = state.messagesByConv.get(conv.id) || [];
+    const isCh = isChannelConv(conv);
+    const isGrp = isGroupConv(conv);
+    const isMulti = isCh || isGrp;
+
     if (!msgs.length) {
       feed.innerHTML = `
         <div class="zy-chat-thread-empty">
           <div class="zy-chat-thread-empty-card">
-            <i class="fas fa-lock"></i>
-            <div class="zy-chat-empty-title">Private Role-Isolated Chat</div>
+            <i class="fas ${isCh ? 'fa-bullhorn' : 'fa-lock'}"></i>
+            <div class="zy-chat-empty-title">${isCh ? 'Announcement Channel' : 'Private Role-Isolated Chat'}</div>
             <div class="zy-chat-empty-desc">
-              ${conv.type === 'agent_group'
-                ? 'Messages in this group are private to your Agent and group members.'
-                : 'Send your first message below to start the conversation.'}
+              ${isCh
+                ? (conv.can_manage
+                    ? 'Post official broadcasts & updates here. All added clients will receive them privately and can react with emojis.'
+                    : 'This is an official Announcement Channel from your Agent. Only Admin can post messages — tap any post to react.')
+                : (isGrp
+                    ? 'Messages in this group are private to your Agent and group members.'
+                    : 'Send your first message below to start the conversation.')}
             </div>
           </div>
         </div>
@@ -1797,8 +2153,9 @@
     }
 
     let lastDay = '';
-    const isGroup = conv.type === 'agent_group';
     const isGroupAdmin = Boolean(conv.can_manage);
+    const isOwnerAdmin = Boolean(state.me && state.me.role === 'owner' && conv.type === 'owner_agent');
+    const isAgentAdmin = Boolean(state.me && state.me.role === 'agent' && (conv.can_manage || conv.type === 'agent_client'));
 
     const html = msgs.map(m => {
       const dayLabel = formatDayLabel(m.created_at);
@@ -1808,20 +2165,22 @@
         divider = `<div class="zy-chat-day-sep"><span>${esc(dayLabel)}</span></div>`;
       }
       const isMine = state.me && m.sender_key === state.me.key;
-      const canDelete = !m.deleted && (isMine || isGroupAdmin);
+      const canDelete = !m.deleted && (isMine || isGroupAdmin || isOwnerAdmin || isAgentAdmin);
       const isPinned = Number(conv.pinned_message_id) === Number(m.id);
       const isSelected = state.selectMode && state.selectedMsgIds.has(Number(m.id));
       const canPreviewDeleted = Boolean(m.deleted && m.can_preview_deleted);
       const isPreviewOpen = canPreviewDeleted && state.expandedDeletedIds.has(Number(m.id));
+      const isReactOpen = Number(state.reactionPickerMsgId) === Number(m.id);
+      const seenMeta = computeLiveAdminSeen(m, conv);
 
-      const hidePeerClientIdentity = Boolean(isGroup && ((state.me && state.me.role === 'client') || conv.hide_members));
-      const senderLabel = isGroup && !isMine
+      const hidePeerClientIdentity = Boolean(isMulti && ((state.me && state.me.role === 'client') || conv.hide_members));
+      const senderLabel = isMulti && !isMine
         ? (() => {
             if (m.sender_role === 'agent') {
-              return `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)} · Admin</div>`;
+              const badgeTxt = isCh ? 'Channel Admin' : 'Admin';
+              return `<div class="zy-chat-sender" style="color:${colorForKey(m.sender_key)};">${esc(m.sender_name)} · ${badgeTxt}</div>`;
             }
             if (hidePeerClientIdentity) {
-              // Server projects peer client sender_name to "ID: 482910" (never username)
               const peerIdLabel = m.sender_chat_id ? `ID: ${m.sender_chat_id}` : (m.sender_name || 'Member');
               return `<div class="zy-chat-sender zy-chat-sender-id" style="color:${colorForKey(m.sender_key)};">${esc(peerIdLabel)}</div>`;
             }
@@ -1843,10 +2202,33 @@
         : '';
 
       const actionsHtml = !state.selectMode && !m.deleted && !m._optimistic
-        ? `<div class="zy-chat-msg-actions">
-             <button type="button" class="zy-chat-act-btn" data-act="reply" data-mid="${m.id}" title="Reply"><i class="fas fa-reply"></i></button>
+        ? `<div class="zy-chat-msg-actions ${isReactOpen ? 'is-force-show' : ''}">
+             <button type="button" class="zy-chat-act-btn ${isReactOpen ? 'is-active' : ''}" data-act="react" data-mid="${m.id}" title="React"><i class="far fa-face-smile"></i></button>
+             ${conv.can_send ? `<button type="button" class="zy-chat-act-btn" data-act="reply" data-mid="${m.id}" title="Reply"><i class="fas fa-reply"></i></button>` : ''}
+             ${seenMeta ? `<button type="button" class="zy-chat-act-btn" data-act="seen" data-mid="${m.id}" title="Seen Info (${seenMeta.seen}/${seenMeta.total})"><i class="fas fa-eye"></i></button>` : ''}
              ${isGroupAdmin ? `<button type="button" class="zy-chat-act-btn ${isPinned ? 'is-pinned' : ''}" data-act="pin" data-mid="${m.id}" title="${isPinned ? 'Unpin' : 'Pin message'}"><i class="fas fa-thumbtack"></i></button>` : ''}
              ${canDelete ? `<button type="button" class="zy-chat-act-btn is-del" data-act="del" data-mid="${m.id}" title="Delete"><i class="fas fa-trash-can"></i></button>` : ''}
+           </div>`
+        : '';
+
+      const reactPickerHtml = isReactOpen && !m.deleted && !m._optimistic
+        ? `<div class="zy-chat-react-picker ${isMine ? 'is-right' : 'is-left'}" data-react-picker="${m.id}">
+             ${QUICK_REACTIONS.map(em => {
+               const mineActive = Array.isArray(m.reactions_summary) && m.reactions_summary.some(r => r.emoji === em && r.me);
+               return `<button type="button" class="zy-chat-react-opt ${mineActive ? 'is-mine' : ''}" data-pick-react="${m.id}" data-emoji="${em}">${em}</button>`;
+             }).join('')}
+           </div>`
+        : '';
+
+      const reactionsSummary = !m.deleted && Array.isArray(m.reactions_summary) ? m.reactions_summary : [];
+      const reactionsBarHtml = reactionsSummary.length
+        ? `<div class="zy-chat-reactions ${isMine ? 'is-out' : 'is-in'}">
+             ${reactionsSummary.map(r => `
+               <button type="button" class="zy-chat-react-chip ${r.me ? 'is-mine' : ''}" data-chip-react="${m.id}" data-emoji="${esc(r.emoji)}" title="Tap to react">
+                 <span class="zy-chat-react-em">${esc(r.emoji)}</span>
+                 <span class="zy-chat-react-cnt">${Number(r.count || 1)}</span>
+               </button>
+             `).join('')}
            </div>`
         : '';
 
@@ -1908,22 +2290,33 @@
            </label>`
         : '';
 
+      const seenPillHtml = seenMeta
+        ? `<button type="button" class="zy-chat-seen-pill" data-open-seen="${m.id}" title="Seen by ${seenMeta.seen} of ${seenMeta.total} members — click for details">
+             <i class="fas fa-eye"></i> ${seenMeta.seen}/${seenMeta.total}
+           </button>`
+        : '';
+
       return `
         ${divider}
-        <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'} ${state.selectMode ? 'is-selectable' : ''} ${isSelected ? 'is-selected' : ''}" data-msg-id="${m.id}">
+        <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'} ${state.selectMode ? 'is-selectable' : ''} ${isSelected ? 'is-selected' : ''} ${reactionsSummary.length ? 'has-reactions' : ''} ${isReactOpen ? 'has-react-open' : ''}" data-msg-id="${m.id}">
           ${selectCheckboxHtml}
-          <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${canPreviewDeleted ? 'has-del-preview' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
-            ${actionsHtml}
-            ${autoBadgeHtml}
-            ${senderLabel}
-            ${replyBlock}
-            ${mediaHtml}
-            ${textHtml}
-            <div class="zy-chat-meta ${imgOverlayMeta ? 'is-img-overlay' : ''}">
-              ${isPinned ? '<span class="zy-chat-pin-ico" title="Pinned"><i class="fas fa-thumbtack"></i></span>' : ''}
-              <span class="zy-chat-ts">${esc(formatTime(m.created_at))}</span>
-              ${computeTickHtml(m, conv)}
+          <div class="zy-chat-bubble-col ${isMine ? 'is-out' : 'is-in'}">
+            ${reactPickerHtml}
+            <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${m.deleted ? 'is-deleted' : ''} ${canPreviewDeleted ? 'has-del-preview' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
+              ${actionsHtml}
+              ${autoBadgeHtml}
+              ${senderLabel}
+              ${replyBlock}
+              ${mediaHtml}
+              ${textHtml}
+              <div class="zy-chat-meta ${imgOverlayMeta ? 'is-img-overlay' : ''}">
+                ${isPinned ? '<span class="zy-chat-pin-ico" title="Pinned"><i class="fas fa-thumbtack"></i></span>' : ''}
+                ${seenPillHtml}
+                <span class="zy-chat-ts">${esc(formatTime(m.created_at))}</span>
+                ${computeTickHtml(m, conv)}
+              </div>
             </div>
+            ${reactionsBarHtml}
           </div>
         </div>
       `;
@@ -2004,6 +2397,30 @@
         jumpToMessage(Number(el.dataset.jumpMsg));
       });
     });
+
+    // Bind Admin Seen Info pill
+    feed.querySelectorAll('[data-open-seen]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openMessageSeenModal(conv.id, Number(btn.dataset.openSeen));
+      });
+    });
+
+    // Bind quick reaction picker buttons & existing reaction chips
+    feed.querySelectorAll('[data-pick-react]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleMessageReaction(conv.id, Number(btn.dataset.pickReact), btn.dataset.emoji);
+      });
+    });
+    feed.querySelectorAll('[data-chip-react]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (state.selectMode) return;
+        toggleMessageReaction(conv.id, Number(btn.dataset.chipReact), btn.dataset.emoji);
+      });
+    });
+
     // Bind actions
     feed.querySelectorAll('.zy-chat-act-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -2011,7 +2428,14 @@
         const mid = Number(btn.dataset.mid);
         const act = btn.dataset.act;
         const target = msgs.find(x => Number(x.id) === mid);
-        if (act === 'reply' && target) {
+        if (act === 'react') {
+          state.reactionPickerMsgId = Number(state.reactionPickerMsgId) === mid ? null : mid;
+          const prevScroll = feed.scrollTop;
+          renderMessagesPane(false);
+          feed.scrollTop = prevScroll;
+        } else if (act === 'seen') {
+          openMessageSeenModal(conv.id, mid);
+        } else if (act === 'reply' && target) {
           const replyBody = target.image
             ? (target.body ? `📷 ${target.body}` : '📷 Photo')
             : target.body;
@@ -2098,8 +2522,9 @@
   }
 
   function renderGroupDrawerHtml(conv) {
-    if (!state.drawerOpen || !conv || conv.type !== 'agent_group') return '';
+    if (!state.drawerOpen || !conv || !isGroupOrChannel(conv)) return '';
     const isAdmin = Boolean(conv.can_manage);
+    const isCh = isChannelConv(conv);
     const hideMembers = Boolean((state.me && state.me.role === 'client') || conv.hide_members);
     if (hideMembers && !isAdmin) return '';
     const memberKeys = new Set(conv.participants || []);
@@ -2108,70 +2533,105 @@
           .filter(c => c.role === 'client' && !memberKeys.has(c.key))
           .sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }))
       : [];
+    const entityLabel = isCh ? 'Announcement Channel' : 'Group';
+    const avaUrl = conv.avatar_url || '';
 
     return `
-      <aside class="zy-chat-drawer" aria-label="Group Info">
+      <aside class="zy-chat-drawer" aria-label="${esc(entityLabel)} Settings">
         <div class="zy-chat-drawer-head">
-          <span>${isAdmin ? 'Group Admin Settings' : 'Group Info'}</span>
+          <span>${isAdmin ? `${entityLabel} Settings` : `${entityLabel} Info`}</span>
           <button type="button" class="zy-chat-icon-btn" id="zy-gd-close" aria-label="Close"><i class="fas fa-times"></i></button>
         </div>
         <div class="zy-chat-drawer-body">
           ${isAdmin ? `
             <div class="zy-gd-section">
-              <label class="zy-gd-label">Group Name</label>
-              <input type="text" id="zy-gd-title" class="zy-gd-input" maxlength="80" value="${esc(conv.title)}">
-              <label class="zy-gd-label" style="margin-top:10px;">Description</label>
-              <textarea id="zy-gd-desc" class="zy-gd-input" rows="2" maxlength="240" placeholder="Optional group description">${esc(conv.description || '')}</textarea>
-              <button type="button" class="zy-gd-btn-primary" id="zy-gd-save-meta">Save Group Info</button>
+              <div class="zy-gd-label">${isCh ? 'Channel Photo' : 'Group Photo'}</div>
+              <div class="zy-gd-ava-row">
+                <div class="zy-chat-ava is-gd-preview ${isCh ? 'is-channel' : 'is-group'} ${avaUrl ? 'has-img' : ''}" style="--ava-bg:${isCh ? '#b45309' : '#0f766e'};">
+                  ${renderAvatarInner(avaUrl, conv.title, !isCh, false, isCh)}
+                </div>
+                <div class="zy-gd-ava-actions">
+                  <input type="file" id="zy-gd-ava-input" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none;">
+                  <button type="button" class="zy-gd-btn-ava" id="zy-gd-ava-pick" ${state.uploadingGroupAvatar ? 'disabled' : ''}>
+                    <i class="fas ${state.uploadingGroupAvatar ? 'fa-spinner fa-spin' : 'fa-camera'}"></i>
+                    <span>${state.uploadingGroupAvatar ? 'Saving...' : (avaUrl ? 'Change Photo' : 'Upload Photo')}</span>
+                  </button>
+                  ${avaUrl ? `
+                    <button type="button" class="zy-gd-btn-ava-rm" id="zy-gd-ava-rm" ${state.uploadingGroupAvatar ? 'disabled' : ''}>
+                      <i class="fas fa-trash-can"></i> Remove
+                    </button>
+                  ` : ''}
+                </div>
+              </div>
             </div>
             <div class="zy-gd-section">
-              <label class="zy-gd-toggle-row">
-                <div>
-                  <div class="zy-gd-toggle-title">Only Admin Can Send</div>
-                  <div class="zy-gd-toggle-sub">Restrict clients from sending messages</div>
-                </div>
-                <input type="checkbox" id="zy-gd-admin-only" ${conv.admin_only ? 'checked' : ''}>
-              </label>
+              <label class="zy-gd-label">${isCh ? 'Channel Name' : 'Group Name'}</label>
+              <input type="text" id="zy-gd-title" class="zy-gd-input" maxlength="80" value="${esc(conv.title)}">
+              <label class="zy-gd-label" style="margin-top:10px;">Description</label>
+              <textarea id="zy-gd-desc" class="zy-gd-input" rows="2" maxlength="240" placeholder="Optional description">${esc(conv.description || '')}</textarea>
+              <button type="button" class="zy-gd-btn-primary" id="zy-gd-save-meta">Save ${isCh ? 'Channel' : 'Group'} Info</button>
             </div>
-            <div class="zy-gd-section zy-gd-sched-box">
-              <label class="zy-gd-toggle-row" style="margin-bottom:8px;">
-                <div>
-                  <div class="zy-gd-toggle-title"><i class="fas fa-moon" style="color:#6366f1;margin-right:4px;"></i> Auto Night Close &amp; Morning Open</div>
-                  <div class="zy-gd-toggle-sub">Daily quiet hours (PKT) with countdown &amp; auto messages</div>
-                </div>
-                <input type="checkbox" id="zy-gd-sched-enabled" ${conv.schedule && conv.schedule.enabled ? 'checked' : ''}>
-              </label>
-              <div id="zy-gd-sched-fields" style="display:${conv.schedule && conv.schedule.enabled ? 'block' : 'none'};margin-top:8px;">
-                <div class="zy-gd-time-grid">
-                  <div>
-                    <label class="zy-gd-label" for="zy-gd-sched-close">Close Time (PKT)</label>
-                    <input type="time" id="zy-gd-sched-close" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.close_time) || '23:00')}">
-                  </div>
-                  <div>
-                    <label class="zy-gd-label" for="zy-gd-sched-open">Open Time (PKT)</label>
-                    <input type="time" id="zy-gd-sched-open" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.open_time) || '09:00')}">
-                  </div>
-                </div>
-                <label class="zy-gd-label" for="zy-gd-sched-close-msg" style="margin-top:10px;">Night Close Message (Auto Sent)</label>
-                <textarea id="zy-gd-sched-close-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Good Night message...">${esc((conv.schedule && conv.schedule.close_message) || DEFAULT_CLOSE_MSG)}</textarea>
-                <label class="zy-gd-label" for="zy-gd-sched-open-msg" style="margin-top:10px;">Morning Open Message (Auto Sent)</label>
-                <textarea id="zy-gd-sched-open-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Assalam-o-Alaikum morning message...">${esc((conv.schedule && conv.schedule.open_message) || DEFAULT_OPEN_MSG)}</textarea>
+            ${isCh ? `
+              <div class="zy-gd-section zy-gd-ch-notice">
+                <div class="zy-gd-ch-notice-head"><i class="fas fa-bullhorn"></i> Official Announcement Channel</div>
+                <div class="zy-gd-toggle-sub">Only you (Admin) can send messages here. Clients can read all posts and react with emojis. Member count &amp; subscriber list stay completely hidden from clients.</div>
               </div>
-              <button type="button" class="zy-gd-btn-primary" id="zy-gd-save-sched" style="margin-top:10px;">
-                <i class="fas fa-clock"></i> Save Schedule
-              </button>
-            </div>
+            ` : `
+              <div class="zy-gd-section">
+                <label class="zy-gd-toggle-row">
+                  <div>
+                    <div class="zy-gd-toggle-title">Only Admin Can Send</div>
+                    <div class="zy-gd-toggle-sub">ON = Admin only · OFF = Members chat via anonymous ID</div>
+                  </div>
+                  <input type="checkbox" id="zy-gd-admin-only" ${conv.admin_only ? 'checked' : ''}>
+                </label>
+              </div>
+              <div class="zy-gd-section zy-gd-sched-box">
+                <label class="zy-gd-toggle-row" style="margin-bottom:8px;">
+                  <div>
+                    <div class="zy-gd-toggle-title"><i class="fas fa-moon" style="color:#6366f1;margin-right:4px;"></i> Auto Night Close &amp; Morning Open</div>
+                    <div class="zy-gd-toggle-sub">Daily quiet hours (PKT) with countdown &amp; auto messages</div>
+                  </div>
+                  <input type="checkbox" id="zy-gd-sched-enabled" ${conv.schedule && conv.schedule.enabled ? 'checked' : ''}>
+                </label>
+                <div id="zy-gd-sched-fields" style="display:${conv.schedule && conv.schedule.enabled ? 'block' : 'none'};margin-top:8px;">
+                  <div class="zy-gd-time-grid">
+                    <div>
+                      <label class="zy-gd-label" for="zy-gd-sched-close">Close Time (PKT)</label>
+                      <input type="time" id="zy-gd-sched-close" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.close_time) || '23:00')}">
+                    </div>
+                    <div>
+                      <label class="zy-gd-label" for="zy-gd-sched-open">Open Time (PKT)</label>
+                      <input type="time" id="zy-gd-sched-open" class="zy-gd-input" value="${esc((conv.schedule && conv.schedule.open_time) || '09:00')}">
+                    </div>
+                  </div>
+                  <label class="zy-gd-label" for="zy-gd-sched-close-msg" style="margin-top:10px;">Night Close Message (Auto Sent)</label>
+                  <textarea id="zy-gd-sched-close-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Good Night message...">${esc((conv.schedule && conv.schedule.close_message) || DEFAULT_CLOSE_MSG)}</textarea>
+                  <label class="zy-gd-label" for="zy-gd-sched-open-msg" style="margin-top:10px;">Morning Open Message (Auto Sent)</label>
+                  <textarea id="zy-gd-sched-open-msg" class="zy-gd-input" rows="3" maxlength="500" placeholder="Assalam-o-Alaikum morning message...">${esc((conv.schedule && conv.schedule.open_message) || DEFAULT_OPEN_MSG)}</textarea>
+                </div>
+                <button type="button" class="zy-gd-btn-primary" id="zy-gd-save-sched" style="margin-top:10px;">
+                  <i class="fas fa-clock"></i> Save Schedule
+                </button>
+              </div>
+            `}
             <div class="zy-gd-section">
               <div class="zy-gd-label">Add My Clients</div>
               ${addableClients.length ? `
                 <div class="zy-gd-add-row">
                   <select id="zy-gd-add-select" class="zy-gd-input">
                     <option value="">Select client to add...</option>
-                    ${addableClients.map(c => `<option value="${c.id}">${esc(c.display_name || c.username)}</option>`).join('')}
+                    ${addableClients.map(c => `<option value="${c.id}">${esc(c.display_name || c.username)}${c.chat_id ? ` (ID: ${esc(c.chat_id)})` : ''}</option>`).join('')}
                   </select>
                   <button type="button" class="zy-gd-btn-add" id="zy-gd-add-btn">Add</button>
                 </div>
-              ` : '<div class="zy-gd-muted">All of your assigned clients are already in this group.</div>'}
+                ${addableClients.length > 1 ? `
+                  <button type="button" class="zy-gd-btn-add-all" id="zy-gd-add-all-btn">
+                    <i class="fas fa-user-plus"></i> Add All Remaining (${addableClients.length})
+                  </button>
+                ` : ''}
+                <div class="zy-gd-muted" style="margin-top:6px;">Newly added clients will only see new messages sent after they are added (previous chat history stays hidden).</div>
+              ` : `<div class="zy-gd-muted">All of your assigned clients are already in this ${isCh ? 'channel' : 'group'}.</div>`}
             </div>
           ` : `
             <div class="zy-gd-section">
@@ -2181,16 +2641,16 @@
           `}
 
           <div class="zy-gd-section">
-            <div class="zy-gd-label">Members (${(conv.members || []).length})</div>
+            <div class="zy-gd-label">${isCh ? 'Subscribers & Admin' : 'Members'} (${(conv.members || []).length})</div>
             <div class="zy-gd-members">
               ${(conv.members || []).map(m => `
                 <div class="zy-gd-member-row">
                   <div class="zy-chat-ava is-sm ${m.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(m.key)};">
-                    ${renderAvatarInner(m.avatar_url || '', m.display_name || m.username, false, Boolean(m.online))}
+                    ${renderAvatarInner(m.avatar_url || '', m.display_name || m.username, false, Boolean(m.online), false)}
                   </div>
                   <div class="zy-gd-member-info">
                     <div class="zy-gd-member-name">${esc(m.display_name || m.username)}${m.role === 'client' && m.chat_id ? ` <span style="font-size:11px;font-weight:700;color:#2563eb;font-family:monospace;">(ID: ${esc(m.chat_id)})</span>` : ''}</div>
-                    <div class="zy-gd-member-sub">${m.role === 'agent' ? 'Group Admin (Agent)' : (m.online ? 'Client · Online' : 'Client')}</div>
+                    <div class="zy-gd-member-sub">${m.role === 'agent' ? (isCh ? 'Channel Admin (Agent)' : 'Group Admin (Agent)') : (m.online ? 'Client · Online' : 'Client')}</div>
                   </div>
                   ${isAdmin && m.role === 'client'
                     ? `<button type="button" class="zy-gd-remove-btn" data-remove-cid="${m.id}" title="Remove client"><i class="fas fa-user-minus"></i></button>`
@@ -2204,13 +2664,13 @@
             <div class="zy-gd-section zy-gd-danger">
               ${state.confirmDeleteGroup ? `
                 <div class="zy-gd-confirm-box">
-                  <div class="zy-gd-confirm-txt">Delete this group and all its messages permanently?</div>
+                  <div class="zy-gd-confirm-txt">Delete this ${isCh ? 'Announcement Channel' : 'group'} and all its messages permanently?</div>
                   <div class="zy-gd-confirm-btns">
                     <button type="button" class="zy-gd-btn-danger" id="zy-gd-del-confirm">Yes, Delete</button>
                     <button type="button" class="zy-gd-btn-cancel" id="zy-gd-del-cancel">Cancel</button>
                   </div>
                 </div>
-              ` : `<button type="button" class="zy-gd-btn-danger-outline" id="zy-gd-del-btn"><i class="fas fa-trash-can"></i> Delete Group</button>`}
+              ` : `<button type="button" class="zy-gd-btn-danger-outline" id="zy-gd-del-btn"><i class="fas fa-trash-can"></i> Delete ${isCh ? 'Announcement Channel' : 'Group'}</button>`}
             </div>
           ` : ''}
         </div>
@@ -2220,48 +2680,217 @@
 
   function renderCreateGroupModalHtml() {
     if (!state.createModalOpen || !state.me || state.me.role !== 'agent') return '';
+    const isCh = state.createModalMode === 'channel';
     const myClients = state.contacts
       .filter(c => c.role === 'client')
       .sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
+    const avaPreview = state.createModalAvatar || '';
+
     return `
       <div class="zy-chat-modal-backdrop" id="zy-cg-backdrop">
-        <div class="zy-chat-modal" role="dialog" aria-modal="true" aria-label="Create Client Group">
+        <div class="zy-chat-modal" role="dialog" aria-modal="true" aria-label="${isCh ? 'Create Announcement Channel' : 'Create Client Group'}">
           <div class="zy-chat-modal-head">
-            <span>New Client Group</span>
+            <span><i class="fas ${isCh ? 'fa-bullhorn' : 'fa-users'}" style="margin-right:6px;"></i>${isCh ? 'New Announcement Channel' : 'New Client Group'}</span>
             <button type="button" class="zy-chat-icon-btn" id="zy-cg-close" aria-label="Close"><i class="fas fa-times"></i></button>
           </div>
           <div class="zy-chat-modal-body">
-            <label class="zy-gd-label">Group Name</label>
-            <input type="text" id="zy-cg-title" class="zy-gd-input" maxlength="80" placeholder="e.g. VIP Rates & Updates">
-            <label class="zy-gd-label" style="margin-top:12px;">Description (Optional)</label>
-            <input type="text" id="zy-cg-desc" class="zy-gd-input" maxlength="240" placeholder="Announcements and support for my clients">
-            <label class="zy-gd-toggle-row" style="margin-top:12px;">
-              <div>
-                <div class="zy-gd-toggle-title">Only Admin Can Send</div>
-                <div class="zy-gd-toggle-sub">Announcement mode (you can change anytime)</div>
+            <div class="zy-cg-mode-switch" role="tablist">
+              <button type="button" class="zy-cg-mode-btn ${!isCh ? 'is-active' : ''}" data-cg-mode="group">
+                <i class="fas fa-users"></i> Client Group
+              </button>
+              <button type="button" class="zy-cg-mode-btn ${isCh ? 'is-active is-ch' : ''}" data-cg-mode="channel">
+                <i class="fas fa-bullhorn"></i> Announcement Channel
+              </button>
+            </div>
+
+            <div class="zy-gd-ava-row" style="margin-top:12px;">
+              <div class="zy-chat-ava is-gd-preview ${isCh ? 'is-channel' : 'is-group'} ${avaPreview ? 'has-img' : ''}" style="--ava-bg:${isCh ? '#b45309' : '#0f766e'};">
+                ${renderAvatarInner(avaPreview, isCh ? 'CH' : 'GR', !isCh, false, isCh)}
               </div>
-              <input type="checkbox" id="zy-cg-admin-only">
-            </label>
-            <div class="zy-gd-label" style="margin-top:14px;">Select Your Clients (${myClients.length} available)</div>
+              <div class="zy-gd-ava-actions">
+                <input type="file" id="zy-cg-ava-input" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none;">
+                <button type="button" class="zy-gd-btn-ava" id="zy-cg-ava-pick">
+                  <i class="fas fa-camera"></i>
+                  <span>${avaPreview ? 'Change Photo' : `Add ${isCh ? 'Channel' : 'Group'} Photo`}</span>
+                </button>
+                ${avaPreview ? `<button type="button" class="zy-gd-btn-ava-rm" id="zy-cg-ava-rm"><i class="fas fa-times"></i> Remove</button>` : ''}
+              </div>
+            </div>
+
+            <label class="zy-gd-label" style="margin-top:12px;">${isCh ? 'Announcement Channel Name' : 'Group Name'}</label>
+            <input type="text" id="zy-cg-title" class="zy-gd-input" maxlength="80" placeholder="${isCh ? 'e.g. Official Rates & Announcements' : 'e.g. VIP Clients Chat'}">
+            <label class="zy-gd-label" style="margin-top:10px;">Description (Optional)</label>
+            <input type="text" id="zy-cg-desc" class="zy-gd-input" maxlength="240" placeholder="${isCh ? 'Broadcast-only announcements for my clients' : 'Updates and anonymous ID chat for my clients'}">
+
+            ${isCh ? `
+              <div class="zy-gd-ch-notice" style="margin-top:12px;">
+                <div class="zy-gd-ch-notice-head"><i class="fas fa-bullhorn"></i> WhatsApp-Style Announcement Channel</div>
+                <div class="zy-gd-toggle-sub">Only you (Admin) can send messages. Members &amp; counts are strictly hidden from clients. Clients can react with emojis on every post.</div>
+              </div>
+            ` : `
+              <label class="zy-gd-toggle-row" style="margin-top:12px;">
+                <div>
+                  <div class="zy-gd-toggle-title">Only Admin Can Send</div>
+                  <div class="zy-gd-toggle-sub">OFF = Clients chat via anonymous ID · ON = Admin only (toggle anytime)</div>
+                </div>
+                <input type="checkbox" id="zy-cg-admin-only">
+              </label>
+            `}
+
+            <div class="zy-cg-clients-head" style="margin-top:14px;">
+              <div class="zy-gd-label" style="margin:0;">Select Your Clients (${myClients.length} available)</div>
+              ${myClients.length ? `<button type="button" class="zy-cg-selall-btn" id="zy-cg-sel-all">Select All</button>` : ''}
+            </div>
             ${myClients.length ? `
-              <div class="zy-cg-checklist">
+              <input type="text" id="zy-cg-client-search" class="zy-gd-input" placeholder="Search clients by name or ID..." value="${esc(state.createModalSearch)}" style="margin:6px 0 8px;">
+              <div class="zy-cg-checklist" id="zy-cg-checklist">
                 ${myClients.map(c => `
-                  <label class="zy-cg-check-item">
+                  <label class="zy-cg-check-item" data-cg-hay="${esc(`${c.display_name || ''} ${c.username || ''} ${c.chat_id || ''}`.toLowerCase())}">
                     <input type="checkbox" class="zy-cg-member-cb" value="${c.id}">
-                    <span class="zy-cg-check-name">${esc(c.display_name || c.username)}</span>
+                    <span class="zy-cg-check-name">${esc(c.display_name || c.username)}${c.chat_id ? ` <small style="color:#2563eb;font-family:monospace;">(ID: ${esc(c.chat_id)})</small>` : ''}</span>
                     <span class="zy-cg-check-sub">${c.online ? 'Online' : 'Offline'}</span>
                   </label>
                 `).join('')}
               </div>
-            ` : `<div class="zy-gd-muted" style="padding:12px 0;">You do not have any assigned clients yet. Add clients first to create a group.</div>`}
+            ` : `<div class="zy-gd-muted" style="padding:12px 0;">You do not have any assigned clients yet. Add clients first to create a ${isCh ? 'channel' : 'group'}.</div>`}
           </div>
           <div class="zy-chat-modal-foot">
             <button type="button" class="zy-gd-btn-cancel" id="zy-cg-cancel">Cancel</button>
-            <button type="button" class="zy-gd-btn-primary" id="zy-cg-submit" ${!myClients.length ? 'disabled' : ''}>Create Group</button>
+            <button type="button" class="zy-gd-btn-primary" id="zy-cg-submit" ${!myClients.length ? 'disabled' : ''}>
+              ${isCh ? 'Create Announcement Channel' : 'Create Group'}
+            </button>
           </div>
         </div>
       </div>
     `;
+  }
+
+  function renderSeenModalHtml() {
+    const sm = state.seenModal;
+    if (!sm) return '';
+    const d = sm.data;
+    return `
+      <div class="zy-chat-modal-backdrop" id="zy-seen-backdrop">
+        <div class="zy-chat-modal zy-chat-seen-modal" role="dialog" aria-modal="true" aria-label="Message Seen Info">
+          <div class="zy-chat-modal-head">
+            <span><i class="fas fa-eye" style="margin-right:6px;color:#0ea5e9;"></i>Message Seen Info</span>
+            <button type="button" class="zy-chat-icon-btn" id="zy-seen-close" aria-label="Close"><i class="fas fa-times"></i></button>
+          </div>
+          <div class="zy-chat-modal-body">
+            ${sm.loading ? `
+              <div class="zy-seen-loading"><i class="fas fa-spinner fa-spin"></i> Loading member read status...</div>
+            ` : sm.error ? `
+              <div class="zy-seen-error"><i class="fas fa-circle-exclamation"></i> ${esc(sm.error)}</div>
+            ` : d ? `
+              <div class="zy-seen-summary-grid">
+                <div class="zy-seen-stat is-total">
+                  <div class="zy-seen-stat-val">${Number(d.total_members || 0)}</div>
+                  <div class="zy-seen-stat-lbl">Total Clients</div>
+                </div>
+                <div class="zy-seen-stat is-seen">
+                  <div class="zy-seen-stat-val">${Number(d.seen_count || 0)}</div>
+                  <div class="zy-seen-stat-lbl">Seen</div>
+                </div>
+                <div class="zy-seen-stat is-unseen">
+                  <div class="zy-seen-stat-val">${Number(d.unseen_count || 0)}</div>
+                  <div class="zy-seen-stat-lbl">Not Seen Yet</div>
+                </div>
+              </div>
+
+              <div class="zy-seen-sec">
+                <div class="zy-seen-sec-head is-seen">
+                  <i class="fas fa-check-double"></i> Seen By (${(d.seen || []).length})
+                </div>
+                ${(d.seen && d.seen.length) ? `
+                  <div class="zy-seen-list">
+                    ${d.seen.map(u => `
+                      <div class="zy-seen-row">
+                        <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
+                          ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
+                        </div>
+                        <div class="zy-seen-info">
+                          <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
+                          <div class="zy-seen-sub">${u.seen_at ? `Seen ${esc(formatInboxTime(u.seen_at))} · ${esc(formatTime(u.seen_at))}` : 'Seen'}</div>
+                        </div>
+                        <span class="zy-seen-tick is-ok"><i class="fas fa-check-double"></i></span>
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : `<div class="zy-gd-muted" style="padding:8px 2px;">No members have seen this message yet.</div>`}
+              </div>
+
+              <div class="zy-seen-sec">
+                <div class="zy-seen-sec-head is-unseen">
+                  <i class="far fa-clock"></i> Not Seen Yet (${(d.unseen || []).length})
+                </div>
+                ${(d.unseen && d.unseen.length) ? `
+                  <div class="zy-seen-list">
+                    ${d.unseen.map(u => `
+                      <div class="zy-seen-row">
+                        <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
+                          ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
+                        </div>
+                        <div class="zy-seen-info">
+                          <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
+                          <div class="zy-seen-sub">${u.online ? 'Online · Unread' : 'Offline · Unread'}</div>
+                        </div>
+                        <span class="zy-seen-tick is-wait"><i class="far fa-clock"></i></span>
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : `<div class="zy-gd-muted" style="padding:8px 2px;">All members have seen this message!</div>`}
+              </div>
+
+              ${Array.isArray(d.reactions_detail) && d.reactions_detail.length ? `
+                <div class="zy-seen-sec">
+                  <div class="zy-seen-sec-head">
+                    <i class="far fa-face-smile"></i> Reactions (${d.reactions_detail.length})
+                  </div>
+                  <div class="zy-seen-list">
+                    ${d.reactions_detail.map(r => `
+                      <div class="zy-seen-row">
+                        <div class="zy-seen-info">
+                          <div class="zy-seen-name">${esc(r.display_name || r.username)}${r.chat_id ? ` <span class="zy-seen-id">ID: ${esc(r.chat_id)}</span>` : ''}</div>
+                          <div class="zy-seen-sub">${r.role === 'agent' ? 'Admin' : 'Client'}</div>
+                        </div>
+                        <span class="zy-seen-react-em">${esc(r.emoji)}</span>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              ` : ''}
+            ` : ''}
+          </div>
+          <div class="zy-chat-modal-foot">
+            <button type="button" class="zy-gd-btn-primary" id="zy-seen-ok">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSeenModalOverlay() {
+    let host = document.getElementById('zy-seen-modal-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'zy-seen-modal-host';
+      document.body.appendChild(host);
+    }
+    if (!state.seenModal) {
+      host.innerHTML = '';
+      return;
+    }
+    host.innerHTML = renderSeenModalHtml();
+    const closeBtn = document.getElementById('zy-seen-close');
+    const okBtn = document.getElementById('zy-seen-ok');
+    const bd = document.getElementById('zy-seen-backdrop');
+    if (closeBtn) closeBtn.addEventListener('click', closeMessageSeenModal);
+    if (okBtn) okBtn.addEventListener('click', closeMessageSeenModal);
+    if (bd) {
+      bd.addEventListener('click', (e) => {
+        if (e.target === bd) closeMessageSeenModal();
+      });
+    }
   }
 
   function renderThreadArea(scrollBottom = false) {
@@ -2273,8 +2902,8 @@
       const roleHint = state.me && state.me.role === 'owner'
         ? 'Select any Agent from the left to chat directly 1-to-1.'
         : (state.me && state.me.role === 'agent'
-            ? 'Chat privately with the Owner, message your Clients 1-to-1, or create a private Client Group.'
-            : 'Select your Agent or a joined Group from the left to start chatting.');
+            ? 'Chat privately with the Owner, message your Clients 1-to-1, or create a Client Group or Announcement Channel.'
+            : 'Select your Agent, a joined Group, or an Announcement Channel from the left.');
       rightEl.innerHTML = `
         <div class="zy-chat-welcome">
           <div class="zy-chat-welcome-ico"><i class="fab fa-whatsapp"></i></div>
@@ -2285,12 +2914,25 @@
       return;
     }
 
-    const isGroup = conv.type === 'agent_group';
-    const hideGroupDrawer = Boolean(isGroup && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
-    const isOnline = !isGroup && Boolean(conv.peer && conv.peer.online);
+    const isCh = isChannelConv(conv);
+    const isGrp = isGroupConv(conv);
+    const isMulti = isCh || isGrp;
+    const hideGroupDrawer = Boolean(isMulti && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
+    const isOnline = !isMulti && Boolean(conv.peer && conv.peer.online);
     const pinned = conv.pinned_message;
-    const peerAvatar = !isGroup && conv.peer ? (conv.peer.avatar_url || '') : '';
+    const headAvaUrl = isMulti ? (conv.avatar_url || '') : (conv.peer ? (conv.peer.avatar_url || '') : '');
+    const headAvaBg = isCh ? '#b45309' : (isGrp ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id));
     state.moreMenuOpen = false;
+
+    const lockedBarText = (() => {
+      if (isCh || conv.lock_reason === 'announcement_channel') {
+        return 'Announcement Channel · Only Admin can post messages here. Tap any message to react with emojis.';
+      }
+      if (conv.lock_reason === 'scheduled_closed') {
+        return `Messaging is paused for quiet hours · Auto-opens in <strong data-zy-sched-countdown>${esc(formatCountdownHMS(getRemainingScheduleSeconds(conv)))}</strong> (${esc(formatTime12h(conv.schedule_state && conv.schedule_state.open_time))} PKT)`;
+      }
+      return 'Only your Agent (Group Admin) can send messages in this group. Tap any message to react.';
+    })();
 
     rightEl.innerHTML = `
       <div class="zy-chat-thread-col">
@@ -2299,12 +2941,13 @@
             <i class="fas fa-arrow-left"></i>
             <span class="zy-chat-back-txt">Chats</span>
           </button>
-          <div class="zy-chat-ava is-profile-ava ${isGroup ? 'is-group' : ''} ${peerAvatar ? 'has-img is-clickable' : ''}" id="zy-chat-head-ava" style="--ava-bg:${isGroup ? '#0f766e' : colorForKey(conv.peer ? conv.peer.key : conv.id)};" ${peerAvatar ? 'role="button" tabindex="0" title="View Profile Photo"' : ''}>
-            ${renderAvatarInner(peerAvatar, conv.title, isGroup, isOnline)}
+          <div class="zy-chat-ava is-profile-ava ${isCh ? 'is-channel' : (isGrp ? 'is-group' : '')} ${headAvaUrl ? 'has-img is-clickable' : ''}" id="zy-chat-head-ava" style="--ava-bg:${headAvaBg};" ${headAvaUrl ? 'role="button" tabindex="0" title="View Photo"' : ''}>
+            ${renderAvatarInner(headAvaUrl, conv.title, isGrp, isOnline, isCh)}
           </div>
-          <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${(isGroup && !hideGroupDrawer) ? 'role="button" tabindex="0"' : ''}>
+          <div class="zy-chat-thread-meta" id="zy-chat-head-meta" ${(isMulti && !hideGroupDrawer) ? 'role="button" tabindex="0"' : ''}>
             <div class="zy-chat-thread-name-row">
               <span class="zy-chat-thread-name">${esc(conv.title)}</span>
+              ${isCh ? `<span class="zy-chat-ch-badge"><i class="fas fa-bullhorn"></i> Announcement Channel</span>` : ''}
             </div>
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
@@ -2317,8 +2960,8 @@
               <i class="fas fa-eraser"></i>
               <span>Clear</span>
             </button>
-            ${(isGroup && !hideGroupDrawer) ? `
-              <button type="button" class="zy-chat-head-btn" id="zy-chat-group-info-btn" title="${conv.can_manage ? 'Group Admin Settings' : 'Group Info'}">
+            ${(isMulti && !hideGroupDrawer) ? `
+              <button type="button" class="zy-chat-head-btn" id="zy-chat-group-info-btn" title="${conv.can_manage ? (isCh ? 'Channel Settings' : 'Group Admin Settings') : 'Info'}">
                 <i class="fas ${conv.can_manage ? 'fa-sliders' : 'fa-circle-info'}"></i>
                 <span>${conv.can_manage ? 'Manage' : 'Info'}</span>
               </button>
@@ -2341,10 +2984,10 @@
                 <i class="fas fa-eraser"></i>
                 <span>Clear Chat</span>
               </button>
-              ${(isGroup && !hideGroupDrawer) ? `
+              ${(isMulti && !hideGroupDrawer) ? `
                 <button type="button" class="zy-chat-more-item" id="zy-chat-mob-group-info">
                   <i class="fas ${conv.can_manage ? 'fa-sliders' : 'fa-circle-info'}"></i>
-                  <span>${conv.can_manage ? 'Group Manage' : 'Group Info'}</span>
+                  <span>${conv.can_manage ? (isCh ? 'Channel Settings' : 'Group Manage') : 'Info'}</span>
                 </button>
               ` : ''}
               <button type="button" class="zy-chat-more-item" id="zy-chat-mob-exit-panel">
@@ -2376,7 +3019,7 @@
           </div>
         </div>
 
-        ${(isGroup && conv.schedule_state && conv.schedule_state.enabled && conv.schedule_state.is_closed) ? `
+        ${(isGrp && conv.schedule_state && conv.schedule_state.enabled && conv.schedule_state.is_closed) ? `
           <div class="zy-chat-night-banner" id="zy-chat-night-banner">
             <div class="zy-chat-night-ico"><i class="fas fa-moon"></i></div>
             <div class="zy-chat-night-body">
@@ -2418,18 +3061,14 @@
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-emoji-toggle" title="Emoji" aria-label="Emoji"><i class="far fa-face-smile"></i></button>
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-img-btn" title="Send Photo" aria-label="Send Photo"><i class="far fa-image"></i></button>
               <input type="file" id="zy-chat-file-input" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none;">
-              <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" placeholder="Type a message..."></textarea>
+              <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" placeholder="${isCh ? 'Post an announcement to all clients...' : 'Type a message...'}"></textarea>
               <button type="button" class="zy-chat-send-btn" id="zy-chat-send" title="Send" aria-label="Send"><i class="fas fa-paper-plane"></i></button>
             </div>
           </div>
         ` : `
-          <div class="zy-chat-locked-bar ${conv.lock_reason === 'scheduled_closed' ? 'is-night-lock' : ''}">
-            <i class="fas ${conv.lock_reason === 'scheduled_closed' ? 'fa-moon' : 'fa-lock'}"></i>
-            <span>${
-              conv.lock_reason === 'scheduled_closed'
-                ? `Messaging is paused for quiet hours · Auto-opens in <strong data-zy-sched-countdown>${esc(formatCountdownHMS(getRemainingScheduleSeconds(conv)))}</strong> (${esc(formatTime12h(conv.schedule_state && conv.schedule_state.open_time))} PKT)`
-                : 'Only your Agent (Group Admin) can send messages in this group.'
-            }</span>
+          <div class="zy-chat-locked-bar ${isCh ? 'is-channel-lock' : (conv.lock_reason === 'scheduled_closed' ? 'is-night-lock' : '')}">
+            <i class="fas ${isCh ? 'fa-bullhorn' : (conv.lock_reason === 'scheduled_closed' ? 'fa-moon' : 'fa-lock')}"></i>
+            <span>${lockedBarText}</span>
           </div>
         `}
       </div>
@@ -2460,22 +3099,23 @@
     const infoBtn = document.getElementById('zy-chat-group-info-btn');
     const headMeta = document.getElementById('zy-chat-head-meta');
     const toggleDrawer = () => {
-      if (!isGroup || hideGroupDrawer) return;
+      if (!isMulti || hideGroupDrawer) return;
       state.drawerOpen = !state.drawerOpen;
       state.confirmDeleteGroup = false;
       renderThreadArea(false);
     };
     if (infoBtn) infoBtn.addEventListener('click', toggleDrawer);
-    if (headMeta && isGroup) headMeta.addEventListener('click', toggleDrawer);
+    if (headMeta && isMulti && !hideGroupDrawer) headMeta.addEventListener('click', toggleDrawer);
     const headAva = document.getElementById('zy-chat-head-ava');
-    if (headAva && peerAvatar) {
-      headAva.addEventListener('click', () => openImageLightbox(peerAvatar, '', conv.title, 'Profile Photo'));
+    if (headAva && headAvaUrl) {
+      headAva.addEventListener('click', () => openImageLightbox(headAvaUrl, '', conv.title, isCh ? 'Channel Photo' : (isGrp ? 'Group Photo' : 'Profile Photo')));
     }
 
     const selectBtn = document.getElementById('zy-chat-select-btn');
     const toggleSelectMode = () => {
       state.selectMode = !state.selectMode;
       state.selectedMsgIds.clear();
+      state.reactionPickerMsgId = null;
       renderThreadArea(false);
     };
     if (selectBtn) selectBtn.addEventListener('click', toggleSelectMode);
@@ -2598,7 +3238,6 @@
     const sendBtn = document.getElementById('zy-chat-send');
     if (inp) {
       inp.addEventListener('focus', () => {
-        // Keep header pinned at top when mobile virtual keyboard opens
         setTimeout(() => {
           syncChatViewport();
           const feed = document.getElementById('zy-chat-feed');
@@ -2637,6 +3276,18 @@
     // Wire drawer controls
     const gdClose = document.getElementById('zy-gd-close');
     if (gdClose) gdClose.addEventListener('click', () => { state.drawerOpen = false; renderThreadArea(false); });
+    const gdAvaPick = document.getElementById('zy-gd-ava-pick');
+    const gdAvaInput = document.getElementById('zy-gd-ava-input');
+    if (gdAvaPick && gdAvaInput) {
+      gdAvaPick.addEventListener('click', () => gdAvaInput.click());
+      gdAvaInput.addEventListener('change', () => {
+        const f = gdAvaInput.files && gdAvaInput.files[0];
+        gdAvaInput.value = '';
+        if (f) uploadGroupAvatar(conv.id, f);
+      });
+    }
+    const gdAvaRm = document.getElementById('zy-gd-ava-rm');
+    if (gdAvaRm) gdAvaRm.addEventListener('click', () => removeGroupAvatar(conv.id));
     const gdSave = document.getElementById('zy-gd-save-meta');
     if (gdSave) gdSave.addEventListener('click', () => saveGroupMeta(conv.id));
     const gdAdminOnly = document.getElementById('zy-gd-admin-only');
@@ -2659,6 +3310,17 @@
         updateGroupMembers(conv.id, [cid], []);
       });
     }
+    const gdAddAllBtn = document.getElementById('zy-gd-add-all-btn');
+    if (gdAddAllBtn) {
+      gdAddAllBtn.addEventListener('click', () => {
+        const memberKeys = new Set(conv.participants || []);
+        const ids = state.contacts
+          .filter(c => c.role === 'client' && !memberKeys.has(c.key))
+          .map(c => Number(c.id))
+          .filter(n => n > 0);
+        if (ids.length) updateGroupMembers(conv.id, ids, []);
+      });
+    }
     rightEl.querySelectorAll('[data-remove-cid]').forEach(btn => {
       btn.addEventListener('click', () => updateGroupMembers(conv.id, [], [Number(btn.dataset.removeCid)]));
     });
@@ -2675,6 +3337,7 @@
     if (!root) { state.mounted = false; return; }
     const isAgent = state.me && state.me.role === 'agent';
     const isProfileOpen = Boolean(state.mobileShowThread && state.activeConvId);
+    const unreadChatsCount = state.conversations.filter(c => Number(c.unread_count || 0) > 0).length;
 
     root.innerHTML = `
       <div class="zy-chat-shell ${isProfileOpen ? 'is-mobile-thread is-profile-open' : ''}" id="zy-chat-shell">
@@ -2688,7 +3351,12 @@
               <span class="zy-chat-left-title">Live Chat</span>
               <span class="zy-chat-conn ${state.wsConnected ? 'is-live' : 'is-warn'}" id="zy-chat-conn-status">${state.wsConnected ? 'Live' : 'Reconnecting...'}</span>
             </div>
-            ${isAgent ? `<button type="button" class="zy-chat-new-grp-btn" id="zy-chat-new-group"><i class="fas fa-users-line"></i> New Group</button>` : ''}
+            ${isAgent ? `
+              <div class="zy-chat-head-create-btns">
+                <button type="button" class="zy-chat-new-grp-btn" id="zy-chat-new-group" title="Create Client Group"><i class="fas fa-users-line"></i> Group</button>
+                <button type="button" class="zy-chat-new-grp-btn is-ch" id="zy-chat-new-channel" title="Create Announcement Channel"><i class="fas fa-bullhorn"></i> Channel</button>
+              </div>
+            ` : ''}
           </div>
           <div class="zy-chat-search-wrap">
             <i class="fas fa-magnifying-glass"></i>
@@ -2698,10 +3366,17 @@
             <div class="zy-chat-tabs" role="tablist">
               ${[
                 ['all', 'All'],
-                ['owner', 'Owner'],
+                ['unread', 'Unread'],
                 ['clients', 'Clients'],
-                ['groups', 'Groups']
-              ].map(([k, lbl]) => `<button type="button" class="zy-chat-tab ${state.filterTab === k ? 'is-active' : ''}" data-ftab="${k}">${lbl}</button>`).join('')}
+                ['groups', 'Groups'],
+                ['channels', 'Channels'],
+                ['owner', 'Owner']
+              ].map(([k, lbl]) => `
+                <button type="button" class="zy-chat-tab ${state.filterTab === k ? 'is-active' : ''}" data-ftab="${k}">
+                  <span>${lbl}</span>
+                  ${k === 'unread' ? `<span class="zy-chat-tab-cnt" id="zy-chat-unread-tab-cnt" style="display:${unreadChatsCount > 0 ? 'inline-flex' : 'none'};">${unreadChatsCount > 99 ? '99+' : unreadChatsCount}</span>` : ''}
+                </button>
+              `).join('')}
             </div>
           ` : ''}
           <div class="zy-chat-inbox-list" id="zy-chat-inbox-list"></div>
@@ -2735,17 +3410,35 @@
     const newGrpBtn = document.getElementById('zy-chat-new-group');
     if (newGrpBtn) {
       newGrpBtn.addEventListener('click', () => {
+        state.createModalMode = 'group';
+        state.createModalAvatar = '';
+        state.createModalSearch = '';
+        state.createModalOpen = true;
+        renderWorkspace();
+      });
+    }
+    const newChBtn = document.getElementById('zy-chat-new-channel');
+    if (newChBtn) {
+      newChBtn.addEventListener('click', () => {
+        state.createModalMode = 'channel';
+        state.createModalAvatar = '';
+        state.createModalSearch = '';
         state.createModalOpen = true;
         renderWorkspace();
       });
     }
 
-    // Wire Create Group Modal
+    // Wire Create Group / Announcement Channel Modal
     const cgClose = document.getElementById('zy-cg-close');
     const cgCancel = document.getElementById('zy-cg-cancel');
     const cgBackdrop = document.getElementById('zy-cg-backdrop');
     const cgSubmit = document.getElementById('zy-cg-submit');
-    const closeCreate = () => { state.createModalOpen = false; renderWorkspace(); };
+    const closeCreate = () => {
+      state.createModalOpen = false;
+      state.createModalAvatar = '';
+      state.createModalSearch = '';
+      renderWorkspace();
+    };
     if (cgClose) cgClose.addEventListener('click', closeCreate);
     if (cgCancel) cgCancel.addEventListener('click', closeCreate);
     if (cgBackdrop) {
@@ -2755,13 +3448,69 @@
         }
       });
     }
+    root.querySelectorAll('[data-cg-mode]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const nextMode = btn.dataset.cgMode === 'channel' ? 'channel' : 'group';
+        if (state.createModalMode !== nextMode) {
+          state.createModalMode = nextMode;
+          renderWorkspace();
+        }
+      });
+    });
+    const cgAvaPick = document.getElementById('zy-cg-ava-pick');
+    const cgAvaInput = document.getElementById('zy-cg-ava-input');
+    if (cgAvaPick && cgAvaInput) {
+      cgAvaPick.addEventListener('click', () => cgAvaInput.click());
+      cgAvaInput.addEventListener('change', async () => {
+        const f = cgAvaInput.files && cgAvaInput.files[0];
+        cgAvaInput.value = '';
+        if (!f) return;
+        try {
+          state.createModalAvatar = await fileToAvatarDataUri(f);
+          renderWorkspace();
+        } catch (err) {
+          if (typeof toast === 'function') toast(err.message || 'Invalid image', 'error');
+        }
+      });
+    }
+    const cgAvaRm = document.getElementById('zy-cg-ava-rm');
+    if (cgAvaRm) {
+      cgAvaRm.addEventListener('click', () => {
+        state.createModalAvatar = '';
+        renderWorkspace();
+      });
+    }
+    const cgClientSearch = document.getElementById('zy-cg-client-search');
+    if (cgClientSearch) {
+      cgClientSearch.addEventListener('input', (e) => {
+        const q = String(e.target.value || '').trim().toLowerCase();
+        state.createModalSearch = e.target.value || '';
+        document.querySelectorAll('#zy-cg-checklist .zy-cg-check-item').forEach(row => {
+          const hay = row.dataset.cgHay || '';
+          row.style.display = !q || hay.includes(q) ? '' : 'none';
+        });
+      });
+    }
+    const cgSelAll = document.getElementById('zy-cg-sel-all');
+    if (cgSelAll) {
+      cgSelAll.addEventListener('click', () => {
+        const visibleCbs = Array.from(document.querySelectorAll('#zy-cg-checklist .zy-cg-check-item'))
+          .filter(r => r.style.display !== 'none')
+          .map(r => r.querySelector('.zy-cg-member-cb'))
+          .filter(Boolean);
+        const allChecked = visibleCbs.length > 0 && visibleCbs.every(cb => cb.checked);
+        visibleCbs.forEach(cb => { cb.checked = !allChecked; });
+        cgSelAll.textContent = allChecked ? 'Select All' : 'Clear All';
+      });
+    }
     if (cgSubmit) cgSubmit.addEventListener('click', createGroupFromModal);
 
     renderInboxList();
     renderThreadArea(true);
+    renderSeenModalOverlay();
   }
 
-  // Close emoji popover & mobile more menu on outside click
+  // Close emoji popover, reaction picker & mobile more menu on outside click
   document.addEventListener('click', (e) => {
     if (state.emojiOpen) {
       const pop = document.getElementById('zy-chat-emoji-pop');
@@ -2769,6 +3518,15 @@
       if (pop && !pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
         state.emojiOpen = false;
         renderEmojiPopover();
+      }
+    }
+    if (state.reactionPickerMsgId != null) {
+      if (!e.target.closest('.zy-chat-react-picker') && !e.target.closest('[data-act="react"]')) {
+        state.reactionPickerMsgId = null;
+        const feed = document.getElementById('zy-chat-feed');
+        const prevScroll = feed ? feed.scrollTop : null;
+        renderMessagesPane(false);
+        if (feed && prevScroll != null) feed.scrollTop = prevScroll;
       }
     }
     if (state.moreMenuOpen) {
@@ -2876,7 +3634,10 @@
     unmount() {
       state.mounted = false;
       state.emojiOpen = false;
+      state.reactionPickerMsgId = null;
+      state.seenModal = null;
       state.moreMenuOpen = false;
+      renderSeenModalOverlay();
       unbindViewportPin();
       try {
         document.documentElement.classList.remove('zy-is-live-chat-html');

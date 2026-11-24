@@ -4063,20 +4063,26 @@ window.zyCopyTextSafe = function (text, label) {
 
 /* ═══ CDR 2 (MONTHLY ROUTE) DAILY 12:00 PM PKT UPLOAD BANNER ═══ */
 window._zyCdr2NoonTimer = window._zyCdr2NoonTimer || null;
+window._zyCdr2StatusPoller = window._zyCdr2StatusPoller || null;
 
 window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
-  const host = document.getElementById(hostId || 'cdr2-daily-banner');
+  const targetHostId = hostId || 'cdr2-daily-banner';
+  const host = document.getElementById(targetHostId);
   if (!host || !statusObj) return;
   if (window._zyCdr2NoonTimer) {
     clearInterval(window._zyCdr2NoonTimer);
     window._zyCdr2NoonTimer = null;
   }
+  if (window._zyCdr2StatusPoller) {
+    clearInterval(window._zyCdr2StatusPoller);
+    window._zyCdr2StatusPoller = null;
+  }
 
   const isUr = Boolean(window.HumexI18n && typeof window.HumexI18n.getLanguage === 'function' && window.HumexI18n.getLanguage() === 'roman_ur');
-  const uploaded = Boolean(statusObj.yesterday_uploaded);
-  const yDate = statusObj.yesterday_pkt || '';
+  const uploaded = Boolean(statusObj.yesterday_uploaded || statusObj.file_updated);
+  const yDate = statusObj.target_report_date || statusObj.yesterday_pkt || '';
   const latestDate = statusObj.latest_uploaded_date || '';
-  const nextIso = statusObj.next_upload_iso || '';
+  const nextIso = uploaded ? '' : (statusObj.next_upload_iso || '');
 
   const formatHMS = (secs) => {
     const s = Math.max(0, Math.floor(secs));
@@ -4087,35 +4093,53 @@ window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
     return `${p(h)}:${p(m)}:${p(r)}`;
   };
 
+  const formatPktTime = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      const pkt = new Date(d.getTime() + 5 * 60 * 60 * 1000);
+      const h24 = pkt.getUTCHours();
+      const mm = String(pkt.getUTCMinutes()).padStart(2, '0');
+      const ampm = h24 >= 12 ? 'PM' : 'AM';
+      const h12 = h24 % 12 || 12;
+      return `${h12}:${mm} ${ampm} PKT`;
+    } catch (_) {
+      return '';
+    }
+  };
+
   const getSecsLeft = () => {
-    if (!nextIso) return 0;
+    if (uploaded || !nextIso) return 0;
     return Math.max(0, Math.ceil((new Date(nextIso).getTime() - Date.now()) / 1000));
   };
 
-  const secsNow = getSecsLeft();
+  const secsNow = uploaded ? 0 : getSecsLeft();
+  const uploadedTimePkt = uploaded ? formatPktTime(statusObj.uploaded_at) : '';
+
   const titleText = uploaded
-    ? (isUr ? 'Kal Wali Daily Report Update Ho Chuki Hai' : 'Yesterday’s Daily Report Is Updated')
+    ? (isUr ? 'File Updated — Daily Report Upload Ho Chuki Hai' : 'File Updated')
     : (isUr ? 'Daily Report Upload Timing: 12:00 PM PKT' : 'Daily Report Upload Schedule: 12:00 PM PKT');
 
   const descText = uploaded
     ? (isUr
-        ? `Kal (${zyEsc(yDate)}) ki report upload ho chuki hai. Rozana pichle din ki report 12:00 PM PKT tak update hoti hai.`
-        : `Yesterday’s (${zyEsc(yDate)}) daily report is live. New daily reports are uploaded every day around 12:00 PM PKT.`)
+        ? `Pichli date (${zyEsc(yDate)}) ki file upload ho chuki hai${uploadedTimePkt ? ` (${zyEsc(uploadedTimePkt)})` : ''}. Agli date subah 5:00 AM PKT par update hogi.`
+        : `Previous day’s (${zyEsc(yDate)}) file is updated and live${uploadedTimePkt ? ` (uploaded at ${zyEsc(uploadedTimePkt)})` : ''}. Next daily cycle begins at 5:00 AM PKT.`)
     : (isUr
-        ? `Kal (${zyEsc(yDate)}) wali aap ki report abhi 12:00 PM PKT tak upload ho jaye gi — thora intezar karein, update hotay hi yahan show ho jaye gi.`
-        : `Yesterday’s (${zyEsc(yDate)}) report is scheduled for 12:00 PM PKT and will appear automatically as soon as uploaded.`);
+        ? `Pichli date (${zyEsc(yDate)}) ki file subah 5:00 AM se 12:00 PM PKT ke darmiyan kisi bhi waqt upload ho sakti hai — upload hotay hi timer khatam ho kar "File Updated" show ho jaye ga.`
+        : `Previous day’s (${zyEsc(yDate)}) file can arrive anytime between 5:00 AM and 12:00 PM PKT — as soon as uploaded, the timer stops and switches to "File Updated".`);
 
   const badgeHtml = uploaded
-    ? `<span class="zy-cdr2-status-pill is-ready"><i class="fas fa-circle-check"></i> ${isUr ? 'Updated' : 'Updated'} · ${zyEsc(yDate)}</span>`
+    ? `<span class="zy-cdr2-status-pill is-ready"><i class="fas fa-circle-check"></i> File Updated · ${zyEsc(yDate)}${uploadedTimePkt ? ` · ${zyEsc(uploadedTimePkt)}` : ''}</span>`
     : (secsNow > 0
         ? `<span class="zy-cdr2-status-pill is-wait"><i class="far fa-clock"></i> ${isUr ? 'Upload mein waqt' : 'Next Upload'}: <strong id="zy-cdr2-noon-cd">${formatHMS(secsNow)}</strong></span>`
         : `<span class="zy-cdr2-status-pill is-pending"><i class="fas fa-hourglass-half"></i> ${isUr ? 'Upload ka intezar' : 'Awaiting 12:00 PM Upload'}</span>`);
 
-  const mc = (status && status.monthly_cycle) ? status.monthly_cycle : null;
+  const mc = (statusObj && statusObj.monthly_cycle) ? statusObj.monthly_cycle : null;
   const mcHoldDays = mc && Number.isFinite(Number(mc.hold_days)) ? Number(mc.hold_days) : 5;
   const mcCycleDays = mc && Number.isFinite(Number(mc.cycle_days)) ? Number(mc.cycle_days) : 30;
   const mcTag = mcHoldDays === 5 ? 'Monthly (30/5) {W}' : `Monthly (${mcCycleDays}/${mcHoldDays}) {W}`;
-  const completedCycles = (status && Array.isArray(status.completed_cycles)) ? status.completed_cycles : [];
+  const completedCycles = (statusObj && Array.isArray(statusObj.completed_cycles)) ? statusObj.completed_cycles : [];
   const mcStripHtml = mc
     ? `<div class="zy-cdr2-notice-meta" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
          <span><i class="fas fa-rotate"></i> <strong>Cycle #${mc.cycle_number || 1}:</strong> ${zyEsc(mc.start_date)} → ${zyEsc(mc.end_date)}</span>
@@ -4173,12 +4197,35 @@ window.zyRenderCdr2DailyBanner = function (hostId, statusObj) {
         return;
       }
       const rem = getSecsLeft();
-      cdEl.textContent = formatHMS(rem);
       if (rem <= 0) {
         clearInterval(window._zyCdr2NoonTimer);
         window._zyCdr2NoonTimer = null;
+        const pill = cdEl.closest('.zy-cdr2-status-pill');
+        if (pill) {
+          pill.className = 'zy-cdr2-status-pill is-pending';
+          pill.innerHTML = `<i class="fas fa-hourglass-half"></i> ${isUr ? 'Upload ka intezar' : 'Awaiting 12:00 PM Upload'}`;
+        }
+        return;
       }
+      cdEl.textContent = formatHMS(rem);
     }, 1000);
+  }
+
+  // While waiting for the daily file, check every 45s so early uploads (e.g. 10 AM / 11 AM PKT) immediately stop the timer & switch to "File Updated"
+  if (!uploaded && typeof window.apiFetch === 'function') {
+    window._zyCdr2StatusPoller = setInterval(async () => {
+      if (!document.getElementById(targetHostId)) {
+        clearInterval(window._zyCdr2StatusPoller);
+        window._zyCdr2StatusPoller = null;
+        return;
+      }
+      try {
+        const fresh = await window.apiFetch('/api/cdr2/status', { silent: true });
+        if (fresh && (fresh.yesterday_uploaded || fresh.file_updated)) {
+          window.zyRenderCdr2DailyBanner(targetHostId, fresh);
+        }
+      } catch (_) {}
+    }, 45000);
   }
 };
 

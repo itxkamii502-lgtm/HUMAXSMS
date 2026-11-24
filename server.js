@@ -19894,42 +19894,85 @@ function getPktDateYmd(offsetDays = 0, nowDate = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
+function getUtcDateYmd(offsetDays = 0, nowDate = new Date()) {
+  const d = new Date(nowDate.getTime() + offsetDays * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
 function getCdr2UploadStatus(nowDate = new Date()) {
-  const todayPkt = getPktDateYmd(0, nowDate);
-  const yesterdayPkt = getPktDateYmd(-1, nowDate);
+  // Whitenoise daily sheet date flips at 05:00 AM PKT (= 00:00 UTC).
+  // Between 05:00 AM PKT and 12:00 PM PKT (00:00–07:00 UTC), yesterday's (previous UTC date) sheet is expected.
+  // The moment that sheet is uploaded (even early at 10 AM or 11 AM PKT), the countdown stops immediately and shows "File Updated".
+  const todayCycleYmd = getUtcDateYmd(0, nowDate);
+  const yesterdayCycleYmd = getUtcDateYmd(-1, nowDate);
   const stats = readDb('whitenoise_daily_stats') || [];
+  const batches = readDb('whitenoise_upload_batches') || [];
+
   let latestDate = '';
   let yesterdayUploaded = false;
   let yesterdaySmsTotal = 0;
+  let uploadedAt = '';
+
   for (const row of stats) {
     if (!row || row.rolled_back) continue;
-    const dt = String(row.date || '').slice(0, 10);
+    const dt = String(row.date_ymd || row.date || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) continue;
     if (!latestDate || dt > latestDate) latestDate = dt;
-    if (dt === yesterdayPkt) {
+    if (dt === yesterdayCycleYmd) {
       yesterdayUploaded = true;
       yesterdaySmsTotal += Number(row.sms_count || 0);
+      const ts = String(row.updated_at || row.created_at || '');
+      if (ts && (!uploadedAt || ts > uploadedAt)) uploadedAt = ts;
+    } else if (dt > yesterdayCycleYmd) {
+      yesterdayUploaded = true;
+      const ts = String(row.updated_at || row.created_at || '');
+      if (ts && (!uploadedAt || ts > uploadedAt)) uploadedAt = ts;
     }
   }
-  const pktNow = new Date(nowDate.getTime() + PKT_OFFSET_MS_SHARED);
-  const nextNoonPktMs = Date.UTC(
-    pktNow.getUTCFullYear(),
-    pktNow.getUTCMonth(),
-    pktNow.getUTCDate(),
-    12, 0, 0
-  ) - PKT_OFFSET_MS_SHARED;
-  const secondsUntilNoon = Math.max(0, Math.floor((nextNoonPktMs - nowDate.getTime()) / 1000));
+
+  for (const b of batches) {
+    if (!b || b.rolled_back) continue;
+    const bMax = String(b.date_max || '').slice(0, 10);
+    const bDates = Array.isArray(b.distinct_dates)
+      ? b.distinct_dates.map(d => String(d || '').slice(0, 10)).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      : [];
+    if (/^\d{4}-\d{2}-\d{2}$/.test(bMax) && (!latestDate || bMax > latestDate)) {
+      latestDate = bMax;
+    }
+    const coversTarget =
+      bDates.some(d => d >= yesterdayCycleYmd) ||
+      (/^\d{4}-\d{2}-\d{2}$/.test(bMax) && bMax >= yesterdayCycleYmd);
+    if (coversTarget) {
+      yesterdayUploaded = true;
+      const ts = String(b.uploaded_at || '');
+      if (ts && (!uploadedAt || ts > uploadedAt)) uploadedAt = ts;
+    }
+  }
+
+  // 12:00 PM PKT on todayCycleYmd === 07:00:00 UTC on todayCycleYmd
+  const [cy, cm, cd] = todayCycleYmd.split('-').map(Number);
+  const noonDeadlineMs = Date.UTC(cy, cm - 1, cd, 7, 0, 0);
+  const rawSecondsUntilNoon = Math.max(0, Math.floor((noonDeadlineMs - nowDate.getTime()) / 1000));
+  const secondsUntilNoon = yesterdayUploaded ? 0 : rawSecondsUntilNoon;
+  const timerActive = !yesterdayUploaded && secondsUntilNoon > 0;
+
   return {
-    today_pkt: todayPkt,
-    yesterday_pkt: yesterdayPkt,
+    today_pkt: todayCycleYmd,
+    yesterday_pkt: yesterdayCycleYmd,
+    cycle_date: todayCycleYmd,
+    target_report_date: yesterdayCycleYmd,
     yesterday_uploaded: yesterdayUploaded,
+    file_updated: yesterdayUploaded,
+    timer_active: timerActive,
+    uploaded_at: uploadedAt || null,
     yesterday_sms_total: yesterdaySmsTotal,
     latest_uploaded_date: latestDate || null,
     upload_time_label: '12:00 PM PKT',
+    rollover_time_label: '5:00 AM PKT',
     upload_hour_pkt: 12,
-    next_upload_iso: new Date(nextNoonPktMs).toISOString(),
+    next_upload_iso: yesterdayUploaded ? null : new Date(noonDeadlineMs).toISOString(),
     seconds_until_noon: secondsUntilNoon,
-    is_past_noon_pkt: pktNow.getUTCHours() >= 12
+    is_past_noon_pkt: nowDate.getTime() >= noonDeadlineMs
   };
 }
 
@@ -22198,6 +22241,10 @@ function getAllowedChatContacts(actor) {
   return list;
 }
 
+function isAgentGroupOrChannel(conv) {
+  return Boolean(conv && (conv.type === 'agent_group' || conv.type === 'agent_channel'));
+}
+
 function canAccessConversation(actor, conv) {
   if (!actor || !conv || !Array.isArray(conv.participants)) return false;
   if (!conv.participants.includes(actor.key)) return false;
@@ -22205,8 +22252,8 @@ function canAccessConversation(actor, conv) {
   if (conv.type === 'owner_agent') {
     return actor.role === 'owner' || actor.role === 'agent';
   }
-  if (conv.type === 'agent_client' || conv.type === 'agent_group') {
-    if (actor.role === 'owner') return false; // Strict privacy wall: Owner NEVER accesses Agent-Client chats/groups
+  if (conv.type === 'agent_client' || isAgentGroupOrChannel(conv)) {
+    if (actor.role === 'owner') return false; // Strict privacy wall: Owner NEVER accesses Agent-Client chats/groups/channels
     if (actor.role === 'agent') return Number(conv.owner_agent_id) === actor.id;
     if (actor.role === 'client') return Boolean(actor.agent_id) && Number(conv.owner_agent_id) === Number(actor.agent_id);
   }
@@ -22233,12 +22280,16 @@ function getPresenceAudienceKeys(actor) {
   const keys = new Set();
   const contacts = getAllowedChatContacts(actor);
   contacts.forEach(c => keys.add(c.key));
-  // Also include fellow members of any accessible agent_group
+  // Only share group/channel member presence with the owning Agent (never peer-to-peer between clients)
   const convs = readDb('chat_conversations') || [];
   for (const conv of convs) {
-    if (conv.type === 'agent_group' && canAccessConversation(actor, conv)) {
-      for (const pk of conv.participants || []) {
-        if (pk !== actor.key) keys.add(pk);
+    if (isAgentGroupOrChannel(conv) && canAccessConversation(actor, conv)) {
+      if (actor.role === 'agent') {
+        for (const pk of conv.participants || []) {
+          if (pk !== actor.key) keys.add(pk);
+        }
+      } else if (actor.role === 'client' && conv.owner_agent_id) {
+        keys.add(`agent:${Number(conv.owner_agent_id)}`);
       }
     }
   }
@@ -22248,29 +22299,84 @@ function getPresenceAudienceKeys(actor) {
 
 function computeChatAlertPriority(conv, senderRole) {
   if (conv.type === 'owner_agent' && senderRole === 'owner') return 'admin_alert';
-  if ((conv.type === 'agent_client' || conv.type === 'agent_group') && senderRole === 'agent') return 'admin_alert';
+  if ((conv.type === 'agent_client' || isAgentGroupOrChannel(conv)) && senderRole === 'agent') return 'admin_alert';
   return 'silent';
 }
 
-const CHAT_RETENTION_MS = 72 * 60 * 60 * 1000; // Silent 72-hour server-side retention across all live chat threads
+const CHAT_RETENTION_MS = 72 * 60 * 60 * 1000; // 72-hour retention for 1-to-1 threads
+const CHAT_GROUP_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30-day history for Groups & Announcement Channels so newly added members see prior posts
 const CHAT_MEDIA_FILE_RE = /^[a-zA-Z0-9_-]{8,64}\.(webp|jpg|png|gif)$/;
+const GROUP_AVATAR_FILE_RE = /^group_avatar_\d+_\d+\.(jpg|png|webp|gif)$/;
 let _lastChatPruneAt = 0;
 
 function isMessageHiddenForActor(msg, actorKey) {
-  return Boolean(msg && actorKey && Array.isArray(msg.hidden_for) && msg.hidden_for.includes(actorKey));
+  if (!msg) return true;
+  if (msg.silent_removed) return true;
+  if (!Array.isArray(msg.hidden_for)) return false;
+  if (msg.hidden_for.includes('*')) return true;
+  return Boolean(actorKey && msg.hidden_for.includes(actorKey));
 }
 
 function canActorPreviewDeletedMessage(actor, conv, msg) {
-  if (!actor || !conv || !msg || !msg.deleted) return false;
+  if (!actor || !conv || !msg || !msg.deleted || msg.silent_removed) return false;
   if (actor.key === msg.sender_key) return false;
   if (actor.role === 'owner' && conv.type === 'owner_agent' && msg.sender_role === 'agent') {
     return true;
   }
-  if (actor.role === 'agent' && (conv.type === 'agent_client' || conv.type === 'agent_group') &&
+  if (actor.role === 'agent' && (conv.type === 'agent_client' || isAgentGroupOrChannel(conv)) &&
       Number(conv.owner_agent_id) === Number(actor.id) && msg.sender_role === 'client') {
     return true;
   }
   return false;
+}
+
+function projectReactionsForActor(msg, actor) {
+  const raw = msg && msg.reactions && typeof msg.reactions === 'object' ? msg.reactions : null;
+  if (!raw) return [];
+  const actorKey = actor && actor.key ? actor.key : '';
+  const list = [];
+  for (const [emoji, reactors] of Object.entries(raw)) {
+    if (!emoji || !Array.isArray(reactors) || reactors.length === 0) continue;
+    list.push({
+      emoji,
+      count: reactors.length,
+      me: Boolean(actorKey && reactors.includes(actorKey))
+    });
+  }
+  list.sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
+  return list;
+}
+
+function isMessageBeforeMemberJoin(conv, msg, actorKey) {
+  if (!conv || !msg || !actorKey || !isAgentGroupOrChannel(conv)) return false;
+  if (!String(actorKey).startsWith('client:')) return false;
+  const joinedMap = conv.member_joined_after_id;
+  if (!joinedMap || typeof joinedMap !== 'object') return false;
+  const cutoffId = Number(joinedMap[actorKey] || 0);
+  if (cutoffId <= 0) return false;
+  return Number(msg.id) <= cutoffId;
+}
+
+function computeAdminSeenMeta(msg, conv) {
+  if (!msg || !conv || !isAgentGroupOrChannel(conv)) return null;
+  const members = (conv.participants || []).filter(k =>
+    k &&
+    k !== msg.sender_key &&
+    String(k).startsWith('client:') &&
+    !isMessageBeforeMemberJoin(conv, msg, k)
+  );
+  const cursors = conv.read_cursors || {};
+  const readBy = (msg.read_by && typeof msg.read_by === 'object') ? msg.read_by : {};
+  let seenCount = 0;
+  for (const k of members) {
+    if (Number(cursors[k] || 0) >= Number(msg.id) || Boolean(readBy[k])) {
+      seenCount++;
+    }
+  }
+  return {
+    seen_count: seenCount,
+    total_members: members.length
+  };
 }
 
 function projectMessageForActor(msg, actor, conv) {
@@ -22282,11 +22388,16 @@ function projectMessageForActor(msg, actor, conv) {
   delete out.can_preview_deleted;
   delete out.deleted_preview_body;
   delete out.deleted_preview_image;
+  delete out.reactions;
+  delete out.read_by;
 
-  // Group Chat Identity Projection:
+  // Privacy-safe WhatsApp-style emoji reactions summary (never exposes raw reactor keys to clients)
+  out.reactions_summary = projectReactionsForActor(msg, actor);
+
+  // Group & Announcement Channel Identity Projection:
   // - Clients NEVER see peer client usernames or member counts; peer messages show ONLY unique 6-8 digit ID ("ID: 482910")
-  // - Agent (Group Admin) sees both username and unique Chat ID
-  if (conv && conv.type === 'agent_group') {
+  // - Agent (Group/Channel Admin) sees both username and unique Chat ID + live seen_count / total_members
+  if (conv && isAgentGroupOrChannel(conv)) {
     const senderChatId = out.sender_role === 'client'
       ? resolveClientChatIdByKey(out.sender_key, out.sender_chat_id)
       : '';
@@ -22309,10 +22420,15 @@ function projectMessageForActor(msg, actor, conv) {
           sender_key: replyCid ? `client:cid:${replyCid}` : 'client:hidden'
         };
       }
-    } else if (actor && actor.role === 'agent') {
+    } else if (actor && actor.role === 'agent' && Number(conv.owner_agent_id) === Number(actor.id)) {
       if (out.reply_to && out.reply_to.sender_key && String(out.reply_to.sender_key).startsWith('client:')) {
         const replyCid = resolveClientChatIdByKey(out.reply_to.sender_key, out.reply_to.sender_chat_id);
         out.reply_to = { ...out.reply_to, sender_role: 'client', sender_chat_id: replyCid || '' };
+      }
+      const seenMeta = computeAdminSeenMeta(msg, conv);
+      if (seenMeta) {
+        out.seen_count = seenMeta.seen_count;
+        out.total_members = seenMeta.total_members;
       }
     }
   }
@@ -22328,7 +22444,7 @@ function projectMessageForActor(msg, actor, conv) {
 function broadcastChatMessageForConv(conv, msgRecord, extra = {}) {
   const participants = Array.isArray(conv && conv.participants) ? conv.participants : [];
   if (!participants.length) return;
-  if (conv.type === 'agent_group') {
+  if (isAgentGroupOrChannel(conv)) {
     for (const pKey of participants) {
       const [pRole, pRawId] = String(pKey || '').split(':');
       const pActor = { key: pKey, role: pRole, id: Number(pRawId) };
@@ -22344,14 +22460,33 @@ function broadcastChatMessageForConv(conv, msgRecord, extra = {}) {
     }
     return;
   }
-  sendChatWsEvent({
-    type: 'chat:message',
-    conversation_id: Number(conv.id),
-    conversation_type: conv.type,
-    conversation_title: msgRecord.sender_name,
-    ...extra,
-    message: msgRecord
-  }, participants);
+  for (const pKey of participants) {
+    const [pRole, pRawId] = String(pKey || '').split(':');
+    const pActor = { key: pKey, role: pRole, id: Number(pRawId) };
+    sendChatWsEvent({
+      type: 'chat:message',
+      conversation_id: Number(conv.id),
+      conversation_type: conv.type,
+      conversation_title: msgRecord.sender_name,
+      ...extra,
+      message: projectMessageForActor(msgRecord, pActor, conv)
+    }, [pKey]);
+  }
+}
+
+function broadcastChatReactionForConv(conv, msgRecord) {
+  const participants = Array.isArray(conv && conv.participants) ? conv.participants : [];
+  for (const pKey of participants) {
+    if (isMessageBeforeMemberJoin(conv, msgRecord, pKey)) continue;
+    const [pRole, pRawId] = String(pKey || '').split(':');
+    const pActor = { key: pKey, role: pRole, id: Number(pRawId) };
+    sendChatWsEvent({
+      type: 'chat:reaction',
+      conversation_id: Number(conv.id),
+      message_id: Number(msgRecord.id),
+      reactions_summary: projectReactionsForActor(msgRecord, pActor)
+    }, [pKey]);
+  }
 }
 
 function safeUnlinkChatMedia(convId, imgObj) {
@@ -22366,10 +22501,34 @@ function safeUnlinkChatMedia(convId, imgObj) {
 }
 
 function formatMessagePreviewText(msg) {
-  if (!msg) return '';
+  if (!msg || msg.silent_removed) return '';
   if (msg.deleted) return 'This message was deleted';
   if (msg.image) return msg.body ? `📷 ${String(msg.body)}`.slice(0, 120) : '📷 Photo';
   return String(msg.body || '').slice(0, 120);
+}
+
+function recomputeConversationLastVisibleMessage(conv, allMessages) {
+  if (!conv) return;
+  let latest = null;
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const m = allMessages[i];
+    if (!m || Number(m.conversation_id) !== Number(conv.id)) continue;
+    if (m.silent_removed || (Array.isArray(m.hidden_for) && m.hidden_for.includes('*'))) continue;
+    latest = m;
+    break;
+  }
+  if (latest) {
+    conv.last_message_id = Number(latest.id);
+    conv.last_message_preview = formatMessagePreviewText(latest);
+    conv.last_message_sender_key = latest.sender_key || '';
+    conv.last_message_sender_name = latest.sender_name || '';
+    conv.last_message_at = latest.created_at || conv.updated_at || conv.created_at;
+  } else {
+    conv.last_message_id = 0;
+    conv.last_message_preview = '';
+    conv.last_message_sender_key = '';
+    conv.last_message_sender_name = '';
+  }
 }
 
 function pruneExpiredChatMessages(force = false, nowMs = Date.now()) {
@@ -22380,14 +22539,23 @@ function pruneExpiredChatMessages(force = false, nowMs = Date.now()) {
     const allMessages = readDb('chat_messages') || [];
     if (!allMessages.length) return 0;
 
-    const cutoffMs = nowMs - CHAT_RETENTION_MS;
+    const convs = readDb('chat_conversations') || [];
+    const convTypeById = new Map();
+    for (const c of convs) {
+      if (c) convTypeById.set(Number(c.id), c.type);
+    }
+
+    const directCutoffMs = nowMs - CHAT_RETENTION_MS;
+    const groupCutoffMs = nowMs - CHAT_GROUP_RETENTION_MS;
     const kept = [];
     const expiredIds = new Set();
     const affectedConvIds = new Set();
 
     for (const m of allMessages) {
       const ts = Date.parse(String((m && m.created_at) || ''));
-      if (Number.isFinite(ts) && ts < cutoffMs) {
+      const cType = convTypeById.get(Number(m.conversation_id));
+      const cutoff = (cType === 'agent_group' || cType === 'agent_channel') ? groupCutoffMs : directCutoffMs;
+      if (Number.isFinite(ts) && ts < cutoff) {
         expiredIds.add(Number(m.id));
         affectedConvIds.add(Number(m.conversation_id));
         safeUnlinkChatMedia(m.conversation_id, m.image);
@@ -22400,7 +22568,6 @@ function pruneExpiredChatMessages(force = false, nowMs = Date.now()) {
     if (expiredIds.size === 0) return 0;
     writeDb('chat_messages', kept);
 
-    const convs = readDb('chat_conversations') || [];
     let convsDirty = false;
     for (const conv of convs) {
       if (!conv || !affectedConvIds.has(Number(conv.id))) continue;
@@ -22409,25 +22576,7 @@ function pruneExpiredChatMessages(force = false, nowMs = Date.now()) {
         convsDirty = true;
       }
       if (conv.last_message_id && expiredIds.has(Number(conv.last_message_id))) {
-        let latest = null;
-        for (let i = kept.length - 1; i >= 0; i--) {
-          if (Number(kept[i].conversation_id) === Number(conv.id)) {
-            latest = kept[i];
-            break;
-          }
-        }
-        if (latest) {
-          conv.last_message_id = Number(latest.id);
-          conv.last_message_preview = formatMessagePreviewText(latest);
-          conv.last_message_sender_key = latest.sender_key || '';
-          conv.last_message_sender_name = latest.sender_name || '';
-          conv.last_message_at = latest.created_at || conv.updated_at || conv.created_at;
-        } else {
-          conv.last_message_id = 0;
-          conv.last_message_preview = '';
-          conv.last_message_sender_key = '';
-          conv.last_message_sender_name = '';
-        }
+        recomputeConversationLastVisibleMessage(conv, kept);
         convsDirty = true;
       }
     }
@@ -22437,6 +22586,39 @@ function pruneExpiredChatMessages(force = false, nowMs = Date.now()) {
     console.error('[CHAT-RETENTION] Prune error:', err);
     return 0;
   }
+}
+
+function silentRemoveChatMessageRecord(msg, actor, conv, allMessages) {
+  if (!msg) return false;
+  if (msg.image) safeUnlinkChatMedia(conv ? conv.id : msg.conversation_id, msg.image);
+  if (msg.deleted_original_image) safeUnlinkChatMedia(conv ? conv.id : msg.conversation_id, msg.deleted_original_image);
+  msg.silent_removed = true;
+  msg.deleted = true;
+  msg.deleted_by_key = actor.key;
+  msg.deleted_by_role = actor.role;
+  msg.deleted_at = new Date().toISOString();
+  msg.body = '';
+  msg.image = null;
+  msg.reply_to = null;
+  msg.reactions = {};
+  msg.deleted_original_body = '';
+  msg.deleted_original_image = null;
+  const hidden = new Set(Array.isArray(msg.hidden_for) ? msg.hidden_for : []);
+  hidden.add('*');
+  if (conv && Array.isArray(conv.participants)) {
+    conv.participants.forEach(pk => hidden.add(pk));
+  }
+  msg.hidden_for = Array.from(hidden);
+
+  if (conv) {
+    if (Number(conv.pinned_message_id) === Number(msg.id)) {
+      conv.pinned_message_id = null;
+    }
+    if (Number(conv.last_message_id) === Number(msg.id)) {
+      recomputeConversationLastVisibleMessage(conv, allMessages || []);
+    }
+  }
+  return true;
 }
 
 function softDeleteChatMessageRecord(msg, actor, conv, hideForActor = false) {
@@ -22451,6 +22633,7 @@ function softDeleteChatMessageRecord(msg, actor, conv, hideForActor = false) {
     msg.body = 'This message was deleted';
     msg.image = null;
     msg.reply_to = null;
+    msg.reactions = {};
     newlyDeleted = true;
   }
   if (hideForActor) {
@@ -22470,15 +22653,19 @@ function softDeleteChatMessageRecord(msg, actor, conv, hideForActor = false) {
 
 function broadcastChatMessageDeleted(conv, msg, hideActorKey = null) {
   const participants = Array.isArray(conv && conv.participants) ? conv.participants : [];
+  const isSilentForAll = Boolean(msg && msg.silent_removed);
   for (const pKey of participants) {
     const [pRole, pRawId] = String(pKey || '').split(':');
     const pActor = { key: pKey, role: pRole, id: Number(pRawId) };
-    const canPreview = canActorPreviewDeletedMessage(pActor, conv, msg);
+    const canPreview = isSilentForAll ? false : canActorPreviewDeletedMessage(pActor, conv, msg);
     const payload = {
       type: 'chat:message_deleted',
       conversation_id: Number(conv.id),
       message_id: Number(msg.id),
-      hidden_for_self: Boolean(hideActorKey && hideActorKey === pKey)
+      silent_removed: isSilentForAll,
+      hidden_for_self: isSilentForAll || Boolean(hideActorKey && hideActorKey === pKey),
+      last_message_id: Number(conv.last_message_id || 0),
+      last_message_preview: String(conv.last_message_preview || '')
     };
     if (canPreview) {
       payload.can_preview_deleted = true;
@@ -22499,7 +22686,7 @@ function countUnreadForActor(conv, actorKey, allMessages) {
     const m = allMessages[i];
     if (Number(m.conversation_id) !== Number(conv.id)) continue;
     if (Number(m.id) <= lastReadId) break;
-    if (isMessageHiddenForActor(m, actorKey)) continue;
+    if (isMessageHiddenForActor(m, actorKey) || isMessageBeforeMemberJoin(conv, m, actorKey)) continue;
     if (m.sender_key !== actorKey && !m.deleted) unread++;
   }
   return unread;
@@ -22748,7 +22935,8 @@ function hydrateConversationForActor(conv, actor, allMessages) {
         Number(m.conversation_id) === Number(conv.id) &&
         Number(m.id) === Number(conv.pinned_message_id) &&
         !m.deleted &&
-        !isMessageHiddenForActor(m, actor.key)
+        !isMessageHiddenForActor(m, actor.key) &&
+        !isMessageBeforeMemberJoin(conv, m, actor.key)
       ) || null
     : null;
 
@@ -22756,7 +22944,7 @@ function hydrateConversationForActor(conv, actor, allMessages) {
   for (let i = allMessages.length - 1; i >= 0; i--) {
     const m = allMessages[i];
     if (Number(m.conversation_id) !== Number(conv.id)) continue;
-    if (isMessageHiddenForActor(m, actor.key)) continue;
+    if (isMessageHiddenForActor(m, actor.key) || isMessageBeforeMemberJoin(conv, m, actor.key)) continue;
     visibleLastMsg = m;
     break;
   }
@@ -22769,14 +22957,17 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     title = (peer && (peer.display_name || peer.username)) || otherKey || 'Direct Chat';
   }
 
-  const hideGroupMembersForClient = Boolean(conv.type === 'agent_group' && actor.role === 'client');
-  const members = (conv.type === 'agent_group' && !hideGroupMembersForClient)
+  const isGroupOrChannel = isAgentGroupOrChannel(conv);
+  const isChannel = conv.type === 'agent_channel';
+  const hideGroupMembersForClient = Boolean(isGroupOrChannel && actor.role === 'client');
+  const members = (isGroupOrChannel && !hideGroupMembersForClient)
     ? (conv.participants || []).map(k => resolveActorSummaryByKey(k)).filter(Boolean)
     : [];
 
   const scheduleNorm = conv.type === 'agent_group' ? normalizeGroupSchedule(null, conv.schedule) : null;
   const scheduleState = conv.type === 'agent_group' ? evaluateGroupSchedule(scheduleNorm) : null;
   const closedForMember = Boolean(conv.type === 'agent_group' && scheduleState && scheduleState.is_closed && actor.role !== 'agent');
+  const channelLocked = Boolean(isChannel && actor.role !== 'agent');
   const adminOnlyLocked = Boolean(conv.type === 'agent_group' && conv.admin_only && actor.role !== 'agent');
 
   const formatGroupPeerLabel = (m) => {
@@ -22798,6 +22989,8 @@ function hydrateConversationForActor(conv, actor, allMessages) {
   return {
     id: Number(conv.id),
     type: conv.type,
+    is_channel: isChannel,
+    avatar_url: isGroupOrChannel ? (conv.avatar_url || '') : '',
     owner_agent_id: conv.owner_agent_id ? Number(conv.owner_agent_id) : null,
     title,
     description: conv.description || '',
@@ -22805,7 +22998,7 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     members,
     hide_members: hideGroupMembersForClient,
     peer,
-    admin_only: Boolean(conv.admin_only),
+    admin_only: isChannel ? true : Boolean(conv.admin_only),
     schedule: scheduleNorm ? {
       enabled: scheduleNorm.enabled,
       close_time: scheduleNorm.close_time,
@@ -22815,9 +23008,9 @@ function hydrateConversationForActor(conv, actor, allMessages) {
       timezone: scheduleNorm.timezone
     } : null,
     schedule_state: scheduleState,
-    can_manage: conv.type === 'agent_group' && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id,
-    can_send: !adminOnlyLocked && !closedForMember,
-    lock_reason: closedForMember ? 'scheduled_closed' : (adminOnlyLocked ? 'admin_only' : null),
+    can_manage: isGroupOrChannel && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id,
+    can_send: !channelLocked && !adminOnlyLocked && !closedForMember,
+    lock_reason: channelLocked ? 'announcement_channel' : (closedForMember ? 'scheduled_closed' : (adminOnlyLocked ? 'admin_only' : null)),
     pinned_message_id: pinnedMsg ? Number(pinnedMsg.id) : null,
     pinned_message: pinnedMsg ? {
       id: Number(pinnedMsg.id),
@@ -22829,11 +23022,16 @@ function hydrateConversationForActor(conv, actor, allMessages) {
       created_at: pinnedMsg.created_at
     } : null,
     read_cursors: hideGroupMembersForClient ? {} : (conv.read_cursors || {}),
+    member_joined_after_id: hideGroupMembersForClient ? {} : (conv.member_joined_after_id || {}),
     last_message_id: visibleLastMsg ? Number(visibleLastMsg.id) : 0,
     last_message_preview: visibleLastMsg ? formatMessagePreviewText(visibleLastMsg) : '',
     last_message_sender_key: safeLastSenderKey,
     last_message_sender_name: safeLastSenderName,
-    last_message_at: (visibleLastMsg && visibleLastMsg.created_at) || conv.last_message_at || conv.updated_at || conv.created_at,
+    last_message_at: (visibleLastMsg && visibleLastMsg.created_at)
+      || (conv.member_joined_at && conv.member_joined_at[actor.key])
+      || conv.last_message_at
+      || conv.updated_at
+      || conv.created_at,
     unread_count: unread,
     created_at: conv.created_at,
     updated_at: conv.updated_at
@@ -22930,6 +23128,51 @@ app.post('/api/chat/direct', requireAuth, (req, res) => {
   res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
 });
 
+function markConversationReadForActor(conv, convs, actor, latestId, allMessages) {
+  if (!conv || !actor || !latestId || latestId <= 0) return false;
+  if (!conv.read_cursors) conv.read_cursors = {};
+  if (!conv.read_timestamps) conv.read_timestamps = {};
+  const prevRead = Number(conv.read_cursors[actor.key] || 0);
+  if (latestId <= prevRead) return false;
+
+  const nowIso = new Date().toISOString();
+  conv.read_cursors[actor.key] = latestId;
+  conv.read_timestamps[actor.key] = nowIso;
+  writeDb('chat_conversations', convs);
+
+  // Stamp exact per-message seen_at timestamps in Groups & Announcement Channels for Admin's Seen/Unseen report
+  if (isAgentGroupOrChannel(conv) && Array.isArray(allMessages)) {
+    let msgsDirty = false;
+    for (const m of allMessages) {
+      if (!m || Number(m.conversation_id) !== Number(conv.id)) continue;
+      if (isMessageBeforeMemberJoin(conv, m, actor.key)) continue;
+      const mid = Number(m.id);
+      if (mid > prevRead && mid <= latestId && m.sender_key !== actor.key && !m.silent_removed) {
+        if (!m.read_by || typeof m.read_by !== 'object') m.read_by = {};
+        if (!m.read_by[actor.key]) {
+          m.read_by[actor.key] = nowIso;
+          msgsDirty = true;
+        }
+      }
+    }
+    if (msgsDirty) writeDb('chat_messages', allMessages);
+  }
+
+  // Privacy wall: In Groups & Channels, client read receipts go ONLY to the client themselves and the owning Agent Admin (never peer clients)
+  const readAudience = (isAgentGroupOrChannel(conv) && actor.role === 'client')
+    ? [actor.key, `agent:${Number(conv.owner_agent_id)}`]
+    : (conv.participants || []);
+
+  sendChatWsEvent({
+    type: 'chat:read',
+    conversation_id: Number(conv.id),
+    actor_key: actor.key,
+    last_read_id: latestId,
+    read_at: nowIso
+  }, readAudience);
+  return true;
+}
+
 // GET /api/chat/conversations/:id/messages — paginated messages + auto-mark-read
 app.get('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
@@ -22949,7 +23192,9 @@ app.get('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   const beforeId = Number(req.query.before_id || 0);
   const allMessages = readDb('chat_messages') || [];
   const convMsgs = allMessages.filter(m =>
-    Number(m.conversation_id) === convId && !isMessageHiddenForActor(m, actor.key)
+    Number(m.conversation_id) === convId &&
+    !isMessageHiddenForActor(m, actor.key) &&
+    !isMessageBeforeMemberJoin(conv, m, actor.key)
   );
 
   const filtered = beforeId > 0 ? convMsgs.filter(m => Number(m.id) < beforeId) : convMsgs;
@@ -22959,18 +23204,7 @@ app.get('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   // Mark read up to latest visible message in this conversation
   const latestId = convMsgs.length ? Number(convMsgs[convMsgs.length - 1].id) : 0;
   if (latestId > 0) {
-    if (!conv.read_cursors) conv.read_cursors = {};
-    const prevRead = Number(conv.read_cursors[actor.key] || 0);
-    if (latestId > prevRead) {
-      conv.read_cursors[actor.key] = latestId;
-      writeDb('chat_conversations', convs);
-      sendChatWsEvent({
-        type: 'chat:read',
-        conversation_id: convId,
-        actor_key: actor.key,
-        last_read_id: latestId
-      }, conv.participants);
-    }
+    markConversationReadForActor(conv, convs, actor, latestId, allMessages);
   }
 
   res.json({
@@ -22995,7 +23229,10 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Access denied to this conversation.' });
   }
 
-  // Enforce Admin-Only & Quiet Hours lock
+  // Enforce Announcement Channel & Group Admin-Only / Quiet Hours locks
+  if (conv.type === 'agent_channel' && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only Admin can send messages in this Announcement Channel.' });
+  }
   if (conv.type === 'agent_group') {
     if (conv.admin_only && actor.role !== 'agent') {
       return res.status(403).json({ error: 'Only your Agent (Group Admin) can send messages in this group.' });
@@ -23016,7 +23253,13 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   let reply_to = null;
   const replyId = Number((req.body && req.body.reply_to_id) || 0);
   if (replyId > 0) {
-    const targetMsg = allMessages.find(m => Number(m.id) === replyId && Number(m.conversation_id) === convId && !m.deleted);
+    const targetMsg = allMessages.find(m =>
+      Number(m.id) === replyId &&
+      Number(m.conversation_id) === convId &&
+      !m.deleted &&
+      !isMessageHiddenForActor(m, actor.key) &&
+      !isMessageBeforeMemberJoin(conv, m, actor.key)
+    );
     if (targetMsg) {
       const targetSnippet = targetMsg.image
         ? (targetMsg.body ? `📷 ${String(targetMsg.body).slice(0, 110)}` : '📷 Photo')
@@ -23112,6 +23355,9 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
   const conv = convs.find(c => Number(c.id) === convId);
   if (!conv || !canAccessConversation(actor, conv)) {
     return res.status(403).json({ error: 'Access denied to this conversation.' });
+  }
+  if (conv.type === 'agent_channel' && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only Admin can send media in this Announcement Channel.' });
   }
   if (conv.type === 'agent_group') {
     if (conv.admin_only && actor.role !== 'agent') {
@@ -23246,16 +23492,21 @@ app.get('/api/chat/conversations/:id/media/:file', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Access denied to this media.' });
   }
 
-  // If media belongs to a soft-deleted message, restrict access strictly to authorized upline previewers
+  // Restrict access to soft-deleted media AND pre-join group/channel media
   const allMessages = readDb('chat_messages') || [];
-  const deletedOwnerMsg = allMessages.find(m =>
-    Number(m.conversation_id) === convId &&
-    m.deleted &&
-    m.deleted_original_image &&
-    String(m.deleted_original_image.file) === fileName
+  const ownerMsg = allMessages.find(m =>
+    Number(m.conversation_id) === convId && (
+      (m.image && String(m.image.file) === fileName) ||
+      (m.deleted_original_image && String(m.deleted_original_image.file) === fileName)
+    )
   );
-  if (deletedOwnerMsg && !canActorPreviewDeletedMessage(actor, conv, deletedOwnerMsg)) {
-    return res.status(404).json({ error: 'Media not found.' });
+  if (ownerMsg) {
+    if (isMessageHiddenForActor(ownerMsg, actor.key) || isMessageBeforeMemberJoin(conv, ownerMsg, actor.key)) {
+      return res.status(404).json({ error: 'Media not found.' });
+    }
+    if (ownerMsg.deleted && !canActorPreviewDeletedMessage(actor, conv, ownerMsg)) {
+      return res.status(404).json({ error: 'Media not found.' });
+    }
   }
 
   const convDir = path.resolve(CHAT_MEDIA_DIR, `c_${convId}`);
@@ -23286,22 +23537,129 @@ app.post('/api/chat/conversations/:id/read', requireAuth, (req, res) => {
   }
 
   const latestId = Number((req.body && req.body.last_read_id) || conv.last_message_id || 0);
-  if (!conv.read_cursors) conv.read_cursors = {};
-  const prev = Number(conv.read_cursors[actor.key] || 0);
-  if (latestId > prev) {
-    conv.read_cursors[actor.key] = latestId;
-    writeDb('chat_conversations', convs);
-    sendChatWsEvent({
-      type: 'chat:read',
-      conversation_id: convId,
-      actor_key: actor.key,
-      last_read_id: latestId
-    }, conv.participants);
-  }
-  res.json({ success: true, last_read_id: Number(conv.read_cursors[actor.key] || 0) });
+  const allMessages = readDb('chat_messages') || [];
+  markConversationReadForActor(conv, convs, actor, latestId, allMessages);
+  res.json({ success: true, last_read_id: Number((conv.read_cursors && conv.read_cursors[actor.key]) || 0) });
 });
 
-// DELETE /api/chat/conversations/:id/messages/:msgId — soft delete by sender or Group Admin (upline retains audit preview)
+// POST /api/chat/conversations/:id/messages/:msgId/react — WhatsApp-style emoji reaction (toggle/switch)
+app.post('/api/chat/conversations/:id/messages/:msgId/react', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const msgId = Number(req.params.msgId);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  const rawEmoji = String((req.body && req.body.emoji) || '').trim();
+  if (!rawEmoji || rawEmoji.length > 16 || /[<>&"'\s]/.test(rawEmoji)) {
+    return res.status(400).json({ error: 'Invalid reaction emoji.' });
+  }
+
+  const allMessages = readDb('chat_messages') || [];
+  const msg = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId);
+  if (!msg || msg.deleted || isMessageHiddenForActor(msg, actor.key) || isMessageBeforeMemberJoin(conv, msg, actor.key)) {
+    return res.status(404).json({ error: 'Message not found.' });
+  }
+
+  if (!msg.reactions || typeof msg.reactions !== 'object') msg.reactions = {};
+  const alreadyHasSame = Array.isArray(msg.reactions[rawEmoji]) && msg.reactions[rawEmoji].includes(actor.key);
+
+  // WhatsApp behavior: 1 active reaction per user per message (tap same emoji to remove, tap another to switch)
+  for (const [em, arr] of Object.entries(msg.reactions)) {
+    if (!Array.isArray(arr)) { delete msg.reactions[em]; continue; }
+    const next = arr.filter(k => k !== actor.key);
+    if (next.length === 0) delete msg.reactions[em];
+    else msg.reactions[em] = next;
+  }
+  if (!alreadyHasSame) {
+    if (!Array.isArray(msg.reactions[rawEmoji])) msg.reactions[rawEmoji] = [];
+    msg.reactions[rawEmoji].push(actor.key);
+  }
+
+  writeDb('chat_messages', allMessages);
+  broadcastChatReactionForConv(conv, msg);
+
+  res.json({
+    success: true,
+    message_id: msgId,
+    reactions_summary: projectReactionsForActor(msg, actor)
+  });
+});
+
+// GET /api/chat/conversations/:id/messages/:msgId/seen — Admin-only seen/unseen breakdown for Group & Announcement Channel
+app.get('/api/chat/conversations/:id/messages/:msgId/seen', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+
+  const convId = Number(req.params.id);
+  const msgId = Number(req.params.msgId);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !isAgentGroupOrChannel(conv) || actor.role !== 'agent' || Number(conv.owner_agent_id) !== actor.id) {
+    return res.status(403).json({ error: 'Only the Group/Channel Admin can inspect message seen status.' });
+  }
+
+  const allMessages = readDb('chat_messages') || [];
+  const msg = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId && !m.silent_removed);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+
+  const cursors = conv.read_cursors || {};
+  const readTs = conv.read_timestamps || {};
+  const msgReadBy = (msg.read_by && typeof msg.read_by === 'object') ? msg.read_by : {};
+  const clientKeys = (conv.participants || []).filter(k =>
+    k &&
+    k !== msg.sender_key &&
+    String(k).startsWith('client:') &&
+    !isMessageBeforeMemberJoin(conv, msg, k)
+  );
+
+  const seen = [];
+  const unseen = [];
+  for (const ck of clientKeys) {
+    const info = resolveActorSummaryByKey(ck) || { key: ck, role: 'client', username: ck, display_name: ck, chat_id: '', avatar_url: '', online: false, last_seen: null };
+    const hasSeen = Number(cursors[ck] || 0) >= Number(msg.id) || Boolean(msgReadBy[ck]);
+    if (hasSeen) {
+      seen.push({
+        ...info,
+        seen_at: msgReadBy[ck] || readTs[ck] || null
+      });
+    } else {
+      unseen.push(info);
+    }
+  }
+
+  seen.sort((a, b) => new Date(b.seen_at || 0) - new Date(a.seen_at || 0));
+  unseen.sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
+
+  const reactions_detail = [];
+  if (msg.reactions && typeof msg.reactions === 'object') {
+    for (const [emoji, keys] of Object.entries(msg.reactions)) {
+      if (!Array.isArray(keys) || !keys.length) continue;
+      reactions_detail.push({
+        emoji,
+        count: keys.length,
+        users: keys.map(k => resolveActorSummaryByKey(k) || { key: k, username: k, display_name: k })
+      });
+    }
+  }
+
+  res.json({
+    message_id: msgId,
+    total_members: clientKeys.length,
+    seen_count: seen.length,
+    unseen_count: unseen.length,
+    seen,
+    unseen,
+    reactions_detail
+  });
+});
+
+// DELETE /api/chat/conversations/:id/messages/:msgId — Admin/Owner silently removes for everyone (no trace); client soft-deletes own
 app.delete('/api/chat/conversations/:id/messages/:msgId', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
@@ -23318,9 +23676,27 @@ app.delete('/api/chat/conversations/:id/messages/:msgId', requireAuth, (req, res
   const msg = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId);
   if (!msg) return res.status(404).json({ error: 'Message not found.' });
 
-  const isGroupAdmin = conv.type === 'agent_group' && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id;
-  if (msg.sender_key !== actor.key && !isGroupAdmin) {
+  const isOwnerAdmin = conv.type === 'owner_agent' && actor.role === 'owner';
+  const isAgentAdmin = (isAgentGroupOrChannel(conv) || conv.type === 'agent_client') && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id;
+  const isAdminActor = isOwnerAdmin || isAgentAdmin;
+
+  if (msg.sender_key !== actor.key && !isAdminActor) {
     return res.status(403).json({ error: 'You can only delete your own messages.' });
+  }
+
+  // Owner or Agent Admin deletion ALWAYS silently hides the message for EVERYONE with zero "deleted" notice
+  if (isAdminActor) {
+    silentRemoveChatMessageRecord(msg, actor, conv, allMessages);
+    writeDb('chat_messages', allMessages);
+    writeDb('chat_conversations', convs);
+    broadcastChatMessageDeleted(conv, msg, null);
+    return res.json({
+      success: true,
+      message_id: msgId,
+      silent_removed: true,
+      hidden_for_self: true,
+      conversation: hydrateConversationForActor(conv, actor, allMessages)
+    });
   }
 
   const hideSelf = String(req.query.hide_self || '') === '1' || Boolean(req.body && req.body.hide_self);
@@ -23338,7 +23714,7 @@ app.delete('/api/chat/conversations/:id/messages/:msgId', requireAuth, (req, res
   });
 });
 
-// POST /api/chat/conversations/:id/messages/bulk-delete — multi-select delete/hide for self (own messages soft-deleted with upline preview preserved)
+// POST /api/chat/conversations/:id/messages/bulk-delete — multi-select delete (Admin/Owner silently removes for everyone with zero trace)
 app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
@@ -23356,12 +23732,22 @@ app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, 
     return res.status(400).json({ error: 'Please select at least one message.' });
   }
 
+  const isOwnerAdmin = conv.type === 'owner_agent' && actor.role === 'owner';
+  const isAgentAdmin = (isAgentGroupOrChannel(conv) || conv.type === 'agent_client') && actor.role === 'agent' && Number(conv.owner_agent_id) === actor.id;
+  const isAdminActor = isOwnerAdmin || isAgentAdmin;
+
   const allMessages = readDb('chat_messages') || [];
   const hiddenIds = [];
-  const softDeletedMsgs = [];
+  const deletedMsgsToBroadcast = [];
 
   for (const msg of allMessages) {
     if (Number(msg.conversation_id) !== convId || !targetIds.has(Number(msg.id))) continue;
+    if (isAdminActor) {
+      silentRemoveChatMessageRecord(msg, actor, conv, allMessages);
+      hiddenIds.push(Number(msg.id));
+      deletedMsgsToBroadcast.push(msg);
+      continue;
+    }
     if (!Array.isArray(msg.hidden_for)) msg.hidden_for = [];
     if (!msg.hidden_for.includes(actor.key)) {
       msg.hidden_for.push(actor.key);
@@ -23370,15 +23756,15 @@ app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, 
 
     if (msg.sender_key === actor.key && !msg.deleted) {
       softDeleteChatMessageRecord(msg, actor, conv, true);
-      softDeletedMsgs.push(msg);
+      deletedMsgsToBroadcast.push(msg);
     }
   }
 
   if (hiddenIds.length > 0) {
     writeDb('chat_messages', allMessages);
     writeDb('chat_conversations', convs);
-    for (const msg of softDeletedMsgs) {
-      broadcastChatMessageDeleted(conv, msg, actor.key);
+    for (const msg of deletedMsgsToBroadcast) {
+      broadcastChatMessageDeleted(conv, msg, isAdminActor ? null : actor.key);
     }
   }
 
@@ -23386,7 +23772,7 @@ app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, 
     success: true,
     deleted_count: hiddenIds.length,
     hidden_ids: hiddenIds,
-    soft_deleted_ids: softDeletedMsgs.map(m => Number(m.id)),
+    soft_deleted_ids: deletedMsgsToBroadcast.map(m => Number(m.id)),
     conversation: hydrateConversationForActor(conv, actor, allMessages)
   });
 });
@@ -23425,20 +23811,73 @@ app.post('/api/chat/conversations/:id/clear-history', requireAuth, (req, res) =>
   });
 });
 
-// ── Agent-Only Client Group Admin APIs ──────────────────────────
-// POST /api/chat/groups — Agent creates a private Client Group (own clients ONLY)
+// ── Agent-Only Client Group & Announcement Channel Admin APIs ──────────────────────────
+function safeUnlinkGroupAvatar(avatarUrl) {
+  try {
+    const raw = String(avatarUrl || '').trim();
+    if (!raw.startsWith('/uploads/avatars/')) return;
+    const base = path.basename(raw.split('?')[0]);
+    if (!GROUP_AVATAR_FILE_RE.test(base)) return;
+    const target = path.resolve(USER_AVATARS_DIR, base);
+    if (target.startsWith(path.resolve(USER_AVATARS_DIR) + path.sep) && fs.existsSync(target)) {
+      fs.unlinkSync(target);
+    }
+  } catch (_) {}
+}
+
+function saveGroupAvatarDataUri(convId, imageInput) {
+  if (!imageInput || typeof imageInput !== 'string') return { error: 'No image provided.' };
+  let declaredExt = '';
+  let base64Payload = imageInput.trim();
+  if (base64Payload.startsWith('data:')) {
+    const commaIdx = base64Payload.indexOf(',');
+    if (commaIdx === -1) return { error: 'Invalid image data URI.' };
+    const header = base64Payload.slice(0, commaIdx).toLowerCase();
+    if (header.includes('svg')) return { error: 'SVG images are not allowed. Use JPG, PNG, WEBP, or GIF.' };
+    if (header.includes('image/jpeg') || header.includes('image/jpg')) declaredExt = 'jpg';
+    else if (header.includes('image/png')) declaredExt = 'png';
+    else if (header.includes('image/webp')) declaredExt = 'webp';
+    else if (header.includes('image/gif')) declaredExt = 'gif';
+    else return { error: 'Unsupported image format. Use JPG, PNG, WEBP, or GIF.' };
+    base64Payload = base64Payload.slice(commaIdx + 1);
+  }
+  base64Payload = base64Payload.replace(/\s+/g, '');
+  const buffer = Buffer.from(base64Payload, 'base64');
+  if (!buffer || buffer.length < 12) return { error: 'Invalid image file.' };
+  if (buffer.length > 2 * 1024 * 1024) return { error: 'Image must be under 2 MB.' };
+
+  let detectedExt = null;
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) detectedExt = 'jpg';
+  else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) detectedExt = 'png';
+  else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) detectedExt = 'gif';
+  else if (buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') detectedExt = 'webp';
+
+  if (!detectedExt || (declaredExt && declaredExt !== detectedExt)) {
+    return { error: 'Invalid image format. Use JPG, PNG, WEBP, or GIF.' };
+  }
+  if (!fs.existsSync(USER_AVATARS_DIR)) fs.mkdirSync(USER_AVATARS_DIR, { recursive: true });
+  const filename = `group_avatar_${Number(convId)}_${Date.now()}.${detectedExt}`;
+  fs.writeFileSync(path.join(USER_AVATARS_DIR, filename), buffer);
+  return { avatar_url: `/uploads/avatars/${filename}` };
+}
+
+// POST /api/chat/groups — Agent creates a private Client Group OR WhatsApp-style Announcement Channel (own clients ONLY)
 app.post('/api/chat/groups', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor || actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only Agents can create Client Groups.' });
+    return res.status(403).json({ error: 'Only Agents can create Client Groups or Announcement Channels.' });
   }
 
+  const isChannel = Boolean(
+    (req.body && req.body.is_channel) ||
+    String((req.body && req.body.type) || '').toLowerCase() === 'agent_channel'
+  );
   const title = String((req.body && req.body.title) || '').trim().slice(0, 80);
   const description = String((req.body && req.body.description) || '').trim().slice(0, 240);
-  const adminOnly = Boolean(req.body && req.body.admin_only);
+  const adminOnly = isChannel ? true : Boolean(req.body && req.body.admin_only);
   const rawMemberIds = Array.isArray(req.body && req.body.member_client_ids) ? req.body.member_client_ids : [];
 
-  if (!title) return res.status(400).json({ error: 'Group name is required.' });
+  if (!title) return res.status(400).json({ error: isChannel ? 'Channel name is required.' : 'Group name is required.' });
 
   const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
   const myClientIdSet = new Set(myClients.map(c => Number(c.id)));
@@ -23448,7 +23887,7 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   for (const rawId of rawMemberIds) {
     const cid = Number(rawId);
     if (!myClientIdSet.has(cid)) {
-      return res.status(403).json({ error: 'You can only add your own assigned clients to a group.' });
+      return res.status(403).json({ error: 'You can only add your own assigned clients.' });
     }
     const ck = `client:${cid}`;
     if (!seen.has(ck)) {
@@ -23461,37 +23900,46 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   }
 
   const convs = readDb('chat_conversations') || [];
+  const newConvId = nextId(convs, 'chat_conversations');
+  let avatarUrl = '';
+  if (req.body && req.body.avatar && typeof req.body.avatar === 'string') {
+    const saved = saveGroupAvatarDataUri(newConvId, req.body.avatar);
+    if (saved.error) return res.status(400).json({ error: saved.error });
+    avatarUrl = saved.avatar_url;
+  }
+
   const now = new Date().toISOString();
   const readCursors = {};
   participants.forEach(pk => { readCursors[pk] = 0; });
 
-  let scheduleObj = normalizeGroupSchedule(null);
-  if (req.body && req.body.schedule !== undefined) {
+  let scheduleObj = isChannel ? null : normalizeGroupSchedule(null);
+  if (!isChannel && req.body && req.body.schedule !== undefined) {
     const parsedSched = normalizeGroupSchedule(req.body.schedule, null);
     if (parsedSched.error) return res.status(400).json({ error: parsedSched.error });
     scheduleObj = parsedSched;
     if (scheduleObj.enabled) {
       const evInit = evaluateGroupSchedule(scheduleObj);
       if (!evInit.is_closed && evInit.cycle_key) {
-        // Pre-mark current open cycle so creating an open-hours schedule does not immediately spam morning greeting
         scheduleObj.last_open_cycle = evInit.cycle_key;
       }
     }
   }
 
   const groupConv = {
-    id: nextId(convs, 'chat_conversations'),
-    type: 'agent_group',
+    id: newConvId,
+    type: isChannel ? 'agent_channel' : 'agent_group',
     owner_agent_id: actor.id,
     title,
     description,
+    avatar_url: avatarUrl,
     participants,
     admin_only: adminOnly,
     schedule: scheduleObj,
     pinned_message_id: null,
     read_cursors: readCursors,
+    read_timestamps: {},
     last_message_id: 0,
-    last_message_preview: 'Group created',
+    last_message_preview: isChannel ? 'Announcement Channel created' : 'Group created',
     last_message_sender_key: actor.key,
     last_message_sender_name: actor.display_name,
     last_message_at: now,
@@ -23501,7 +23949,7 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   convs.push(groupConv);
   writeDb('chat_conversations', convs);
 
-  if (scheduleObj.enabled) {
+  if (!isChannel && scheduleObj && scheduleObj.enabled) {
     processGroupSchedulesTick();
   }
 
@@ -23513,37 +23961,84 @@ app.post('/api/chat/groups', requireAuth, (req, res) => {
   sendChatWsEvent({
     type: 'chat:group_created',
     conversation_id: freshGroup.id,
+    conversation_type: freshGroup.type,
     title: freshGroup.title
   }, participants);
 
   res.status(201).json({ conversation: hydrated });
 });
 
-// PATCH /api/chat/groups/:id — Owning Agent updates title, description, or admin_only
-app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
+// POST /api/chat/groups/:id/avatar — Owning Agent uploads or removes Group / Announcement Channel photo
+app.post('/api/chat/groups/:id/avatar', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor || actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only the owning Agent can manage this group.' });
+    return res.status(403).json({ error: 'Only the owning Agent can change this photo.' });
   }
 
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
-  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
-  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+  const conv = convs.find(c => Number(c.id) === convId && isAgentGroupOrChannel(c) && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group or channel not found or access denied.' });
+
+  const oldUrl = conv.avatar_url || '';
+  if (req.body && req.body.remove) {
+    conv.avatar_url = '';
+    if (oldUrl) safeUnlinkGroupAvatar(oldUrl);
+  } else {
+    const imgData = (req.body && (req.body.image || req.body.avatar || req.body.data)) || '';
+    const saved = saveGroupAvatarDataUri(convId, imgData);
+    if (saved.error) return res.status(400).json({ error: saved.error });
+    conv.avatar_url = saved.avatar_url;
+    if (oldUrl && oldUrl !== conv.avatar_url) safeUnlinkGroupAvatar(oldUrl);
+  }
+
+  conv.updated_at = new Date().toISOString();
+  writeDb('chat_conversations', convs);
+
+  sendChatWsEvent({
+    type: 'chat:group_updated',
+    conversation_id: convId,
+    avatar_url: conv.avatar_url
+  }, conv.participants || []);
+
+  const allMessages = readDb('chat_messages') || [];
+  res.json({
+    success: true,
+    avatar_url: conv.avatar_url,
+    conversation: hydrateConversationForActor(conv, actor, allMessages)
+  });
+});
+
+// PATCH /api/chat/groups/:id — Owning Agent updates title, description, admin_only (groups), or schedule (groups)
+app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor || actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only the owning Agent can manage this group or channel.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId && isAgentGroupOrChannel(c) && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group or channel not found or access denied.' });
+
+  const isChannel = conv.type === 'agent_channel';
 
   if (req.body && req.body.title !== undefined) {
     const t = String(req.body.title || '').trim().slice(0, 80);
-    if (!t) return res.status(400).json({ error: 'Group name cannot be empty.' });
+    if (!t) return res.status(400).json({ error: isChannel ? 'Channel name cannot be empty.' : 'Group name cannot be empty.' });
     conv.title = t;
   }
   if (req.body && req.body.description !== undefined) {
     conv.description = String(req.body.description || '').trim().slice(0, 240);
   }
-  if (req.body && req.body.admin_only !== undefined) {
+  if (!isChannel && req.body && req.body.admin_only !== undefined) {
     conv.admin_only = Boolean(req.body.admin_only);
   }
+  if (isChannel) {
+    conv.admin_only = true; // Announcement Channel is ALWAYS admin-only sending
+  }
   let scheduleUpdated = false;
-  if (req.body && req.body.schedule !== undefined) {
+  if (!isChannel && req.body && req.body.schedule !== undefined) {
     const prevSched = conv.schedule || null;
     const nextSched = normalizeGroupSchedule(req.body.schedule, prevSched);
     if (nextSched.error) return res.status(400).json({ error: nextSched.error });
@@ -23551,11 +24046,9 @@ app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
     if (nextSched.enabled && timingChanged) {
       const evNow = evaluateGroupSchedule(nextSched);
       if (!evNow.is_closed && evNow.cycle_key) {
-        // Avoid firing an immediate morning greeting when admin configures schedule during daytime open hours
         nextSched.last_open_cycle = evNow.cycle_key;
         nextSched.last_close_cycle = null;
       } else {
-        // Currently inside closed window: allow night message to post immediately once
         nextSched.last_close_cycle = null;
       }
     }
@@ -23565,7 +24058,7 @@ app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
   conv.updated_at = new Date().toISOString();
   writeDb('chat_conversations', convs);
 
-  if (scheduleUpdated && conv.schedule && conv.schedule.enabled) {
+  if (!isChannel && scheduleUpdated && conv.schedule && conv.schedule.enabled) {
     processGroupSchedulesTick();
   }
 
@@ -23577,6 +24070,7 @@ app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
     conversation_id: convId,
     title: freshConv.title,
     description: freshConv.description,
+    avatar_url: freshConv.avatar_url || '',
     admin_only: freshConv.admin_only,
     pinned_message_id: freshConv.pinned_message_id,
     schedule_changed: scheduleUpdated
@@ -23585,23 +24079,34 @@ app.patch('/api/chat/groups/:id', requireAuth, (req, res) => {
   res.json({ conversation: hydrateConversationForActor(freshConv, actor, allMessages) });
 });
 
-// POST /api/chat/groups/:id/members — Owning Agent adds or removes own Clients
+// POST /api/chat/groups/:id/members — Owning Agent adds or removes own Clients (newly added members ONLY see messages sent after joining — no old chat history)
 app.post('/api/chat/groups/:id/members', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor || actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only the owning Agent can manage group members.' });
+    return res.status(403).json({ error: 'Only the owning Agent can manage members.' });
   }
 
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
-  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
-  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+  const conv = convs.find(c => Number(c.id) === convId && isAgentGroupOrChannel(c) && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group or channel not found or access denied.' });
 
   const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
   const myClientIdSet = new Set(myClients.map(c => Number(c.id)));
 
   const addIds = Array.isArray(req.body && req.body.add_client_ids) ? req.body.add_client_ids : [];
   const removeIds = Array.isArray(req.body && req.body.remove_client_ids) ? req.body.remove_client_ids : [];
+
+  const allMessages = readDb('chat_messages') || [];
+  let latestConvMsgId = Number(conv.last_message_id || 0);
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const m = allMessages[i];
+    if (m && Number(m.conversation_id) === convId) {
+      if (Number(m.id) > latestConvMsgId) latestConvMsgId = Number(m.id);
+      break;
+    }
+  }
+  const nowIso = new Date().toISOString();
 
   const partSet = new Set(conv.participants || [actor.key]);
   const addedKeys = [];
@@ -23614,8 +24119,13 @@ app.post('/api/chat/groups/:id/members', requireAuth, (req, res) => {
     if (!partSet.has(ck)) {
       partSet.add(ck);
       addedKeys.push(ck);
-      if (!conv.read_cursors) conv.read_cursors = {};
-      conv.read_cursors[ck] = Number(conv.last_message_id || 0);
+      if (!conv.member_joined_after_id || typeof conv.member_joined_after_id !== 'object') conv.member_joined_after_id = {};
+      if (!conv.member_joined_at || typeof conv.member_joined_at !== 'object') conv.member_joined_at = {};
+      if (!conv.read_cursors || typeof conv.read_cursors !== 'object') conv.read_cursors = {};
+      // WhatsApp-style join isolation: newly added members only see messages sent AFTER they are added (no old chat history)
+      conv.member_joined_after_id[ck] = latestConvMsgId;
+      conv.member_joined_at[ck] = nowIso;
+      conv.read_cursors[ck] = latestConvMsgId;
     }
   }
 
@@ -23629,10 +24139,10 @@ app.post('/api/chat/groups/:id/members', requireAuth, (req, res) => {
     }
   }
 
-  // Always keep owning Agent in the group
+  // Always keep owning Agent in the group/channel
   partSet.add(actor.key);
   conv.participants = Array.from(partSet);
-  conv.updated_at = new Date().toISOString();
+  conv.updated_at = nowIso;
   writeDb('chat_conversations', convs);
 
   if (removedKeys.length) {
@@ -23640,11 +24150,10 @@ app.post('/api/chat/groups/:id/members', requireAuth, (req, res) => {
   }
   sendChatWsEvent({ type: 'chat:group_updated', conversation_id: convId }, conv.participants);
 
-  const allMessages = readDb('chat_messages') || [];
   res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
 });
 
-// POST /api/chat/groups/:id/pin — Owning Agent pins or unpins a message
+// POST /api/chat/groups/:id/pin — Owning Agent pins or unpins a message in Group or Announcement Channel
 app.post('/api/chat/groups/:id/pin', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor || actor.role !== 'agent') {
@@ -23653,14 +24162,14 @@ app.post('/api/chat/groups/:id/pin', requireAuth, (req, res) => {
 
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
-  const conv = convs.find(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
-  if (!conv) return res.status(403).json({ error: 'Group not found or access denied.' });
+  const conv = convs.find(c => Number(c.id) === convId && isAgentGroupOrChannel(c) && Number(c.owner_agent_id) === actor.id);
+  if (!conv) return res.status(403).json({ error: 'Group or channel not found or access denied.' });
 
   const msgId = req.body && req.body.message_id ? Number(req.body.message_id) : null;
   const allMessages = readDb('chat_messages') || [];
   if (msgId) {
-    const exists = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId && !m.deleted);
-    if (!exists) return res.status(404).json({ error: 'Message not found in this group.' });
+    const exists = allMessages.find(m => Number(m.id) === msgId && Number(m.conversation_id) === convId && !m.deleted && !m.silent_removed);
+    if (!exists) return res.status(404).json({ error: 'Message not found.' });
     conv.pinned_message_id = msgId;
   } else {
     conv.pinned_message_id = null;
@@ -23677,20 +24186,22 @@ app.post('/api/chat/groups/:id/pin', requireAuth, (req, res) => {
   res.json({ conversation: hydrateConversationForActor(conv, actor, allMessages) });
 });
 
-// DELETE /api/chat/groups/:id — Owning Agent deletes group
+// DELETE /api/chat/groups/:id — Owning Agent deletes Group or Announcement Channel
 app.delete('/api/chat/groups/:id', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor || actor.role !== 'agent') {
-    return res.status(403).json({ error: 'Only the owning Agent can delete this group.' });
+    return res.status(403).json({ error: 'Only the owning Agent can delete this group or channel.' });
   }
 
   const convId = Number(req.params.id);
   const convs = readDb('chat_conversations') || [];
-  const idx = convs.findIndex(c => Number(c.id) === convId && c.type === 'agent_group' && Number(c.owner_agent_id) === actor.id);
-  if (idx === -1) return res.status(403).json({ error: 'Group not found or access denied.' });
+  const idx = convs.findIndex(c => Number(c.id) === convId && isAgentGroupOrChannel(c) && Number(c.owner_agent_id) === actor.id);
+  if (idx === -1) return res.status(403).json({ error: 'Group or channel not found or access denied.' });
 
   const removed = convs.splice(idx, 1)[0];
   writeDb('chat_conversations', convs);
+
+  if (removed && removed.avatar_url) safeUnlinkGroupAvatar(removed.avatar_url);
 
   const allMessages = readDb('chat_messages') || [];
   const remaining = allMessages.filter(m => Number(m.conversation_id) !== convId);
@@ -24149,9 +24660,10 @@ wss.on('connection', (ws, req) => {
         const convs = readDb('chat_conversations') || [];
         const conv = convs.find(c => Number(c.id) === convId);
         if (!conv || !canAccessConversation(curActor, conv)) return;
+        if (conv.type === 'agent_channel' && curActor.role !== 'agent') return;
         if (conv.type === 'agent_group' && conv.admin_only && curActor.role !== 'agent') return;
         // Privacy: Client typing in a group is only visible to the Agent admin, never to other Clients
-        const others = (conv.type === 'agent_group' && curActor.role === 'client')
+        const others = (isAgentGroupOrChannel(conv) && curActor.role === 'client')
           ? [`agent:${conv.owner_agent_id}`]
           : (conv.participants || []).filter(k => k !== curActor.key);
         sendChatWsEvent({
@@ -24171,17 +24683,8 @@ wss.on('connection', (ws, req) => {
         const convs = readDb('chat_conversations') || [];
         const conv = convs.find(c => Number(c.id) === convId);
         if (!conv || !canAccessConversation(curActor, conv)) return;
-        if (!conv.read_cursors) conv.read_cursors = {};
-        if (lastReadId > Number(conv.read_cursors[curActor.key] || 0)) {
-          conv.read_cursors[curActor.key] = lastReadId;
-          writeDb('chat_conversations', convs);
-          sendChatWsEvent({
-            type: 'chat:read',
-            conversation_id: convId,
-            actor_key: curActor.key,
-            last_read_id: lastReadId
-          }, conv.participants);
-        }
+        const allMessages = readDb('chat_messages') || [];
+        markConversationReadForActor(conv, convs, curActor, lastReadId, allMessages);
       }
     } catch (_) { /* ignore malformed ws frames */ }
   });

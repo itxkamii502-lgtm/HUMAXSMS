@@ -810,13 +810,14 @@ function gracefulShutdown(signal) {
   const forceExitTimer = setTimeout(() => {
     try { flushPendingWrites(); } catch (_) {}
     process.exit(0);
-  }, 3500);
+  }, 1000);
   if (forceExitTimer.unref) forceExitTimer.unref();
 
   try {
     if (typeof wss !== 'undefined' && wss && wss.clients) {
       wss.clients.forEach(client => {
         try { client.close(1001, 'Server restarting'); } catch (_) {}
+        try { client.terminate(); } catch (_) {}
       });
     }
   } catch (_) {}
@@ -829,6 +830,8 @@ function gracefulShutdown(signal) {
       try { flushPendingWrites(); } catch (_) {}
       process.exit(0);
     });
+    if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
   } catch (_) {
     process.exit(0);
   }
@@ -24817,20 +24820,31 @@ function cleanupOrphanedNumbers() {
 }
 
 const BIND_HOST = process.env.HOST || '0.0.0.0';
+server.on('error', (err) => {
+  console.error(`[HUMEX SMS] Server listen error on ${BIND_HOST}:${PORT}:`, err && err.message ? err.message : err);
+  process.exit(1);
+});
+
 server.listen(PORT, BIND_HOST, () => {
-  runPaytermMigration();
-  seedOwnershipLedgerIfEmpty();
-  cleanupOrphanedNumbers();
-  scanInactiveNumbers();
-  const inactivityScanTimer = setInterval(() => scanInactiveNumbers(), 5 * 60 * 1000);
-  if (inactivityScanTimer && typeof inactivityScanTimer.unref === 'function') inactivityScanTimer.unref();
-  processGroupSchedulesTick();
-  const groupSchedTimer = setInterval(() => processGroupSchedulesTick(), 15000);
-  if (groupSchedTimer && typeof groupSchedTimer.unref === 'function') groupSchedTimer.unref();
-  pruneExpiredChatMessages(true);
-  const chatRetentionTimer = setInterval(() => pruneExpiredChatMessages(true), 15 * 60 * 1000);
-  if (chatRetentionTimer && typeof chatRetentionTimer.unref === 'function') chatRetentionTimer.unref();
   console.log(`[HUMEX SMS] Server running on http://${BIND_HOST}:${PORT}`);
   console.log(`  ➜  Local:   http://localhost:${PORT}/`);
   console.log(`  ➜  Network: http://${BIND_HOST}:${PORT}/`);
+
+  setImmediate(() => {
+    const safeBootTask = (name, fn) => {
+      try { fn(); } catch (err) { console.error(`[BOOT TASK ERROR] ${name}:`, err && err.message ? err.message : err); }
+    };
+    safeBootTask('runPaytermMigration', () => runPaytermMigration());
+    safeBootTask('seedOwnershipLedgerIfEmpty', () => seedOwnershipLedgerIfEmpty());
+    safeBootTask('cleanupOrphanedNumbers', () => cleanupOrphanedNumbers());
+    safeBootTask('scanInactiveNumbers', () => scanInactiveNumbers());
+    const inactivityScanTimer = setInterval(() => safeBootTask('scanInactiveNumbers', () => scanInactiveNumbers()), 5 * 60 * 1000);
+    if (inactivityScanTimer && typeof inactivityScanTimer.unref === 'function') inactivityScanTimer.unref();
+    safeBootTask('processGroupSchedulesTick', () => processGroupSchedulesTick());
+    const groupSchedTimer = setInterval(() => safeBootTask('processGroupSchedulesTick', () => processGroupSchedulesTick()), 15000);
+    if (groupSchedTimer && typeof groupSchedTimer.unref === 'function') groupSchedTimer.unref();
+    safeBootTask('pruneExpiredChatMessages', () => pruneExpiredChatMessages(true));
+    const chatRetentionTimer = setInterval(() => safeBootTask('pruneExpiredChatMessages', () => pruneExpiredChatMessages(true)), 15 * 60 * 1000);
+    if (chatRetentionTimer && typeof chatRetentionTimer.unref === 'function') chatRetentionTimer.unref();
+  });
 });

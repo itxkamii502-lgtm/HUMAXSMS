@@ -371,7 +371,60 @@
     syncSidebarBadge();
   }
 
+  function ensureFloatingChatBall() {
+    if (window.__AUTH_BLOCKED__) return null;
+    let btn = document.getElementById('zy-live-chat-fab');
+    if (btn) return btn;
+    if (!document.body) return null;
+
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'zy-live-chat-fab';
+    btn.className = 'zy-live-chat-fab';
+    btn.setAttribute('aria-label', 'Open Live Chat');
+    btn.setAttribute('title', 'Live Chat');
+    btn.innerHTML = `
+      <span class="zy-live-chat-fab-ring" aria-hidden="true"></span>
+      <span class="zy-live-chat-fab-core" aria-hidden="true">
+        <i class="fas fa-comments"></i>
+      </span>
+      <span class="zy-live-chat-fab-tip" aria-hidden="true">Live Chat</span>
+      <span class="zy-live-chat-fab-badge" id="zy-live-chat-fab-badge" style="display:none;">0</span>
+    `;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.loadPage === 'function') {
+        window.loadPage('live-chat');
+      } else {
+        window.location.href = '/ints/live-chat';
+      }
+    });
+    document.body.appendChild(btn);
+    return btn;
+  }
+
   function syncSidebarBadge() {
+    const count = Number(state.totalUnread || 0);
+    const label = count > 99 ? '99+' : String(count);
+
+    // Sync floating Live Chat ball unread badge (Owner, Agent, Client)
+    const fab = ensureFloatingChatBall();
+    const fabBadge = fab ? fab.querySelector('#zy-live-chat-fab-badge') : document.getElementById('zy-live-chat-fab-badge');
+    if (fabBadge) {
+      if (count > 0) {
+        fabBadge.textContent = label;
+        fabBadge.style.display = 'inline-flex';
+      } else {
+        fabBadge.textContent = '0';
+        fabBadge.style.display = 'none';
+      }
+    }
+    if (fab) {
+      fab.classList.toggle('has-unread', count > 0);
+    }
+
+    // Keep sidebar badge helper safe if any custom view still mounts #nav-live-chat
     const nav = document.getElementById('nav-live-chat');
     if (!nav) return;
     let badge = nav.querySelector('.zy-chat-nav-badge');
@@ -382,8 +435,8 @@
       if (caret) nav.insertBefore(badge, caret);
       else nav.appendChild(badge);
     }
-    if (state.totalUnread > 0) {
-      badge.textContent = state.totalUnread > 99 ? '99+' : String(state.totalUnread);
+    if (count > 0) {
+      badge.textContent = label;
       badge.style.display = 'inline-flex';
     } else {
       badge.textContent = '0';
@@ -3652,9 +3705,10 @@
 
   window.HumexLiveChat = HumexLiveChat;
 
-  // Boot background live sync + sidebar unread counter badge on every panel page
+  // Boot background live sync + bottom-right floating Live Chat ball on every panel page
   function initBackground() {
     if (window.__AUTH_BLOCKED__) return;
+    ensureFloatingChatBall();
     syncSidebarBadge();
     fetchBootstrap(true);
     connectWs();

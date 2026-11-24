@@ -1646,17 +1646,21 @@ assertCheck('shared-ui-kit.js table empty row integrates zyEmptyState',
     speedAgentPagesJs.includes("'client-payment-requests': () => pgClientPaymentRequests('all')")
   );
 
-  assertCheck('Refinement 13c: Client Ranges Rate Card matches Agent Ranges layout (Weekly 7/3, Monthly 30/5 {W}, {W} Monthly Route tags, Held/Pool, payterms_pkr modal, no Biweekly)',
+  assertCheck('Refinement 13c: Client Ranges Add uses 10% zoomed unified Payterm+PKR/SMS column (Allowed Batch hidden), Held/Pool, Today Quota, and My Numbers Display Full/Local toggle across all panels',
     speedClientPagesJs.includes('Weekly (7/3)') &&
     !speedClientPagesJs.includes('Biweekly (15/3)') &&
     speedClientPagesJs.includes('Monthly (30/5) {W}') &&
     speedClientPagesJs.includes('zy-wn-route-tag') &&
     speedClientPagesJs.includes('num-route-type') &&
     speedClientPagesJs.includes('Held / Pool') &&
-    speedClientPagesJs.includes('Allowed Batch') &&
+    speedClientPagesJs.includes('PKR / SMS') &&
+    speedClientPagesJs.includes('zy-cl-ranges-zoom') &&
+    !speedClientPagesJs.includes("'Allowed Batch'") &&
     speedClientPagesJs.includes('Today Quota') &&
     speedClientPagesJs.includes('payterms_pkr') &&
-    speedClientPagesJs.includes('Payterms Rate Card (PKR)')
+    speedClientPagesJs.includes('Payterms Rate Card (PKR)') &&
+    speedClientPagesJs.includes('zyRenderMyNumDisplayControl') &&
+    speedAgentPagesJs.includes('zyRenderMyNumDisplayControl')
   );
 
   // 14. Whitenoise Provider, Permission-Gated CDR 2 & Monthly (30/5) {W} Schedule

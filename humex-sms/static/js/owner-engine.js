@@ -1579,6 +1579,8 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
       zyCrumb(['Virtual Numbers', 'Manage Numbers Pool']);
     }
 
+    if (typeof window.zyResetMyNumDisplayMode === 'function') window.zyResetMyNumDisplayMode();
+
     c.innerHTML = `
       ${renderOwnerHubTabs('numbers', 'my-numbers')}
       <div class="zy-intro">Here you can view, filter, and manage virtual phone numbers in the Master Pool, allocate numbers to Agents or Clients, or unallocate back to pool.</div>
@@ -1647,10 +1649,13 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
 
       <!-- Table Panel with Toolbar matching Frame 02 -->
       <div class="apx-card zy-panel">
-        <div class="apx-card-header zy-panel-head">
+        <div class="apx-card-header zy-panel-head" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
           <div class="apx-card-title">
             <i class="fas fa-hashtag"></i> Manage Numbers Pool
             <span id="owner-numbers-total-badge" class="badge badge-blue" style="margin-left:8px;font-size:11px;display:none;"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            ${typeof window.zyRenderMyNumDisplayControl === 'function' ? window.zyRenderMyNumDisplayControl('zyOwnerOnNumDisplayChange', 'dt-numbers') : ''}
           </div>
         </div>
         <div class="apx-card-body zy-panel-body" id="owner-numbers-body" style="padding:0;"><div class="zy-loading" style="padding:30px;text-align:center;">Loading numbers pool…</div></div>
@@ -1748,6 +1753,7 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
     const currentPage = Math.max(1, Math.min(Number(res.page) || targetPage || 1, totalPages));
 
     window._zyOwnerNumPage = currentPage;
+    window._zyOwnerNumLastMeta = { numbers, total, totalPages, currentPage, perPage };
     ZY_OWNER_ALL_NUMS = numbers;
     window._currentNumbersList = numbers;
 
@@ -1757,100 +1763,119 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
       badge.style.display = 'inline-flex';
     }
 
-    const rows = numbers.map(n => {
-      const rInfo = (n.range_id && ZY_OWNER_RANGE_BY_ID[n.range_id]) || ZY_OWNER_RANGE_LOOKUP[`${n.country}|${n.provider}`] || null;
-      const rateInfo = ZY_OWNER_RATE_LOOKUP[`${n.country}|${n.provider}`] || null;
-
-      // Agents column: show ONLY the Agent username (never client username or extra tags)
-      let agentVal = '';
-      if (n.agent_id && ZY_OWNER_AG_BY_ID[n.agent_id]) {
-        agentVal = ZY_OWNER_AG_BY_ID[n.agent_id];
-      } else if (n.agent_username && String(n.agent_username).trim()) {
-        agentVal = String(n.agent_username).trim();
-      } else if (n.agent && !['unassigned', 'unallocated', '—', '-'].includes(String(n.agent).trim().toLowerCase())) {
-        agentVal = String(n.agent).trim();
-      }
-      const agentHtml = agentVal ? `<span class="fw-600">${escapeHtml(agentVal)}</span>` : '—';
-
-      const dateCell = typeof zyFormatNumberDateCell === 'function'
-        ? zyFormatNumberDateCell(n, 'owner')
-        : { v: String(n.assigned_at || n.created_at || n.created || '').slice(0, 10), h: String(n.assigned_at || n.created_at || n.created || '—').slice(0, 10) };
-
-      const rangeDisplayName = n.range_name || n.range_label || rInfo?.range_name || rInfo?.name || n.country || '—';
-      const rawPrefix = rInfo?.prefix || n.prefix || '';
-      const prefixDisplay = String(rawPrefix).trim().replace(/^\++/, '') || '—';
-      const cleanNumber = String(n.number || '').trim().replace(/^\++/, '');
-      const carrierCost = (rInfo?.cost ?? rInfo?.company_cost ?? rateInfo?.buy_rate ?? n.cost) ?? 0;
-      const agentPayout = (rInfo?.payout ?? rateInfo?.sell_rate ?? n.agent_rate ?? n.payout) ?? 0;
-      const isAssigned = !!(n.client_id || n.agent_id);
-
-      const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
-      const isWnNum = Boolean(
-        n.is_whitenoise ||
-        (rInfo && rInfo.is_whitenoise) ||
-        String(n.provider || (rInfo && rInfo.provider) || '').toLowerCase().includes('whitenoise') ||
-        String(n.payout_schedule || (rInfo && rInfo.payout_schedule) || '').toLowerCase() === 'monthly30_5' ||
-        String(n.payterm || (rInfo && rInfo.payterm) || '').toLowerCase() === 'monthly'
-      );
-      const rawNumBox = typeof zyRenderNumberCopyBox === 'function'
-        ? zyRenderNumberCopyBox(cleanNumber, { isWn: isWnNum })
-        : `<span class="monospace fw-600${isWnNum ? ' zy-wn-number' : ''}">${escapeHtml(cleanNumber || '—')}</span>`;
-      const numBox = isBlockedNum
-        ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${escapeHtml(cleanNumber || '—')}</span>`
-        : rawNumBox;
-      const statusCell = isBlockedNum
-        ? `<span class="badge badge-red" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-weight:700;"><i class="fas fa-ban"></i> Blocked${n.inactivity_days_limit ? ` (${n.inactivity_days_limit}d)` : ''}</span>`
-        : statusBadge(n.status || 'active');
-      const rangeCellHtml = isBlockedNum
-        ? `<span style="color:#dc2626;font-weight:700;">${escapeHtml(rangeDisplayName)}</span>`
-        : (isWnNum ? `<span class="zy-wn-range-name">${escapeHtml(rangeDisplayName)}</span>` : escapeHtml(rangeDisplayName));
-      const r = [
-        dateCell,
-        { v: rangeDisplayName, h: rangeCellHtml },
-        escapeHtml(prefixDisplay),
-        { v: cleanNumber, h: numBox },
-        { v: agentVal || '—', h: agentHtml },
-        `$ ${carrierCost}`,
-        `$ ${agentPayout}`,
-        { v: '', h: `<span style="font-size:11px;color:var(--text-muted);">SD: <b>${n.sd_limit ?? 0}</b> | OTP: <b>${n.otp_limit ?? 0}</b></span>` },
-        statusCell,
-        { v: '', h: `<div style="display:inline-flex;gap:4px;align-items:center;justify-content:center;">` +
-          (isAssigned
-            ? `<button class="zy-rowbtn" onclick="zyOwnerUnassignOne(${n.id})" title="Unallocate back to Master Pool">${typeof zyImg === 'function' ? zyImg('btn_row_x') : '<i class="fas fa-rotate-left"></i>'}</button>`
-            : `<button class="zy-rowbtn" onclick="zyOwnerAllocateOne(${n.id})" title="Allocate to Agent">${typeof zyImg === 'function' ? zyImg('btn_alloc') : '<i class="fas fa-user-plus"></i>'}</button>`) +
-          `<button class="zy-rowbtn" onclick="zyOwnerDeleteOne(${n.id},'${cleanNumber.replace(/'/g, "\\'")}')" title="Delete Number">${typeof zyImg === 'function' ? zyImg('btn_unassign') : '<i class="fas fa-trash"></i>'}</button>` +
-          `</div>` }
-      ];
-      r.__id = n.id;
-      r.__raw = n;
-      return r;
-    });
-
-    ZY_OWNER_NUMROWS = rows;
-    if (typeof zyDT2 === 'function') {
-      bodyEl.innerHTML = zyDT2('dt-numbers', {
-        cols: ['Date', 'Range', 'Prefix', 'Number', 'Agents', 'Cost', 'Payout', 'Limits', 'Status', 'Action'],
-        rows,
-        check: true,
-        perPage,
-        serverMode: true,
-        totalRecords: total,
-        totalPages,
-        page: currentPage,
-        onPageChange: (p) => zyOwnerLoadNumbers(p),
-        onSizeChange: (s) => {
-          window._zyOwnerNumLimit = s;
-          zyOwnerLoadNumbers(1);
-        }
-      });
-      if (typeof zy2Render === 'function') zy2Render('dt-numbers');
-    } else {
-      bodyEl.innerHTML = '<div class="zy-empty-state">Data engine ready.</div>';
-    }
+    zyOwnerRenderNumbersTable();
   } catch (err) {
     if (err && err.name === 'AbortError') return;
     console.error('My Numbers load error:', err);
     bodyEl.innerHTML = '<div class="zy-empty" style="padding:30px;text-align:center;color:#ef4444;">Failed to load numbers pool. Please try again.</div>';
+  }
+}
+
+window.zyOwnerOnNumDisplayChange = function(mode) {
+  if (typeof window.zySetMyNumDisplayMode === 'function') {
+    window.zySetMyNumDisplayMode(mode, () => zyOwnerRenderNumbersTable());
+  }
+};
+
+function zyOwnerRenderNumbersTable() {
+  const bodyEl = document.getElementById('owner-numbers-body');
+  const meta = window._zyOwnerNumLastMeta;
+  if (!bodyEl || !meta) return;
+  const { numbers, total, totalPages, currentPage, perPage } = meta;
+
+  const rows = (numbers || []).map(n => {
+    const rInfo = (n.range_id && ZY_OWNER_RANGE_BY_ID[n.range_id]) || ZY_OWNER_RANGE_LOOKUP[`${n.country}|${n.provider}`] || null;
+    const rateInfo = ZY_OWNER_RATE_LOOKUP[`${n.country}|${n.provider}`] || null;
+
+    // Agents column: show ONLY the Agent username (never client username or extra tags)
+    let agentVal = '';
+    if (n.agent_id && ZY_OWNER_AG_BY_ID[n.agent_id]) {
+      agentVal = ZY_OWNER_AG_BY_ID[n.agent_id];
+    } else if (n.agent_username && String(n.agent_username).trim()) {
+      agentVal = String(n.agent_username).trim();
+    } else if (n.agent && !['unassigned', 'unallocated', '—', '-'].includes(String(n.agent).trim().toLowerCase())) {
+      agentVal = String(n.agent).trim();
+    }
+    const agentHtml = agentVal ? `<span class="fw-600">${escapeHtml(agentVal)}</span>` : '—';
+
+    const dateCell = typeof zyFormatNumberDateCell === 'function'
+      ? zyFormatNumberDateCell(n, 'owner')
+      : { v: String(n.assigned_at || n.created_at || n.created || '').slice(0, 10), h: String(n.assigned_at || n.created_at || n.created || '—').slice(0, 10) };
+
+    const rangeDisplayName = n.range_name || n.range_label || rInfo?.range_name || rInfo?.name || n.country || '—';
+    const rawPrefix = rInfo?.prefix || n.prefix || '';
+    const prefixClean = String(rawPrefix).trim().replace(/^\++/, '');
+    const prefixDisplay = prefixClean || '—';
+    const cleanNumber = String(n.number || '').trim().replace(/^\++/, '');
+    const displayNumber = typeof window.zyFormatMyNumberDisplay === 'function'
+      ? window.zyFormatMyNumberDisplay(cleanNumber, prefixClean)
+      : cleanNumber;
+    const carrierCost = (rInfo?.cost ?? rInfo?.company_cost ?? rateInfo?.buy_rate ?? n.cost) ?? 0;
+    const agentPayout = (rInfo?.payout ?? rateInfo?.sell_rate ?? n.agent_rate ?? n.payout) ?? 0;
+    const isAssigned = !!(n.client_id || n.agent_id);
+
+    const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
+    const isWnNum = Boolean(
+      n.is_whitenoise ||
+      (rInfo && rInfo.is_whitenoise) ||
+      String(n.provider || (rInfo && rInfo.provider) || '').toLowerCase().includes('whitenoise') ||
+      String(n.payout_schedule || (rInfo && rInfo.payout_schedule) || '').toLowerCase() === 'monthly30_5' ||
+      String(n.payterm || (rInfo && rInfo.payterm) || '').toLowerCase() === 'monthly'
+    );
+    const rawNumBox = typeof zyRenderNumberCopyBox === 'function'
+      ? zyRenderNumberCopyBox(displayNumber, { isWn: isWnNum })
+      : `<span class="monospace fw-600${isWnNum ? ' zy-wn-number' : ''}">${escapeHtml(displayNumber || '—')}</span>`;
+    const numBox = isBlockedNum
+      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${escapeHtml(displayNumber || '—')}</span>`
+      : rawNumBox;
+    const statusCell = isBlockedNum
+      ? `<span class="badge badge-red" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-weight:700;"><i class="fas fa-ban"></i> Blocked${n.inactivity_days_limit ? ` (${n.inactivity_days_limit}d)` : ''}</span>`
+      : statusBadge(n.status || 'active');
+    const rangeCellHtml = isBlockedNum
+      ? `<span style="color:#dc2626;font-weight:700;">${escapeHtml(rangeDisplayName)}</span>`
+      : (isWnNum ? `<span class="zy-wn-range-name">${escapeHtml(rangeDisplayName)}</span>` : escapeHtml(rangeDisplayName));
+    const r = [
+      dateCell,
+      { v: rangeDisplayName, h: rangeCellHtml },
+      escapeHtml(prefixDisplay),
+      { v: displayNumber, h: numBox },
+      { v: agentVal || '—', h: agentHtml },
+      `$ ${carrierCost}`,
+      `$ ${agentPayout}`,
+      { v: '', h: `<span style="font-size:11px;color:var(--text-muted);">SD: <b>${n.sd_limit ?? 0}</b> | OTP: <b>${n.otp_limit ?? 0}</b></span>` },
+      statusCell,
+      { v: '', h: `<div style="display:inline-flex;gap:4px;align-items:center;justify-content:center;">` +
+        (isAssigned
+          ? `<button class="zy-rowbtn" onclick="zyOwnerUnassignOne(${n.id})" title="Unallocate back to Master Pool">${typeof zyImg === 'function' ? zyImg('btn_row_x') : '<i class="fas fa-rotate-left"></i>'}</button>`
+          : `<button class="zy-rowbtn" onclick="zyOwnerAllocateOne(${n.id})" title="Allocate to Agent">${typeof zyImg === 'function' ? zyImg('btn_alloc') : '<i class="fas fa-user-plus"></i>'}</button>`) +
+        `<button class="zy-rowbtn" onclick="zyOwnerDeleteOne(${n.id},'${cleanNumber.replace(/'/g, "\\'")}')" title="Delete Number">${typeof zyImg === 'function' ? zyImg('btn_unassign') : '<i class="fas fa-trash"></i>'}</button>` +
+        `</div>` }
+    ];
+    r.__id = n.id;
+    r.__raw = n;
+    return r;
+  });
+
+  ZY_OWNER_NUMROWS = rows;
+  if (typeof zyDT2 === 'function') {
+    bodyEl.innerHTML = zyDT2('dt-numbers', {
+      cols: ['Date', 'Range', 'Prefix', 'Number', 'Agents', 'Cost', 'Payout', 'Limits', 'Status', 'Action'],
+      rows,
+      check: true,
+      perPage,
+      serverMode: true,
+      totalRecords: total,
+      totalPages,
+      page: currentPage,
+      onPageChange: (p) => zyOwnerLoadNumbers(p),
+      onSizeChange: (s) => {
+        window._zyOwnerNumLimit = s;
+        zyOwnerLoadNumbers(1);
+      }
+    });
+    if (typeof zy2Render === 'function') zy2Render('dt-numbers');
+  } else {
+    bodyEl.innerHTML = '<div class="zy-empty-state">Data engine ready.</div>';
   }
 }
 

@@ -11,18 +11,18 @@ async function pgSmsRanges() {
   const c = document.getElementById('page-content');
   zyCrumb(['SMS Module', 'Ranges Add']);
   c.innerHTML = `
-    <div class="page-header" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div class="page-header zy-cl-ranges-zoom-head" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div>
-        <div class="page-title" style="font-size:18px;font-weight:800;">
+        <div class="page-title" style="font-size:20px;font-weight:800;">
           <i class="fas fa-table-list" style="color:#0ea5e9;margin-right:6px;"></i> Ranges Add (PKR)
         </div>
-        <div class="page-subtitle" style="font-size:12.5px;">
-          Agent-approved termination ranges priced in PKR. Batch size, daily additions, and max holding limits are configured per range by your Agent.
+        <div class="page-subtitle" style="font-size:13.5px;font-weight:600;">
+          Agent-approved termination ranges priced in PKR. Daily additions and max holding limits are configured per range by your Agent.
         </div>
       </div>
     </div>
-    <div class="apx-card zy-theme-card" style="border-radius:10px;overflow:hidden;">
-      <div class="apx-card-body" id="cl-ranges-table-host" style="padding:14px;"><div class="zy-loading">Loading termination ranges…</div></div>
+    <div class="apx-card zy-theme-card zy-cl-ranges-zoom" style="border-radius:10px;overflow:hidden;">
+      <div class="apx-card-body" id="cl-ranges-table-host" style="padding:16px;"><div class="zy-loading">Loading termination ranges…</div></div>
     </div>`;
 
   try {
@@ -117,14 +117,44 @@ async function pgSmsRanges() {
         ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="${isWn ? 'Submit Monthly Route {W} return request to your Agent' : `Return numbers from ${zyEsc(rName)} by date`}"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
         : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid is-disabled" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
+      const fmtPkrRate = (val) => {
+        const n = Number(val);
+        if (!Number.isFinite(n)) return '0.00';
+        const fixed4 = n.toFixed(4);
+        const trimmed = fixed4.replace(/0+$/, '').replace(/\.$/, '');
+        const parts = trimmed.split('.');
+        if (!parts[1] || parts[1].length < 2) return n.toFixed(2);
+        return trimmed;
+      };
+
+      const paytermUnits = [];
+      if (weeklyRatePkr !== null) {
+        paytermUnits.push(`
+          <div class="zy-cl-pt-combo is-weekly">
+            <span class="zy-cl-pt-tag"><i class="fas fa-calendar-week"></i> Weekly (7/3)</span>
+            <span class="zy-cl-pt-rate">${fmtPkrRate(weeklyRatePkr)} <span class="zy-cl-pt-unit">PKR / SMS</span></span>
+          </div>`);
+      }
+      if (monthlyRatePkr !== null) {
+        paytermUnits.push(`
+          <div class="zy-cl-pt-combo is-monthly">
+            <span class="zy-cl-pt-tag"><i class="fas fa-calendar-check"></i> Monthly (30/5) {W}</span>
+            <span class="zy-cl-pt-rate">${fmtPkrRate(monthlyRatePkr)} <span class="zy-cl-pt-unit">PKR / SMS</span></span>
+          </div>`);
+      }
+      const paytermCellHtml = paytermUnits.length
+        ? `<div class="zy-cl-pt-stack">${paytermUnits.join('')}</div>`
+        : naHtml;
+      const paytermSortVal = monthlyRatePkr !== null && weeklyRatePkr === null
+        ? `Monthly ${monthlyRatePkr}`
+        : (weeklyRatePkr !== null ? `Weekly ${weeklyRatePkr}` : '');
+
       return [
-        { v: rName, h: `<strong class="${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
-        weeklyRatePkr !== null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(weeklyRatePkr, 4)}</span>` : naHtml,
-        monthlyRatePkr !== null ? `<span class="monospace" style="font-weight:700;color:#7c3aed;">Rs. ${zyFmtMoney(monthlyRatePkr, 4)}</span>` : naHtml,
-        `<span class="monospace" style="font-size:11.5px;" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> · <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:700;">${roomCount.toLocaleString()}</span></span>`,
-        `<span class="monospace" style="font-weight:700;" title="Batch: ${batchSize} numbers · Daily Limit: ${dailyAddsLimit}x/day · Max Hold: ${maxHoldNums}">${batchSize} × ${dailyAddsLimit}/day</span>`,
+        { v: rName, h: `<strong class="zy-cl-rc-rname ${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
+        { v: paytermSortVal, h: paytermCellHtml },
+        `<span class="monospace zy-cl-rc-hp" title="Your Held: ${heldCount}/${maxHoldNums} · Agent Free Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> <span class="zy-cl-rc-dot">·</span> <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:800;">${roomCount.toLocaleString()}</span></span>`,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
-        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">
+        { v: '', h: `<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
           ${actionBtnHtml}
           ${returnBtnHtml}
@@ -133,7 +163,7 @@ async function pgSmsRanges() {
     });
 
     host.innerHTML = zyDT2('dt-cl-ranges', {
-      cols: ['Range', 'Weekly (7/3)', 'Monthly (30/5) {W}', 'Held / Pool', 'Allowed Batch', 'Today Quota', 'Actions'],
+      cols: ['Range', 'Payterm', 'Held / Pool', 'Today Quota', 'Actions'],
       rows
     });
     zy2Render('dt-cl-ranges');
@@ -384,6 +414,7 @@ function zyViewClientRange(i) {
 async function pgMyNumbers() {
   const c = document.getElementById('page-content');
   zyCrumb(['My SMS Numbers']);
+  if (typeof window.zyResetMyNumDisplayMode === 'function') window.zyResetMyNumDisplayMode();
   c.innerHTML = `
     <div class="page-header">
       <div>
@@ -424,6 +455,7 @@ async function pgMyNumbers() {
         <div class="zy-cl-num-meta-bar">
           <span class="zy-cl-num-count"><i class="fas fa-sim-card" style="color:#2563eb;"></i> <b id="cl-num-count">0</b> numbers</span>
           <div class="zy-cl-num-tools">
+            ${typeof window.zyRenderMyNumDisplayControl === 'function' ? window.zyRenderMyNumDisplayControl('zyClientOnNumDisplayChange', 'dt-numbers') : ''}
             <button type="button" class="zy-btn-pill zy-cols-btn zy-cl-num-cols-btn" onclick="zy2Cols('dt-numbers', this)">
               <i class="fas fa-columns"></i> Columns
             </button>
@@ -506,13 +538,16 @@ function zyRenderClientNumbers(list) {
     const rangeName = n.range_name || n.range || `${n.country || ''} ${n.provider || ''}`.trim() || '—';
     const cleanPrefix = String(n.prefix || '').trim().replace(/^\++/, '');
     const cleanNumber = String(n.number || '').trim().replace(/^\++/, '');
+    const displayNumber = typeof window.zyFormatMyNumberDisplay === 'function'
+      ? window.zyFormatMyNumberDisplay(cleanNumber, cleanPrefix)
+      : cleanNumber;
     const isBlockedNum = String(n.status || '').toLowerCase() === 'blocked' || Boolean(n.inactivity_flagged);
     const isWn = zyClientIsWhitenoiseObj(n);
     const rawNumHtml = typeof zyRenderNumberCopyBox === 'function'
-      ? zyRenderNumberCopyBox(cleanNumber, { isWn })
-      : (cleanNumber ? `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--sp-primary,#166534);'}">${zyEsc(cleanNumber)}</span>` : '—');
+      ? zyRenderNumberCopyBox(displayNumber, { isWn })
+      : (displayNumber ? `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--sp-primary,#166534);'}">${zyEsc(displayNumber)}</span>` : '—');
     const numHtml = isBlockedNum
-      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${zyEsc(cleanNumber)}</span>`
+      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-ban" style="font-size:11px;"></i>${zyEsc(displayNumber)}</span>`
       : rawNumHtml;
     const ratePkr = n.client_rate_pkr != null
       ? Number(n.client_rate_pkr)
@@ -541,13 +576,14 @@ function zyRenderClientNumbers(list) {
       dateCell,
       { v: rangeName, h: rangeCellHtml },
       { v: cleanPrefix, h: cleanPrefix || '—' },
-      { v: cleanNumber, h: numHtml },
+      { v: displayNumber, h: numHtml },
       { v: isWn ? 'Monthly (30/5) {W}' : 'Weekly (7/3)', h: termBadge },
       { v: ratePkr ?? '', h: ratePkr != null ? `<span class="zy-cl-rc-rate">Rs. ${zyFmtMoney(Number(ratePkr), 4)}</span>` : '—' },
       { v: (n.sms_daily || 0) + (n.sms_weekly || 0), h: `SD: <b>${n.sms_daily || 0}</b> | SW: <b>${n.sms_weekly || 0}</b>` },
       { v: isBlockedNum ? 'blocked' : (isWn ? 'fetch' : ''), h: actionHtml }
     ];
     r.__id = n.id;
+    r.__raw = n;
     return r;
   });
 
@@ -567,6 +603,12 @@ function zyRenderClientNumbers(list) {
     zy2Render('dt-numbers');
   }
 }
+
+window.zyClientOnNumDisplayChange = function(mode) {
+  if (typeof window.zySetMyNumDisplayMode === 'function') {
+    window.zySetMyNumDisplayMode(mode, () => zyClientNumFilter());
+  }
+};
 
 function zyClientNumFilter() {
   const rVal = (document.getElementById('num-range')?.value || '').toLowerCase();

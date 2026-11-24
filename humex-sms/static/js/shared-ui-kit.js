@@ -3163,6 +3163,176 @@ window.zyRenderNumberCopyBox = function(num, opts) {
   return `<button type="button" class="zy-num-copy-box${isWn ? ' is-wn-num' : ''}" onclick="event.stopPropagation();window.zyCopyNumber('${esc}', this)" title="Copy number" aria-label="Copy ${esc}"><span class="zy-copy-num${isWn ? ' zy-wn-number' : ''}">${esc}</span><span class="zy-copy-badge" aria-hidden="true"><i class="far fa-copy"></i></span></button>`;
 };
 
+// ── My Numbers: Ephemeral Full Num / Local Num (Hide Country Code / Prefix) ──
+// Intentionally kept strictly in memory (never localStorage) so a page refresh always resets to Full Num.
+window._zyMyNumDisplayMode = 'full';
+
+const ZY_E164_COUNTRY_CODES = new Set([
+  // 1-digit
+  '1', '7',
+  // 2-digit
+  '20', '27', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44', '45', '46', '47', '48', '49',
+  '51', '52', '53', '54', '55', '56', '57', '58', '60', '61', '62', '63', '64', '65', '66', '81', '82', '84',
+  '86', '90', '91', '92', '93', '94', '95', '98',
+  // 3-digit
+  '211', '212', '213', '216', '218', '220', '221', '222', '223', '224', '225', '226', '227', '228', '229',
+  '230', '231', '232', '233', '234', '235', '236', '237', '238', '239', '240', '241', '242', '243', '244',
+  '245', '246', '247', '248', '249', '250', '251', '252', '253', '254', '255', '256', '257', '258', '260',
+  '261', '262', '263', '264', '265', '266', '267', '268', '269', '290', '291', '297', '298', '299',
+  '350', '351', '352', '353', '354', '355', '356', '357', '358', '359', '370', '371', '372', '373', '374',
+  '375', '376', '377', '378', '380', '381', '382', '383', '385', '386', '387', '389', '420', '421', '423',
+  '500', '501', '502', '503', '504', '505', '506', '507', '508', '509', '590', '591', '592', '593', '594',
+  '595', '596', '597', '598', '599', '670', '672', '673', '674', '675', '676', '677', '678', '679', '680',
+  '681', '682', '683', '685', '686', '687', '688', '689', '690', '691', '692', '850', '852', '853', '855',
+  '856', '880', '886', '960', '961', '962', '963', '964', '965', '966', '967', '968', '970', '971', '972',
+  '973', '974', '975', '976', '977', '992', '993', '994', '995', '996', '998'
+]);
+
+window.zyStripCountryPrefix = function(num, prefixHint) {
+  const raw = String(num || '').trim().replace(/^\++/, '');
+  if (!raw || raw === '—') return raw;
+  const digits = raw.replace(/^00(?=\d{7,})/, '');
+  if (!/^\d{6,}$/.test(digits)) return raw;
+
+  const hint = String(prefixHint || '').trim().replace(/[^\d]/g, '');
+
+  // 1. If the row/range prefix itself is a valid 1-3 digit E.164 country code matching the start of the number, strip it
+  if (hint && hint.length >= 1 && hint.length <= 3 && ZY_E164_COUNTRY_CODES.has(hint) && digits.startsWith(hint)) {
+    const rest = digits.slice(hint.length);
+    if (rest.length >= 4) return rest;
+  }
+
+  // 2. Match exact ITU-T E.164 country calling code (longest match: 3 -> 2 -> 1 digits)
+  for (let len = 3; len >= 1; len--) {
+    const cand = digits.slice(0, len);
+    if (ZY_E164_COUNTRY_CODES.has(cand)) {
+      const rest = digits.slice(len);
+      if (rest.length >= 5) return rest;
+    }
+  }
+
+  // 3. Fallback: if a custom short prefix (1-4 digits) was provided and leaves at least 5 digits, strip it
+  if (hint && hint.length >= 1 && hint.length <= 4 && digits.startsWith(hint)) {
+    const rest = digits.slice(hint.length);
+    if (rest.length >= 5) return rest;
+  }
+
+  return raw;
+};
+
+window.zyGetMyNumDisplayMode = function() {
+  return window._zyMyNumDisplayMode === 'local' ? 'local' : 'full';
+};
+
+window.zyResetMyNumDisplayMode = function() {
+  window._zyMyNumDisplayMode = 'full';
+  const sel = document.getElementById('zy-my-num-display-mode');
+  if (sel) sel.value = 'full';
+};
+
+window.zySetMyNumDisplayMode = function(mode, onChangeCb) {
+  window._zyMyNumDisplayMode = mode === 'local' ? 'local' : 'full';
+  const sel = document.getElementById('zy-my-num-display-mode');
+  if (sel && sel.value !== window._zyMyNumDisplayMode) sel.value = window._zyMyNumDisplayMode;
+  const wrap = sel ? sel.closest('.zy-num-disp-bar') : document.querySelector('.zy-num-disp-bar');
+  if (wrap) wrap.classList.toggle('is-local', window._zyMyNumDisplayMode === 'local');
+  if (typeof onChangeCb === 'function') onChangeCb(window._zyMyNumDisplayMode);
+};
+
+window.zyFormatMyNumberDisplay = function(num, prefixHint) {
+  const clean = String(num || '').trim().replace(/^\++/, '');
+  if (!clean || clean === '—') return clean;
+  return window.zyGetMyNumDisplayMode() === 'local'
+    ? window.zyStripCountryPrefix(clean, prefixHint)
+    : clean;
+};
+
+window.zyCopyVisibleMyNumbers = function(tableId) {
+  const tid = tableId || 'dt-numbers';
+  const t = window.ZYT2 && window.ZYT2[tid];
+  if (!t || !Array.isArray(t.rows) || !t.rows.length) {
+    if (typeof toast === 'function') toast('No numbers available to copy', 'warning');
+    return;
+  }
+  const numColIdx = (t.cols || []).findIndex(c => String(typeof c === 'string' ? c : (c && c.title) || '').trim().toLowerCase() === 'number');
+  if (numColIdx === -1) return;
+
+  const checkedIds = typeof zy2Checked === 'function' ? new Set(zy2Checked(tid).map(String)) : new Set();
+  const isLocal = window.zyGetMyNumDisplayMode() === 'local';
+
+  let targetRows = [];
+  if (checkedIds.size > 0) {
+    targetRows = t.rows.filter((r, idx) => checkedIds.has(String(r.__id ?? idx)));
+  } else {
+    const allOrdered = t.serverMode ? t.rows : (typeof zy2Data === 'function' ? zy2Data(t) : t.rows);
+    const page = Math.max(1, Number(t.page) || 1);
+    const perPage = Math.max(1, Number(t.perPage) || 25);
+    targetRows = t.serverMode ? allOrdered : allOrdered.slice((page - 1) * perPage, page * perPage);
+  }
+
+  const lines = targetRows
+    .map(r => {
+      const cell = r[numColIdx];
+      const val = (cell && typeof cell === 'object') ? cell.v : cell;
+      return String(val || '').trim();
+    })
+    .filter(v => v && v !== '—');
+
+  if (!lines.length) {
+    if (typeof toast === 'function') toast('No numbers found to copy', 'warning');
+    return;
+  }
+
+  const payload = lines.join('\n');
+  const finishToast = () => {
+    const modeLbl = isLocal ? 'without country code' : 'with country code';
+    const scopeLbl = checkedIds.size > 0 ? 'selected' : 'visible';
+    if (typeof toast === 'function') toast(`Copied ${lines.length} ${scopeLbl} number${lines.length === 1 ? '' : 's'} (${modeLbl})`, 'success');
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(payload).then(finishToast).catch(() => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = payload;
+        ta.style.cssText = 'position:fixed;opacity:0;left:-9999px;';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        finishToast();
+      } catch (_) {}
+    });
+  } else {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = payload;
+      ta.style.cssText = 'position:fixed;opacity:0;left:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      finishToast();
+    } catch (_) {}
+  }
+};
+
+window.zyRenderMyNumDisplayControl = function(onChangeHandlerExpr, tableId) {
+  const mode = window.zyGetMyNumDisplayMode();
+  const tid = tableId || 'dt-numbers';
+  return `
+    <div class="zy-num-disp-bar${mode === 'local' ? ' is-local' : ''}" title="Switch between Full Number (with country code) and Local Number (without country code). Resets on page refresh.">
+      <label class="zy-num-disp-lbl" for="zy-my-num-display-mode"><i class="fas fa-scissors"></i> Display:</label>
+      <select id="zy-my-num-display-mode" class="zy-num-disp-select" aria-label="Number Display Format" onchange="${onChangeHandlerExpr}(this.value)">
+        <option value="full"${mode === 'full' ? ' selected' : ''}>Full Num (With Code)</option>
+        <option value="local"${mode === 'local' ? ' selected' : ''}>Local Num (Hide Prefix)</option>
+      </select>
+      <button type="button" class="zy-num-disp-copy-btn" onclick="window.zyCopyVisibleMyNumbers('${tid}')" title="Copy selected or visible numbers in current display format">
+        <i class="far fa-copy"></i> Copy
+      </button>
+    </div>`;
+};
+
 // ── Shared Date Column Cell for My Numbers (Owner / Agent / Client) ──────
 window.zyFormatNumberDateCell = function(n, mode) {
   if (!n || typeof n !== 'object') return { v: '', h: '—' };

@@ -914,6 +914,7 @@ let ZY_RANGES_LOOKUP = {};
 async function pgMySmsNumbers() {
   const c = document.getElementById('page-content');
   zyCrumb(['SMS Module', 'My SMS Numbers']);
+  if (typeof window.zyResetMyNumDisplayMode === 'function') window.zyResetMyNumDisplayMode();
   c.innerHTML = `
     <div class="page-header">
       <div>
@@ -985,7 +986,8 @@ async function pgMySmsNumbers() {
     <div class="zy-panel" style="border:1px solid #cbd5e1;border-radius:4px;background:#ffffff;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
       <div class="zy-panel-head" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#f8fafc;border-bottom:1px solid #cbd5e1;flex-wrap:wrap;gap:8px;">
         <span style="font-weight:700;font-size:14px;color:#1e293b;">My SMS Numbers</span>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          ${typeof window.zyRenderMyNumDisplayControl === 'function' ? window.zyRenderMyNumDisplayControl('zyAgentOnNumDisplayChange', 'dt-numbers') : ''}
           <button type="button" class="zy-act zy-act-blue zy-act-wide" onclick="zyActionMove()" title="Move number directly from Client A to Client B"><i class="fas fa-right-left" style="margin-right:4px;"></i> Move</button>
           <button type="button" class="btn btn-outline btn-sm" onclick="loadPage('transfer-history')" title="View Transfer History"><i class="fas fa-clock-rotate-left"></i> Transfer History</button>
         </div>
@@ -1149,11 +1151,14 @@ function zyRenderNumbersTable(numsList) {
       ? `<button type="button" class="apx-btn apx-btn-small" style="color:#4338ca;border-color:#c7d2fe;background:#eef2ff;font-weight:700;" onclick="zyAgentFetchWhitenoiseOtp(${Number(n.id)}, this)" title="Fetch live OTP"><i class="fas fa-bolt"></i> Fetch OTP</button>`
       : `<span style="color:#94a3b8;font-size:11px;">—</span>`;
 
+    const displayNumber = typeof window.zyFormatMyNumberDisplay === 'function'
+      ? window.zyFormatMyNumberDisplay(cleanNumber, cleanPrefix)
+      : cleanNumber;
     const rawNumberHtml = typeof zyRenderNumberCopyBox === 'function'
-      ? zyRenderNumberCopyBox(cleanNumber, { isWn })
-      : `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--brand-primary,#166534);'}">${zyEsc(cleanNumber)}</span>`;
+      ? zyRenderNumberCopyBox(displayNumber, { isWn })
+      : `<span class="${isWn ? 'zy-wn-number' : ''}" style="font-family:monospace;font-weight:700;${isWn ? '' : 'color:var(--brand-primary,#166534);'}">${zyEsc(displayNumber)}</span>`;
     const numberHtml = isBlockedNum
-      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-circle-xmark" style="font-size:11px;"></i>${zyEsc(cleanNumber)}</span>`
+      ? `<span style="font-family:monospace;font-weight:800;color:#dc2626;background:#fef2f2;padding:3px 7px;border-radius:6px;border:1px solid #fecaca;display:inline-flex;align-items:center;gap:5px;"><i class="fas fa-circle-xmark" style="font-size:11px;"></i>${zyEsc(displayNumber)}</span>`
       : rawNumberHtml;
 
     const rangeCellHtml = isWn
@@ -1164,7 +1169,7 @@ function zyRenderNumbersTable(numsList) {
       dateCell,
       { v: rangeName, h: rangeCellHtml },
       { v: cleanPrefix, h: cleanPrefix || '—' },
-      { v: cleanNumber, h: numberHtml },
+      { v: displayNumber, h: numberHtml },
       { v: agentRate, h: `<span style="font-weight:700;color:var(--brand-accent,#4ade80);">$${zyFmtMoney(agentRate, 4)}</span>` },
       { v: clientName || '—', h: clientName ? `<span class="fw-600">${zyEsc(clientName)}</span>` : '—' },
       { v: clientPkrVal !== null ? clientPkrVal : (clientPayoutVal !== '' ? Number(clientPayoutVal) : 0), h: clientPayoutDisplay },
@@ -1191,6 +1196,12 @@ function zyRenderNumbersTable(numsList) {
   }
 }
 
+window.zyAgentOnNumDisplayChange = function(mode) {
+  if (typeof window.zySetMyNumDisplayMode === 'function') {
+    window.zySetMyNumDisplayMode(mode, () => zyApplyFilters());
+  }
+};
+
 function zyApplyFilters() {
   const rVal = (document.getElementById('num-range')?.value || '').toLowerCase();
   const cVal = document.getElementById('num-client')?.value || '';
@@ -1209,7 +1220,8 @@ function zyApplyFilters() {
     }
     if (startsWith) {
       const numStr = String(n.number || '').trim().replace(/^\++/, '');
-      if (!numStr.startsWith(startsWith)) return false;
+      const localStr = typeof window.zyStripCountryPrefix === 'function' ? window.zyStripCountryPrefix(numStr, n.prefix) : numStr;
+      if (!numStr.startsWith(startsWith) && !localStr.startsWith(startsWith)) return false;
     }
     if (cVal) {
       if (String(n.client_id) !== String(cVal)) return false;

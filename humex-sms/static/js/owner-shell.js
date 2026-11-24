@@ -12,9 +12,6 @@ const ZY_ADMIN_MENU = [
   { t: null, c: '#1d4ed8', items: [
       ['Dashboard', 'dashboard', 'fa-gauge-high'],
   ] },
-  { t: null, c: '#059669', items: [
-      ['Live Chat', 'live-chat', 'fa-comments'],
-  ] },
   { t: null, c: '#0284c7', items: [
       ['Apps Links', 'app-links', 'fa-link'],
   ] },

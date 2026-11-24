@@ -85,7 +85,6 @@ const ZY_CLIENT_MENU = [
   { label: 'My Numbers', page: 'my-numbers', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'Show Report', page: 'my-sms', color: '#1d4ed8', tint: 'rgba(29, 78, 216, 0.11)' },
   { label: 'Whitenoise Reports', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
-  { label: 'Live Chat', page: 'live-chat', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
   { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
   { label: 'Notifications', page: 'news', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },

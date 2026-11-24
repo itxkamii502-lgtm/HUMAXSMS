@@ -84,6 +84,7 @@
       'sms-ratecard': 'SMSRateCard',
       'client-rate-set': 'ClientRateSet',
       'transfer-history': 'TransferHistory',
+      'allocation-history': 'AllocationHistory',
       'my-clients': 'Clients',
       'notifications': 'Notifications',
       'news-clients': 'Notifications',
@@ -155,7 +156,8 @@
       summarysms: 'detailed-sms',
       clientsmsstats: 'detailed-sms',
       smsrangestats: 'detailed-sms',
-      smsnumberstats: 'detailed-sms'
+      smsnumberstats: 'detailed-sms',
+      allocationhistory: 'allocation-history'
     },
     client: {
       profile: 'my-profile',

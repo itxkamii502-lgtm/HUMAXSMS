@@ -390,16 +390,14 @@ renderDashboard = async function () {
         weeklyLabels,
         weeklyTraffic,
         hero: {
-          label: 'Today SMS (API)',
+          label: 'Today SMS',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS traffic today (UTC)',
+          subtitle: 'SMS traffic today (UTC)',
           icon: 'fa-check',
           page: 'my-sms'
         },
-        moneyCards: [
-          { label: 'Whitenoise SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: 'cdr2' }
-        ],
+        moneyCards: [],
         shortcuts: [
           { label: 'Show Report', page: 'my-sms', icon: 'fa-comment-sms', tone: 'blue' },
           { label: 'Whitenoise Reports', page: 'cdr2', icon: 'fa-tower-cell', tone: 'green' },

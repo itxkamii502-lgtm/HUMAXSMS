@@ -44,6 +44,9 @@ const ZY_AGENT_MENU = [
   ] },
   { t: null, c: '#1d4ed8', items: [
       ['My Profile', 'my-profile', 'fa-user'],
+  ] },
+  { t: null, c: '#0284c7', items: [
+      ['Allocation History', 'allocation-history', 'fa-clock-rotate-left'],
   ] }
 ];
 
@@ -67,6 +70,7 @@ const ZY_LABELS = {
   'detailed-sms': 'Show Report',
   'cdr2': 'Whitenoise Reports',
   'transfer-history': 'Transfer History',
+  'allocation-history': 'Allocation History',
   'credit-notes': 'Credit Notes',
   'payment-requests': 'My Payment Requests',
   'bank-accounts': 'Bank Accounts',
@@ -308,16 +312,14 @@ pgDashboard = async function () {
         weeklyLabels,
         weeklyTraffic,
         hero: {
-          label: 'Today SMS (API)',
+          label: 'Today SMS',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS on your numbers today (UTC)',
+          subtitle: 'SMS on your numbers today (UTC)',
           icon: 'fa-check',
           page: 'detailed-sms'
         },
-        moneyCards: [
-          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: agentHasWn ? 'cdr2' : 'sms-ranges' }
-        ],
+        moneyCards: [],
         shortcuts: [
           { label: 'My Numbers', page: 'my-sms-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
           { label: 'My Clients', page: 'my-clients', icon: 'fa-users', tone: 'green' },

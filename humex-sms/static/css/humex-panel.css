@@ -14051,6 +14051,14 @@ body.dark .zy-notif-popover .zy-np-title {
    UNIFIED DASHBOARD — 2-COL TOP ROW (DESKTOP + MOBILE COMBINED GRID),
    BLOCKED SNAPSHOT, LIVE ACCESS & APP LINKS
    ========================================================================== */
+.zy-ud-top-row-full {
+  grid-template-columns: 1fr !important;
+  align-items: stretch !important;
+}
+.zy-ud-top-row-full > .zy-ud-hero-card {
+  grid-column: 1 / -1 !important;
+  width: 100% !important;
+}
 .zy-ud-top-row-2col {
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   align-items: stretch !important;
@@ -14501,11 +14509,14 @@ body.dark .zy-vps-auto-btn.is-on {
     gap: 18px !important;
     align-items: stretch !important;
   }
-  .zy-ud-top-row:not(.zy-ud-top-row-2col) > .zy-ud-hero-card {
+  .zy-ud-top-row:not(.zy-ud-top-row-2col):not(.zy-ud-top-row-full) > .zy-ud-hero-card {
     grid-column: span 5 !important;
   }
-  .zy-ud-top-row:not(.zy-ud-top-row-2col) > .zy-ud-money-pair {
+  .zy-ud-top-row:not(.zy-ud-top-row-2col):not(.zy-ud-top-row-full) > .zy-ud-money-pair {
     grid-column: span 7 !important;
+  }
+  .zy-ud-top-row.zy-ud-top-row-full > .zy-ud-hero-card {
+    grid-column: 1 / -1 !important;
   }
   .zy-ud-top-row.zy-ud-top-row-2col > .zy-ud-hero-card {
     grid-column: span 6 !important;

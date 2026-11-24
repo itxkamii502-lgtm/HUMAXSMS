@@ -4017,19 +4017,22 @@ window.zyRenderUnifiedDashboard = function (cfg) {
   const appLinksHtml = `<div id="${dashAppLinksId}">${buildDashAppLinksTable(latestAppLinks)}</div>`;
 
   const moneyPairClass = moneyCards.length === 1 ? 'zy-ud-money-pair zy-ud-money-pair-single' : 'zy-ud-money-pair';
+  const topRowClass = moneyCards.length === 0
+    ? 'zy-ud-top-row zy-ud-top-row-full'
+    : (moneyCards.length === 1 ? 'zy-ud-top-row zy-ud-top-row-2col' : 'zy-ud-top-row');
 
   container.innerHTML = `
     <div class="zy-ud">
       ${alertHtml}
 
-      <!-- Row 1: Hero Card + Monthly {W} Card -->
-      <div class="zy-ud-top-row${moneyCards.length === 1 ? ' zy-ud-top-row-2col' : ''}">
+      <!-- Row 1: Hero Card (Full Width when no side cards) -->
+      <div class="${topRowClass}">
         <div class="zy-ud-card zy-ud-hero-card">
           <div style="min-width:0;">
             <div class="zy-ud-hero-label">${zyEsc(hero.label || 'Today SMS')}</div>
             <div class="zy-ud-hero-val zy-ud-num">${todaySms.toLocaleString()}</div>
             <div class="zy-ud-hero-sub">
-              <span>${zyEsc(hero.subtitle || 'Today API SMS (UTC)')}</span>
+              <span>${zyEsc(hero.subtitle || 'SMS traffic today (UTC)')}</span>
             </div>
           </div>
           <div class="zy-ud-hero-badge" aria-hidden="true">
@@ -4037,6 +4040,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
           </div>
         </div>
 
+        ${moneyCards.length ? `
         <div class="${moneyPairClass}">
           ${moneyCards.map((mc, idx) => `
             <div class="zy-ud-card zy-ud-money-card">
@@ -4048,7 +4052,7 @@ window.zyRenderUnifiedDashboard = function (cfg) {
               <div class="zy-ud-money-sub">${zyEsc(mc.sub || '')}</div>
             </div>
           `).join('')}
-        </div>
+        </div>` : ''}
       </div>
 
       ${shortcuts.length ? `

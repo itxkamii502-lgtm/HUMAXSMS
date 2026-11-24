@@ -2914,25 +2914,110 @@ async function findAndEditRange(rangeId) {
 }
 
 function adminDeleteRange(rangeId, rangeName) {
-  openModal('Delete Range', `
-    <div style="padding:10px 0;">
-      <p style="font-size:14px;color:var(--text);margin-bottom:12px;">Delete range <strong>${rangeName || rangeId}</strong>?</p>
-      <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">This will permanently remove this range and all numbers belonging to it. This cannot be undone.</p>
-      <div style="display:flex;justify-content:flex-end;gap:8px;">
-        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-danger" onclick="doAdminDeleteRange(${rangeId})"><i class="fas fa-trash"></i> Delete Range & Numbers</button>
+  const safeName = escapeHtml(rangeName || ('#' + rangeId));
+  openModal('Delete Range — Security Verification', `
+    <form id="del-range-pin-form" onsubmit="doAdminDeleteRange(event, ${Number(rangeId)})" autocomplete="off" style="padding:6px 0;">
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+        <div style="font-size:13.5px;font-weight:700;color:#991b1b;margin-bottom:4px;">
+          <i class="fas fa-triangle-exclamation" style="margin-right:6px;"></i>Delete range "${safeName}"?
+        </div>
+        <div style="font-size:12.5px;color:#7f1d1d;line-height:1.45;">
+          This will permanently remove this range and <strong>all numbers belonging to it across the entire system</strong>. This action cannot be undone.
+        </div>
       </div>
-    </div>
+
+      <div class="form-group" style="margin-bottom:12px;">
+        <label for="del-range-pin-input" class="form-label" style="display:block;font-size:12.5px;font-weight:700;color:#1e293b;margin-bottom:6px;">
+          <i class="fas fa-shield-halved" style="color:#dc2626;margin-right:5px;"></i>Enter Security PIN to Confirm
+        </label>
+        <input
+          type="password"
+          id="del-range-pin-input"
+          inputmode="numeric"
+          autocomplete="new-password"
+          maxlength="16"
+          placeholder="••••••"
+          required
+          style="width:100%;height:42px;padding:0 14px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:18px;letter-spacing:6px;text-align:center;font-weight:700;color:#0f172a;background:#fff;outline:none;"
+        />
+        <div id="del-range-pin-err" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;background:#fee2e2;color:#b91c1c;font-size:12.5px;font-weight:600;"></div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button type="submit" id="del-range-pin-submit" class="btn btn-danger">
+          <i class="fas fa-trash"></i> Verify PIN & Delete Range
+        </button>
+      </div>
+    </form>
   `);
+  setTimeout(() => {
+    const inp = document.getElementById('del-range-pin-input');
+    if (inp) inp.focus();
+  }, 60);
 }
 
-async function doAdminDeleteRange(rangeId) {
-  closeModal();
+async function doAdminDeleteRange(ev, rangeId) {
+  if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+  const inp = document.getElementById('del-range-pin-input');
+  const errEl = document.getElementById('del-range-pin-err');
+  const btn = document.getElementById('del-range-pin-submit');
+  const pin = String(inp ? inp.value : '').trim();
+
+  const showErr = (msg) => {
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+    }
+    if (inp) {
+      inp.value = '';
+      inp.style.borderColor = '#dc2626';
+      inp.focus();
+    }
+  };
+
+  if (!pin) {
+    showErr('Please enter your Security PIN.');
+    return;
+  }
+
+  if (errEl) errEl.style.display = 'none';
+  if (inp) inp.style.borderColor = '#cbd5e1';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying…';
+  }
+
   try {
-    const result = await apiFetch(`/api/numbers/sms-ranges/${rangeId}?delete_numbers=true`, { method: 'DELETE' });
-    toast(`🗑️ Range deleted — ${result?.deleted_numbers ?? 0} number(s) removed with it`, 'warning');
+    const response = await fetch(`${API}/api/numbers/sms-ranges/${encodeURIComponent(rangeId)}?delete_numbers=true`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Delete-Pin': pin
+      },
+      body: JSON.stringify({ pin })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.success) {
+      showErr(result?.error || 'Invalid Security PIN. Range was not deleted.');
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-trash"></i> Verify PIN & Delete Range';
+      }
+      return;
+    }
+    closeModal();
+    toast(`Range deleted — ${result.deleted_numbers ?? 0} number(s) permanently removed from the system`, 'warning');
     renderSmsRanges();
-  } catch (err) { console.error(err); toast('Failed to delete range', 'error'); }
+  } catch (err) {
+    console.error('Delete range error:', err);
+    showErr('Connection error while verifying PIN. Please try again.');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-trash"></i> Verify PIN & Delete Range';
+    }
+  }
 }
 
 function openAddRangeModal() {
@@ -9082,13 +9167,13 @@ async function renderNumberTransfersLog(page = 1) {
           ['#', 'From', 'Role', 'To', 'Role', 'Count', 'Service', 'Notes', 'Time', 'Status'],
           (data?.data || []).map(t => [
             t.id || '—',
-            `<strong>${t.from_username || '—'}</strong>`,
-            `<span class="badge badge-${(t.from_role === 'Owner' || t.from_role === 'Admin') ? 'purple' : 'cyan'}">${t.from_role || '—'}</span>`,
-            `<strong>${t.to_username || '—'}</strong>`,
-            `<span class="badge badge-${t.to_role === 'Agent' ? 'cyan' : 'green'}">${t.to_role || '—'}</span>`,
+            `<strong>${zyEsc(t.from_username || '—')}</strong>`,
+            `<span class="badge badge-${(t.from_role === 'Owner' || t.from_role === 'Admin') ? 'purple' : 'cyan'}">${zyEsc(t.from_role || '—')}</span>`,
+            `<strong>${zyEsc(t.to_username || '—')}</strong>`,
+            `<span class="badge badge-${t.to_role === 'Agent' ? 'cyan' : 'green'}">${zyEsc(t.to_role || '—')}</span>`,
             `<span class="badge badge-blue">${t.count || 0}</span>`,
-            t.service || '—',
-            t.notes || '—',
+            zyEsc(t.range_name || t.service || '—'),
+            zyEsc(t.notes || '—'),
             fmtShort(t.timestamp),
             statusBadge(t.status)
           ])

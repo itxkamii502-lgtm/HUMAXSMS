@@ -7691,7 +7691,7 @@ const API_RULES = [
   { m: new Set(['PATCH', 'DELETE']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent'] },
   { m: new Set(['POST']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent', 'client'] },
   { m: WRITE_METHODS, p: /^\/payments(\/|$)/, roles: ['owner', 'agent'] },
-  { p: /^\/agent\/(client-rates|pkr-target)(\/|$)/, roles: ['agent'] },
+  { p: /^\/agent\/(client-rates|pkr-target|allocation-history)(\/|$)/, roles: ['agent'] },
   { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] }
 ];
 // Client is default-deny: only these routes exist for them.
@@ -9635,10 +9635,16 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
 
     const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
     const allowedQty = lim.allowed_quantities;
-    const poolAvailable = numbers.filter(n =>
-      n && matchesRangeRef(n, r.id, rangeName) &&
-      !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked'
-    ).length;
+    // Smart Priority Pool: Client uses Agent's Master Pool free numbers first, then Owner's unassigned pool
+    let agentPoolAvailable = 0;
+    let ownerPoolAvailable = 0;
+    for (const n of numbers) {
+      if (!n || n.client_id || String(n.status || '').toLowerCase() === 'blocked') continue;
+      if (!matchesRangeRef(n, r.id, rangeName)) continue;
+      if (targetAgentId && Number(n.agent_id) === targetAgentId) agentPoolAvailable++;
+      else if (!n.agent_id) ownerPoolAvailable++;
+    }
+    const poolAvailable = agentPoolAvailable + ownerPoolAvailable;
 
     const quota = role === 'client'
       ? getClientRangeQuota(sessionUser.id, r.id, rangeName, { numbers, requests: allRequests, history: allHistory, agentId: targetAgentId }, lim)
@@ -9885,28 +9891,87 @@ app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
   res.json(ranges[idx]);
 });
 
-app.delete('/api/numbers/sms-ranges/:id', (req, res) => {
+// Server-side salted scrypt verifier for destructive Range Deletion PIN (never exposed to frontend)
+const RANGE_DELETE_PIN_HASH = 'humax_range_del_v1_9f2a7c4e:97dd72adb386653c25c043c9b775532aea39b3173c1ca9174cae4d757b1ca76b';
+const RANGE_DELETE_PIN_ATTEMPTS = new Map();
+const RANGE_DELETE_PIN_MAX_TRIES = 5;
+const RANGE_DELETE_PIN_WINDOW_MS = 5 * 60 * 1000;
+
+function verifyRangeDeletePin(rawPin) {
+  const candidate = String(rawPin ?? '').trim();
+  if (!candidate || candidate.length > 32) return false;
+  const envPin = String(process.env.RANGE_DELETE_PIN || '').trim();
+  if (envPin) {
+    const a = crypto.createHash('sha256').update(candidate).digest();
+    const b = crypto.createHash('sha256').update(envPin).digest();
+    return crypto.timingSafeEqual(a, b);
+  }
+  const [salt, expectedHex] = RANGE_DELETE_PIN_HASH.split(':');
+  if (!salt || !expectedHex) return false;
+  const derived = crypto.scryptSync(candidate, salt, 32);
+  const expected = Buffer.from(expectedHex, 'hex');
+  if (derived.length !== expected.length) return false;
+  return crypto.timingSafeEqual(derived, expected);
+}
+
+app.delete('/api/numbers/sms-ranges/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Only Owner can delete SMS ranges.' });
+  }
+
+  // Rate-limit failed PIN attempts per owner session/IP
+  const attemptKey = `${sessionUser.id || 'owner'}:${req.ip || 'local'}`;
+  const nowMs = Date.now();
+  const rec = RANGE_DELETE_PIN_ATTEMPTS.get(attemptKey);
+  if (rec && nowMs - rec.firstAt < RANGE_DELETE_PIN_WINDOW_MS && rec.count >= RANGE_DELETE_PIN_MAX_TRIES) {
+    const waitSec = Math.ceil((RANGE_DELETE_PIN_WINDOW_MS - (nowMs - rec.firstAt)) / 1000);
+    return res.status(429).json({ error: `Too many invalid PIN attempts. Please wait ${waitSec}s and try again.` });
+  }
+
+  const submittedPin = req.body?.pin ?? req.headers['x-delete-pin'] ?? '';
+  if (!String(submittedPin).trim()) {
+    return res.status(400).json({ error: 'Security PIN is required to delete a range.' });
+  }
+  if (!verifyRangeDeletePin(submittedPin)) {
+    const nextRec = (!rec || nowMs - rec.firstAt >= RANGE_DELETE_PIN_WINDOW_MS)
+      ? { count: 1, firstAt: nowMs }
+      : { count: rec.count + 1, firstAt: rec.firstAt };
+    RANGE_DELETE_PIN_ATTEMPTS.set(attemptKey, nextRec);
+    logAudit(sessionUser.username || 'Owner', 'Delete SMS Range Blocked', `Invalid security PIN entered for range #${req.params.id}`, 'Ranges');
+    return res.status(403).json({ error: 'Invalid Security PIN. Range was not deleted.' });
+  }
+  RANGE_DELETE_PIN_ATTEMPTS.delete(attemptKey);
+
   const ranges = readDb('sms_ranges') || [];
   const id = Number(req.params.id);
-  const targetRange = ranges.find(r => r.id === id);
-  const filtered = ranges.filter(r => r.id !== id);
+  const targetRange = ranges.find(r => Number(r.id) === id);
+  if (!targetRange) {
+    return res.status(404).json({ error: 'Range not found.' });
+  }
+  const filtered = ranges.filter(r => Number(r.id) !== id);
   writeDb('sms_ranges', filtered);
 
   let deletedNumbers = 0;
   let numbers = readDb('numbers') || [];
   const initLen = numbers.length;
-  const targetCountry = (targetRange?.country || '').trim().toLowerCase();
-  const targetProvider = (targetRange?.provider || 'Manual').trim().toLowerCase();
-  const targetName = (targetRange?.range_name || '').trim().toLowerCase();
+  const targetCountry = (targetRange.country || '').trim().toLowerCase();
+  const targetProvider = (targetRange.provider || 'Manual').trim().toLowerCase();
+  const targetName = (targetRange.range_name || targetRange.name || '').trim().toLowerCase();
+  const otherUsesCountryProvider = filtered.some(r =>
+    String(r.country || '').trim().toLowerCase() === targetCountry &&
+    String(r.provider || 'Manual').trim().toLowerCase() === targetProvider
+  );
 
-  // Cascade delete all numbers belonging to this deleted range
+  // Cascade delete all numbers belonging to this deleted range across the entire system
   numbers = numbers.filter(n => {
+    if (!n) return false;
     // 1. Direct range_id match
     if (n.range_id && Number(n.range_id) === id) return false;
     // 2. Direct range_name match
-    if (targetName && n.range_name && n.range_name.trim().toLowerCase() === targetName) return false;
-    // 3. If range_id is not set, match country and provider if no other active range uses them
-    if (!n.range_id && targetCountry && targetProvider) {
+    if (targetName && String(n.range_name || n.range || '').trim().toLowerCase() === targetName) return false;
+    // 3. If range_id is not set, match country and provider only if no other active range uses them
+    if (!n.range_id && targetCountry && targetProvider && !otherUsesCountryProvider) {
       const c = (n.country || '').trim().toLowerCase();
       const p = (n.provider || '').trim().toLowerCase();
       if (c === targetCountry && p === targetProvider) return false;
@@ -9916,8 +9981,23 @@ app.delete('/api/numbers/sms-ranges/:id', (req, res) => {
   deletedNumbers = initLen - numbers.length;
   writeDb('numbers', numbers);
 
-  logAudit('Owner', 'Delete SMS Range', `Deleted range #${id} and ${deletedNumbers} numbers`, 'Ranges');
-  res.json({ success: true, deleted_numbers: deletedNumbers });
+  // Clean up Agent Client Rate Card entries referencing this deleted range so no ghost rows linger
+  let deletedRates = 0;
+  try {
+    const allRates = readDb('agent_client_rates') || [];
+    const keptRates = allRates.filter(x => {
+      if (!x) return false;
+      if (x.range_id && Number(x.range_id) === id) return false;
+      if (targetName && String(x.range_name || '').trim().toLowerCase() === targetName) return false;
+      return true;
+    });
+    deletedRates = allRates.length - keptRates.length;
+    if (deletedRates > 0) writeDb('agent_client_rates', keptRates);
+  } catch (_) {}
+
+  const displayRngName = targetRange.range_name || targetRange.name || `#${id}`;
+  logAudit(sessionUser.username || 'Owner', 'Delete SMS Range', `PIN-verified deletion of range "${displayRngName}" (#${id}) and ${deletedNumbers} system number(s)`, 'Ranges');
+  res.json({ success: true, deleted_numbers: deletedNumbers, deleted_rates: deletedRates, range_name: displayRngName });
 });
 
 // Import to existing or new range
@@ -12178,6 +12258,149 @@ app.delete('/api/firewall/blocked-ips/:id', (req, res) => {
   res.json({ success: true });
 });
 
+function buildClientToAgentLookup() {
+  const agents = readDb('agents') || [];
+  const clients = readDb('clients') || [];
+  const agById = new Map();
+  const agByUser = new Map();
+  for (const a of agents) {
+    if (!a || a.id == null) continue;
+    const uname = a.username || a.name || `Agent #${a.id}`;
+    agById.set(Number(a.id), { id: Number(a.id), username: uname });
+    if (a.username) agByUser.set(String(a.username).trim().toLowerCase(), { id: Number(a.id), username: uname });
+  }
+  const clIdToAg = new Map();
+  const clUserToAg = new Map();
+  const clientUsersLower = new Set();
+  for (const c of clients) {
+    if (!c) continue;
+    const agId = Number(c.agent_id || 0);
+    const agInfo = agById.get(agId) || (agId ? { id: agId, username: c.agent_username || `Agent #${agId}` } : null);
+    if (c.id != null && agInfo) clIdToAg.set(Number(c.id), agInfo);
+    const cu = String(c.username || '').trim().toLowerCase();
+    if (cu) {
+      clientUsersLower.add(cu);
+      if (agInfo) clUserToAg.set(cu, agInfo);
+    }
+    const cn = String(c.full_name || c.name || '').trim().toLowerCase();
+    if (cn) {
+      if (agInfo && !clUserToAg.has(cn)) clUserToAg.set(cn, agInfo);
+    }
+  }
+  return { agById, agByUser, clIdToAg, clUserToAg, clientUsersLower };
+}
+
+function resolveOwnerVisibleActor(rawId, rawName, rawRole, explicitAgentId, maps) {
+  const roleLow = String(rawRole || '').trim().toLowerCase();
+  const nameStr = String(rawName || '').trim();
+  const nameLow = nameStr.toLowerCase();
+  const vaultMatch = nameStr.match(/^vault\s*\((.+)\)$/i);
+  const innerVaultLow = vaultMatch ? vaultMatch[1].trim().toLowerCase() : '';
+
+  if (roleLow === 'owner' || roleLow === 'admin' || roleLow === 'system' || nameLow === 'owner' || nameLow === 'owner pool') {
+    return { id: rawId || 1, username: nameStr || 'Owner', role: 'Owner' };
+  }
+
+  const isClientRole = roleLow === 'client' || roleLow === 'vault client' || Boolean(vaultMatch);
+  const isKnownClient = (rawId != null && maps.clIdToAg.has(Number(rawId)) && roleLow !== 'agent') ||
+    (nameLow && maps.clientUsersLower.has(nameLow) && !maps.agByUser.has(nameLow)) ||
+    (innerVaultLow && maps.clientUsersLower.has(innerVaultLow));
+
+  if (isClientRole || isKnownClient) {
+    let ag = null;
+    if (explicitAgentId && maps.agById.has(Number(explicitAgentId))) {
+      ag = maps.agById.get(Number(explicitAgentId));
+    }
+    if (!ag && rawId != null && maps.clIdToAg.has(Number(rawId))) {
+      ag = maps.clIdToAg.get(Number(rawId));
+    }
+    if (!ag && innerVaultLow && maps.clUserToAg.has(innerVaultLow)) {
+      ag = maps.clUserToAg.get(innerVaultLow);
+    }
+    if (!ag && nameLow && maps.clUserToAg.has(nameLow)) {
+      ag = maps.clUserToAg.get(nameLow);
+    }
+    if (ag) {
+      return { id: ag.id, username: ag.username, role: 'Agent' };
+    }
+    return { id: explicitAgentId || null, username: explicitAgentId ? `Agent #${explicitAgentId}` : 'Agent', role: 'Agent' };
+  }
+
+  if (roleLow === 'agent' || (rawId != null && maps.agById.has(Number(rawId)))) {
+    const ag = (rawId != null && maps.agById.get(Number(rawId))) || (nameLow && maps.agByUser.get(nameLow)) || null;
+    return { id: ag ? ag.id : rawId, username: ag ? ag.username : (nameStr || 'Agent'), role: 'Agent' };
+  }
+
+  if (explicitAgentId && maps.agById.has(Number(explicitAgentId))) {
+    const ag = maps.agById.get(Number(explicitAgentId));
+    return { id: ag.id, username: ag.username, role: 'Agent' };
+  }
+
+  return { id: rawId || null, username: nameStr || '—', role: rawRole || 'Agent' };
+}
+
+function scrubClientNotesForOwner(notes, fallbackAgentName, maps) {
+  let s = String(notes || '').trim();
+  if (!s) return '';
+  s = s.replace(/vault\s*\([^)]*\)/ig, fallbackAgentName ? `${fallbackAgentName} Pool` : 'Agent Pool');
+  if (maps && maps.clientUsersLower && maps.clientUsersLower.size > 0) {
+    for (const cu of maps.clientUsersLower) {
+      if (!cu || cu.length < 2 || maps.agByUser.has(cu)) continue;
+      const escaped = cu.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\b${escaped}\\b`, 'ig');
+      if (re.test(s)) {
+        s = s.replace(re, fallbackAgentName || 'Agent');
+      }
+    }
+  }
+  return s;
+}
+
+function sanitizeAllocationHistoryForOwner(h, maps) {
+  if (!h || typeof h !== 'object') return h;
+  const copy = { ...h };
+  const expAgId = Number(copy.agent_id || 0) || null;
+  const fromResolved = resolveOwnerVisibleActor(copy.from_user_id, copy.from_user, copy.from_role || (String(copy.from_user || '').toLowerCase() === 'owner' ? 'Owner' : ''), expAgId, maps);
+  const toResolved = resolveOwnerVisibleActor(copy.to_user_id, copy.to_user || copy.target || copy.agent, copy.to_role, expAgId, maps);
+
+  copy.from_user_id = fromResolved.id;
+  copy.from_user = fromResolved.username;
+  copy.from_role = fromResolved.role;
+  copy.to_user_id = toResolved.id;
+  copy.to_user = toResolved.username;
+  copy.to_role = toResolved.role;
+  copy.target = toResolved.username;
+  copy.agent = toResolved.role === 'Agent' ? toResolved.username : (fromResolved.role === 'Agent' ? fromResolved.username : '');
+  if (toResolved.role === 'Agent' && toResolved.id) copy.agent_id = toResolved.id;
+  delete copy.client_id;
+  delete copy.client_username;
+  delete copy.client_name;
+  if (copy.notes) copy.notes = scrubClientNotesForOwner(copy.notes, copy.agent || toResolved.username, maps);
+  return copy;
+}
+
+function sanitizeTransferLogForOwner(t, maps) {
+  if (!t || typeof t !== 'object') return t;
+  const copy = { ...t };
+  const expAgId = Number(copy.agent_id || 0) || null;
+  const fromResolved = resolveOwnerVisibleActor(copy.from_user_id, copy.from_username, copy.from_role, expAgId, maps);
+  const toResolved = resolveOwnerVisibleActor(copy.to_user_id, copy.to_username, copy.to_role, expAgId || (fromResolved.role === 'Agent' ? fromResolved.id : null), maps);
+
+  copy.from_user_id = fromResolved.id;
+  copy.from_username = fromResolved.username;
+  copy.from_role = fromResolved.role;
+  copy.to_user_id = toResolved.id;
+  copy.to_username = toResolved.username;
+  copy.to_role = toResolved.role;
+  const agLabel = toResolved.role === 'Agent' ? toResolved.username : (fromResolved.role === 'Agent' ? fromResolved.username : '');
+  if (copy.notes) copy.notes = scrubClientNotesForOwner(copy.notes, agLabel, maps);
+  delete copy.client_id;
+  delete copy.client_username;
+  delete copy.client_name;
+  delete copy.routed_to_vault;
+  return copy;
+}
+
 // 5. Allocation History (Paginated or raw array)
 app.get('/api/numbers/allocation-history', (req, res) => {
   let data = readDb('allocation_history') || [];
@@ -12186,13 +12409,24 @@ app.get('/api/numbers/allocation-history', (req, res) => {
   const isOwner = sRole === 'owner' || sRole === 'admin';
   const isAgent = sRole === 'agent';
 
-  if (!isOwner && isAgent) {
+  if (isOwner) {
+    const maps = buildClientToAgentLookup();
+    data = data.map(h => sanitizeAllocationHistoryForOwner(h, maps));
+  } else if (isAgent) {
+    const myId = Number(sessionUser.id);
+    const myU = String(sessionUser.username || '').trim().toLowerCase();
+    const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === myId);
+    const myClientIds = new Set(myClients.map(c => Number(c.id)));
+    const myClientUsers = new Set(myClients.map(c => String(c.username || '').trim().toLowerCase()).filter(Boolean));
     data = data.filter(h => {
-      const fromMe = String(h.from_user || '').toLowerCase() === String(sessionUser.username || '').toLowerCase() ||
-                     (h.from_user_id && Number(h.from_user_id) === Number(sessionUser.id)) ||
-                     (h.agent_id && Number(h.agent_id) === Number(sessionUser.id)) ||
-                     (h.to_user && String(h.to_user).toLowerCase() === String(sessionUser.username || '').toLowerCase());
-      return fromMe;
+      if (!h) return false;
+      const toRoleLow = String(h.to_role || '').toLowerCase();
+      return String(h.from_user || '').trim().toLowerCase() === myU ||
+             (h.from_user_id && Number(h.from_user_id) === myId) ||
+             (h.agent_id && Number(h.agent_id) === myId) ||
+             String(h.to_user || '').trim().toLowerCase() === myU ||
+             (h.to_user_id && Number(h.to_user_id) === myId && toRoleLow === 'agent') ||
+             (toRoleLow === 'client' && (myClientIds.has(Number(h.to_user_id)) || myClientUsers.has(String(h.to_user || '').trim().toLowerCase())));
     });
   }
 
@@ -12203,6 +12437,233 @@ app.get('/api/numbers/allocation-history', (req, res) => {
   const limit = parseInt(req.query.limit) || 15;
   const start = (page - 1) * limit;
   res.json({ data: data.slice(start, start + limit), total: data.length });
+});
+
+// 5b. Agent Unified Allocation, Request, Return & Transfer History (Strictly Isolated to Agent's Own Pool & Clients)
+app.get('/api/agent/allocation-history', requireAuth, (req, res) => {
+  try {
+    const sessionUser = req.sessionUser;
+    if (normRole(sessionUser?.role) !== 'agent') {
+      return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+    }
+    const myId = Number(sessionUser.id);
+    const myU = String(sessionUser.username || '').trim().toLowerCase();
+    const allClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === myId);
+    const myClientIds = new Set(allClients.map(c => Number(c.id)));
+    const myClientUsers = new Set(allClients.map(c => String(c.username || '').trim().toLowerCase()).filter(Boolean));
+    const clientNameById = new Map(allClients.map(c => [Number(c.id), c.username || c.full_name || `Client #${c.id}`]));
+
+    const belongsToMyClient = (id, uname, role) => {
+      const rLow = String(role || '').trim().toLowerCase();
+      const uLow = String(uname || '').trim().toLowerCase();
+      const vMatch = String(uname || '').match(/^vault\s*\((.+)\)$/i);
+      const innerLow = vMatch ? vMatch[1].trim().toLowerCase() : '';
+      if (rLow === 'client' || rLow === 'vault client') {
+        if (id != null && myClientIds.has(Number(id))) return true;
+        if (uLow && myClientUsers.has(uLow)) return true;
+        if (innerLow && myClientUsers.has(innerLow)) return true;
+      }
+      if (!rLow && uLow && myClientUsers.has(uLow)) return true;
+      return false;
+    };
+
+    const events = [];
+
+    // 1. Allocations (allocation_history)
+    const allocList = readDb('allocation_history') || [];
+    for (const h of allocList) {
+      if (!h) continue;
+      const toRoleLow = String(h.to_role || '').toLowerCase();
+      const isMine = (h.agent_id && Number(h.agent_id) === myId) ||
+        (h.from_user_id && Number(h.from_user_id) === myId) ||
+        String(h.from_user || '').trim().toLowerCase() === myU ||
+        (toRoleLow === 'agent' && (Number(h.to_user_id) === myId || String(h.to_user || '').trim().toLowerCase() === myU)) ||
+        belongsToMyClient(h.to_user_id, h.to_user, h.to_role);
+      if (!isMine) continue;
+      const isClientTarget = toRoleLow === 'client' || belongsToMyClient(h.to_user_id, h.to_user, h.to_role);
+      const clientId = isClientTarget ? (Number(h.to_user_id) || null) : null;
+      const actorName = isClientTarget
+        ? (h.to_user || (clientId && clientNameById.get(clientId)) || 'Client')
+        : (h.to_user || sessionUser.username);
+      const ts = h.timestamp || h.created || '';
+      const sampleStr = h.sample_start && h.sample_end && h.sample_start !== h.sample_end
+        ? `${h.sample_start} … ${h.sample_end}`
+        : (h.sample_start || '');
+      events.push({
+        uid: `alloc-${h.id}`,
+        ref_id: h.id,
+        category: 'allocation',
+        action_label: String(h.from_user || '').toLowerCase() === 'owner' && isClientTarget ? 'Self-Allocated' : 'Allocated',
+        client_id: clientId,
+        actor_name: actorName,
+        actor_role: isClientTarget ? 'Client' : 'Agent',
+        range_name: h.range_name || 'General Range',
+        payterm: h.payterm || '',
+        count: Number(h.count || h.qty_each || 0),
+        detail: [
+          h.from_user ? `From ${h.from_user}` : '',
+          sampleStr ? `Nums: ${sampleStr}` : '',
+          h.notes || ''
+        ].filter(Boolean).join(' · ') || 'Numbers allocated',
+        status: h.status || 'completed',
+        timestamp: ts
+      });
+    }
+
+    // 2. Transfers & Returns (number_transfers)
+    const transfers = readDb('number_transfers') || [];
+    for (const t of transfers) {
+      if (!t) continue;
+      const isMine = (t.agent_id && Number(t.agent_id) === myId) ||
+        (Number(t.from_user_id) === myId && String(t.from_role || '').toLowerCase() === 'agent') ||
+        (Number(t.to_user_id) === myId && String(t.to_role || '').toLowerCase() === 'agent') ||
+        belongsToMyClient(t.from_user_id, t.from_username, t.from_role) ||
+        belongsToMyClient(t.to_user_id, t.to_username, t.to_role);
+      if (!isMine) continue;
+      const actLow = String(t.action || '').toLowerCase();
+      const isReturn = actLow.includes('return') || Boolean(t.routed_to_vault);
+      const isMove = actLow === 'move';
+      const fromIsClient = belongsToMyClient(t.from_user_id, t.from_username, t.from_role);
+      const toIsClient = belongsToMyClient(t.to_user_id, t.to_username, t.to_role);
+      const clientId = fromIsClient ? Number(t.from_user_id || 0) || null : (toIsClient ? Number(t.to_user_id || 0) || null : null);
+      const actorName = isReturn
+        ? (t.from_username || (clientId && clientNameById.get(clientId)) || 'Client')
+        : (toIsClient ? (t.to_username || 'Client') : (t.from_username || t.to_username || 'Agent'));
+      const actorRole = (isReturn ? (fromIsClient ? 'Client' : (t.from_role || 'Agent')) : (toIsClient ? 'Client' : (t.to_role || 'Agent')));
+      const datesStr = Array.isArray(t.dates_returned) && t.dates_returned.length ? `Dates: ${t.dates_returned.join(', ')}` : '';
+      const destStr = isReturn
+        ? `→ ${t.to_username || 'Agent Pool'}${datesStr ? ` (${datesStr})` : ''}`
+        : (isMove
+          ? `${t.from_username || 'Client'} → ${t.to_username || 'Client'}`
+          : `${t.from_username || 'Agent'} → ${t.to_username || 'Client'}${t.notes ? ` · ${t.notes}` : ''}`);
+      events.push({
+        uid: `tr-${t.id}`,
+        ref_id: t.id,
+        category: isReturn ? 'return' : 'transfer',
+        action_label: isReturn ? 'Returned' : (isMove ? 'Moved' : 'Transferred'),
+        client_id: clientId,
+        actor_name: actorName,
+        actor_role: actorRole,
+        range_name: t.range_name || t.service || '—',
+        payterm: t.payterm || '',
+        count: Number(t.count || (Array.isArray(t.number_ids) ? t.number_ids.length : 0) || 0),
+        detail: destStr,
+        status: t.status || 'completed',
+        timestamp: t.timestamp || t.created || ''
+      });
+    }
+
+    // 3. Client Number Requests (number_requests)
+    const numReqs = readDb('number_requests') || [];
+    for (const r of numReqs) {
+      if (!r) continue;
+      const isClientReq = Boolean(r.client_id) || String(r.requester_role || '').toLowerCase() === 'client';
+      if (!isClientReq) continue;
+      const isMine = Number(r.agent_id) === myId || myClientIds.has(Number(r.client_id));
+      if (!isMine) continue;
+      const cid = Number(r.client_id || 0) || null;
+      const cname = r.client_username || r.requester_username || (cid && clientNameById.get(cid)) || 'Client';
+      const stLow = String(r.status || 'pending').toLowerCase();
+      const fulfilledTxt = r.fulfilled_count != null ? `Fulfilled: ${r.fulfilled_count}/${r.quantity || 0}` : '';
+      events.push({
+        uid: `req-${r.id}`,
+        ref_id: r.id,
+        category: 'request',
+        action_label: stLow === 'fulfilled' || stLow === 'approved' ? 'Request Fulfilled' : (stLow === 'rejected' ? 'Request Rejected' : 'Requested'),
+        client_id: cid,
+        actor_name: cname,
+        actor_role: 'Client',
+        range_name: r.range_name || '—',
+        payterm: r.payterm || '',
+        count: Number(r.quantity || 0),
+        detail: [fulfilledTxt, r.client_rate_pkr ? `Rs. ${r.client_rate_pkr} PKR` : '', r.notes || ''].filter(Boolean).join(' · ') || 'Number request',
+        status: r.status || 'pending',
+        timestamp: r.timestamp || r.created || ''
+      });
+    }
+
+    // 4. Client Whitenoise Return Requests (return_requests)
+    const retReqs = readDb('return_requests') || [];
+    for (const rr of retReqs) {
+      if (!rr) continue;
+      const isMine = Number(rr.agent_id) === myId || myClientIds.has(Number(rr.client_id));
+      if (!isMine) continue;
+      const cid = Number(rr.client_id || 0) || null;
+      const cname = rr.client_username || rr.client_name || (cid && clientNameById.get(cid)) || 'Client';
+      const stLow = String(rr.status || 'pending').toLowerCase();
+      const datesStr = Array.isArray(rr.dates) && rr.dates.length ? `Dates: ${rr.dates.join(', ')}` : '';
+      events.push({
+        uid: `retreq-${rr.id}`,
+        ref_id: rr.id,
+        category: 'return',
+        action_label: stLow === 'approved' ? 'Return Approved' : (stLow === 'rejected' ? 'Return Rejected' : 'Return Requested'),
+        client_id: cid,
+        actor_name: cname,
+        actor_role: 'Client',
+        range_name: rr.range_name || 'Monthly Route {W}',
+        payterm: 'Monthly (30/5) {W}',
+        count: Number(rr.quantity || (Array.isArray(rr.number_ids) ? rr.number_ids.length : 0) || 0),
+        detail: [datesStr, rr.routed_to_vault && rr.vault_client_username ? `→ Vault (${rr.vault_client_username})` : ''].filter(Boolean).join(' · ') || 'Monthly Route {W} return',
+        status: rr.status || 'pending',
+        timestamp: rr.updated_at || rr.created_at || ''
+      });
+    }
+
+    // Sort newest first
+    events.sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+
+    const summary = {
+      total: events.length,
+      allocations: events.filter(e => e.category === 'allocation').length,
+      requests: events.filter(e => e.category === 'request').length,
+      returns: events.filter(e => e.category === 'return').length,
+      transfers: events.filter(e => e.category === 'transfer').length,
+      total_nums_allocated: events.filter(e => e.category === 'allocation').reduce((s, e) => s + Number(e.count || 0), 0),
+      total_nums_returned: events.filter(e => e.category === 'return').reduce((s, e) => s + Number(e.count || 0), 0)
+    };
+
+    const typeFilter = String(req.query.type || 'all').trim().toLowerCase();
+    const clientFilter = req.query.client_id ? Number(req.query.client_id) : null;
+    const q = String(req.query.search || '').trim().toLowerCase();
+
+    let filtered = events;
+    if (typeFilter && typeFilter !== 'all') {
+      filtered = filtered.filter(e => e.category === typeFilter);
+    }
+    if (clientFilter) {
+      const targetNameLow = String(clientNameById.get(clientFilter) || '').trim().toLowerCase();
+      filtered = filtered.filter(e => Number(e.client_id) === clientFilter || (targetNameLow && String(e.actor_name || '').trim().toLowerCase() === targetNameLow));
+    }
+    if (q) {
+      filtered = filtered.filter(e =>
+        String(e.actor_name || '').toLowerCase().includes(q) ||
+        String(e.range_name || '').toLowerCase().includes(q) ||
+        String(e.detail || '').toLowerCase().includes(q) ||
+        String(e.action_label || '').toLowerCase().includes(q) ||
+        String(e.status || '').toLowerCase().includes(q)
+      );
+    }
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 25));
+    const start = (page - 1) * limit;
+
+    res.json({
+      success: true,
+      data: filtered.slice(start, start + limit),
+      total: filtered.length,
+      page,
+      limit,
+      summary,
+      clients: allClients
+        .filter(c => c.status !== 'deleted')
+        .map(c => ({ id: Number(c.id), username: c.username || `Client #${c.id}` }))
+        .sort((a, b) => String(a.username).localeCompare(String(b.username), undefined, { sensitivity: 'base' }))
+    });
+  } catch (err) {
+    console.error('GET /api/agent/allocation-history error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 7. Services (Array - clean metadata tags without fixed auto rates)
@@ -12999,9 +13460,22 @@ function registerPaginatedCrud(routePath, tableName) {
       }
     } else if (tableName === 'number_transfers') {
       if (isAgent) {
-        data = data.filter(t => Number(t.to_user_id) === Number(sessionUser.id) || Number(t.from_user_id) === Number(sessionUser.id));
+        const myId = Number(sessionUser.id);
+        const myClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === myId);
+        const myClientIds = new Set(myClients.map(c => Number(c.id)));
+        const myClientUsers = new Set(myClients.map(c => String(c.username || '').trim().toLowerCase()).filter(Boolean));
+        data = data.filter(t => {
+          if (!t) return false;
+          if (Number(t.agent_id) === myId) return true;
+          if (Number(t.to_user_id) === myId || Number(t.from_user_id) === myId) return true;
+          const fLow = String(t.from_username || '').trim().toLowerCase();
+          const tLow = String(t.to_username || '').trim().toLowerCase();
+          if (String(t.from_role || '').toLowerCase() === 'client' && (myClientIds.has(Number(t.from_user_id)) || myClientUsers.has(fLow))) return true;
+          if (String(t.to_role || '').toLowerCase().includes('client') && (myClientIds.has(Number(t.to_user_id)) || myClientUsers.has(tLow))) return true;
+          return false;
+        });
       } else if (isClient) {
-        data = data.filter(t => Number(t.to_user_id) === Number(sessionUser.id));
+        data = data.filter(t => Number(t.to_user_id) === Number(sessionUser.id) || Number(t.from_user_id) === Number(sessionUser.id));
       }
     } else if (tableName === 'payout_requests') {
       if (isOwner) {
@@ -13205,6 +13679,9 @@ function registerPaginatedCrud(routePath, tableName) {
         copy.user = '';
         return copy;
       });
+    } else if (tableName === 'number_transfers' && isOwner) {
+      const maps = buildClientToAgentLookup();
+      slice = slice.map(item => sanitizeTransferLogForOwner(item, maps));
     } else if (tableName === 'agents') {
       // Compute live Clients, Numbers, and Today OTP counts for every Agent row
       const allClients = readDb('clients') || [];
@@ -14531,12 +15008,16 @@ app.post(['/api/numbers/:id/move', '/api/numbers/move'], requireAuth, (req, res)
     const transfers = readDb('number_transfers') || [];
     transfers.unshift({
       id: nextId(transfers, 'number_transfers'),
+      agent_id: Number(n.agent_id || sessionUser.id || 0) || null,
       from_user_id: fromClientId,
       from_username: fromClientName,
       from_role: 'Client',
       to_user_id: toClientId,
       to_username: targetClient.username,
       to_role: 'Client',
+      range_id: n.range_id || null,
+      range_name: n.range_name || n.range || '',
+      count: 1,
       number_ids: [n.id],
       timestamp: new Date().toISOString(),
       action: 'move',
@@ -14730,6 +15211,7 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
     const wnEligible = [];
 
     if (isClient) {
+      const returnedByRange = new Map();
       // Split Client selections into Whitenoise (requires Agent approval) vs Weekly/Regular (immediate with Vault routing)
       numbers = numbers.map(n => {
         if (!n) return n;
@@ -14755,6 +15237,19 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
           routedToVaultCount++;
           vaultClientName = (ret.vaultClient && ret.vaultClient.username) || vaultClientName;
         }
+        const rKey = `${n.range_id || ''}|${String(n.range_name || n.range || 'General Range').trim().toLowerCase()}`;
+        if (!returnedByRange.has(rKey)) {
+          returnedByRange.set(rKey, {
+            range_id: n.range_id || null,
+            range_name: n.range_name || n.range || 'General Range',
+            agent_id: Number(n.agent_id || sessionUser.agent_id || 0) || null,
+            routed: Boolean(ret.routedToVault),
+            vaultId: ret.vaultClient ? Number(ret.vaultClient.id) : null,
+            vaultName: (ret.vaultClient && ret.vaultClient.username) || '',
+            ids: []
+          });
+        }
+        returnedByRange.get(rKey).ids.push(n.id);
         return ret.updated;
       });
 
@@ -14788,6 +15283,32 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
       }
 
       writeDb('numbers', numbers);
+      if (returnedByRange.size > 0) {
+        try {
+          const transfers = readDb('number_transfers') || [];
+          for (const grp of returnedByRange.values()) {
+            transfers.unshift({
+              id: nextId(transfers, 'number_transfers'),
+              agent_id: grp.agent_id,
+              from_user_id: sessionUser.id,
+              from_username: sessionUser.username,
+              from_role: 'Client',
+              to_user_id: grp.routed ? grp.vaultId : grp.agent_id,
+              to_username: grp.routed ? `Vault (${grp.vaultName})` : 'Agent Pool',
+              to_role: grp.routed ? 'Vault Client' : 'Agent',
+              range_id: grp.range_id,
+              range_name: grp.range_name,
+              number_ids: grp.ids,
+              count: grp.ids.length,
+              routed_to_vault: grp.routed,
+              timestamp: nowIso,
+              action: 'return',
+              status: 'completed'
+            });
+          }
+          writeDb('number_transfers', transfers);
+        } catch (_) {}
+      }
       const parts = [];
       if (count > 0) parts.push(`Returned ${count} number(s).`);
       if (wnSubmittedCount > 0) parts.push(`Submitted Return Request for ${wnSubmittedCount} Monthly Route {W} number(s) — awaiting your Agent's approval.`);
@@ -15142,6 +15663,7 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
       const transfers = readDb('number_transfers') || [];
       transfers.unshift({
         id: nextId(transfers, 'number_transfers'),
+        agent_id: isClient ? upstreamAgentId : sessionUser.id,
         from_user_id: sessionUser.id,
         from_username: sessionUser.username,
         from_role: isClient ? 'Client' : 'Agent',
@@ -16130,24 +16652,6 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
 
     const effMatchRid = matchedRng ? Number(matchedRng.id) : rId;
     const effMatchRname = (matchedRng && (matchedRng.range_name || matchedRng.name)) || range_name || '';
-    const available = numbers.filter(n => {
-      if (!n || n.client_id) return false;
-      if (String(n.status || '').toLowerCase() === 'blocked') return false;
-      if (!isOwner && !wnAllowed && isWhitenoiseRecord(n, wnRangesMap, wnTags)) return false;
-      if (!matchesRangeRef(n, effMatchRid, effMatchRname)) return false;
-      return !n.agent_id && !n.client_id;
-    });
-
-    if (available.length === 0) {
-      return res.status(400).json({
-        error: isClient
-          ? 'No free numbers are currently available in this range. Please choose another range or try again later.'
-          : 'No free numbers are currently available in the Owner pool for this range.'
-      });
-    }
-
-    const toAllocate = available.slice(0, qty);
-    const now = new Date().toISOString();
 
     const clRecForStamp = isClient
       ? ((readDb('clients') || []).find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser)
@@ -16158,6 +16662,41 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const agRecForStamp = effClientAgentId
       ? ((readDb('agents') || []).find(a => Number(a.id) === Number(effClientAgentId)) || null)
       : null;
+
+    // Smart Priority Pool for Client:
+    // Priority 1: Managing Agent's Master Pool free numbers (agent_id === effClientAgentId && !client_id)
+    // Priority 2: Owner's unassigned pool (!agent_id && !client_id)
+    const agentPoolAvailable = [];
+    const ownerPoolAvailable = [];
+    for (const n of numbers) {
+      if (!n || n.client_id) continue;
+      if (String(n.status || '').toLowerCase() === 'blocked') continue;
+      if (!isOwner && !wnAllowed && isWhitenoiseRecord(n, wnRangesMap, wnTags)) continue;
+      if (!matchesRangeRef(n, effMatchRid, effMatchRname)) continue;
+      if (isClient && effClientAgentId && Number(n.agent_id) === Number(effClientAgentId)) {
+        agentPoolAvailable.push(n);
+      } else if (!n.agent_id) {
+        ownerPoolAvailable.push(n);
+      }
+    }
+    const available = isClient
+      ? [...agentPoolAvailable, ...ownerPoolAvailable]
+      : ownerPoolAvailable;
+
+    if (available.length === 0) {
+      return res.status(400).json({
+        error: isClient
+          ? 'No free numbers are currently available in this range. Please choose another range or try again later.'
+          : 'No free numbers are currently available in the Owner pool for this range.'
+      });
+    }
+
+    const toAllocate = available.slice(0, qty);
+    const fromAgentPoolCount = isClient
+      ? toAllocate.filter(n => effClientAgentId && Number(n.agent_id) === Number(effClientAgentId)).length
+      : 0;
+    const fromOwnerPoolCount = toAllocate.length - fromAgentPoolCount;
+    const now = new Date().toISOString();
 
     toAllocate.forEach(n => {
       const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
@@ -16223,12 +16762,19 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const history = readDb('allocation_history') || [];
     const historyEntry = {
       id: nextId(history, 'allocation_history'),
-      from_user: 'Owner',
+      from_user: isClient && fromAgentPoolCount > 0 && fromOwnerPoolCount === 0
+        ? (agRecForStamp?.username || 'Agent Pool')
+        : 'Owner',
+      agent_id: isClient ? effClientAgentId : (isAgent ? sessionUser.id : null),
+      agent_username: isClient ? (agRecForStamp?.username || '') : (isAgent ? sessionUser.username : ''),
       to_user_id: sessionUser.id,
       to_user: sessionUser.username,
       to_role: sessionUser.role,
       range_name: range_name || toAllocate[0]?.range_name || 'General Range',
+      payterm: targetPayterm,
       count: toAllocate.length,
+      from_agent_pool: fromAgentPoolCount,
+      from_owner_pool: fromOwnerPoolCount,
       sample_start: toAllocate[0]?.number,
       sample_end: toAllocate[toAllocate.length - 1]?.number,
       timestamp: now,
@@ -17241,20 +17787,18 @@ app.delete('/api/notifications/:id', (req, res) => {
 });
 
 // Strict range-level available pool helper (never steals numbers from unrelated ranges)
-function getRangeFreePool(numbers, { isAgent, agentId, rangeId, rangeName, country, provider }) {
+// When includeOwnerFallback=true with isAgent+agentId, prioritizes Agent's Master Pool free numbers FIRST,
+// then appends Owner's unassigned pool free numbers as seamless fallback.
+function getRangeFreePool(numbers, { isAgent, agentId, includeOwnerFallback = false, rangeId, rangeName, country, provider }) {
   const list = Array.isArray(numbers) ? numbers : [];
-  const basePool = isAgent
-    ? list.filter(n => n && Number(n.agent_id) === Number(agentId) && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked')
-    : list.filter(n => n && !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked');
-
   const rIdNum = rangeId ? Number(rangeId) : null;
   const rNameLow = String(rangeName || '').trim().toLowerCase();
   const cLow = String(country || '').trim().toLowerCase();
   const pLow = String(provider || '').trim().toLowerCase();
+  const hasRangeFilter = Boolean(rIdNum || rNameLow || (cLow && pLow));
 
-  if (!rIdNum && !rNameLow && !(cLow && pLow)) return basePool;
-
-  return basePool.filter(n => {
+  const matchesTarget = (n) => {
+    if (!hasRangeFilter) return true;
     if (rIdNum && n.range_id && Number(n.range_id) === rIdNum) return true;
     if (rNameLow) {
       const nRng = String(n.range_name || n.range || n.name || '').trim().toLowerCase();
@@ -17264,7 +17808,26 @@ function getRangeFreePool(numbers, { isAgent, agentId, rangeId, rangeName, count
       return String(n.country || '').trim().toLowerCase() === cLow && String(n.provider || '').trim().toLowerCase() === pLow;
     }
     return false;
-  });
+  };
+
+  if (isAgent && agentId && includeOwnerFallback) {
+    const aidNum = Number(agentId);
+    const agentFirst = [];
+    const ownerFallback = [];
+    for (const n of list) {
+      if (!n || n.client_id || String(n.status || '').toLowerCase() === 'blocked') continue;
+      if (!matchesTarget(n)) continue;
+      if (Number(n.agent_id) === aidNum) agentFirst.push(n);
+      else if (!n.agent_id) ownerFallback.push(n);
+    }
+    return [...agentFirst, ...ownerFallback];
+  }
+
+  const basePool = isAgent
+    ? list.filter(n => n && Number(n.agent_id) === Number(agentId) && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked')
+    : list.filter(n => n && !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked');
+
+  return hasRangeFilter ? basePool.filter(matchesTarget) : basePool;
 }
 
 // ── Live Number Requests & Hierarchy Dispatch Control ─────────────
@@ -17310,9 +17873,12 @@ app.get('/api/agent-requests', requireAuth, (req, res) => {
     const rangeById = new Map(allRanges.map(rg => [Number(rg.id), rg]));
     const enriched = list.map(r => {
       const rg = r.range_id ? rangeById.get(Number(r.range_id)) : null;
+      const isReqFromClient = Boolean(r.client_id || String(r.requester_role || '').toLowerCase() === 'client');
+      const reqAgId = Number(r.agent_id || (isAgent ? sessionUser.id : 0) || 0) || null;
       const pool = getRangeFreePool(allNumbers, {
-        isAgent: false,
-        agentId: null,
+        isAgent: isReqFromClient && Boolean(reqAgId),
+        agentId: isReqFromClient ? reqAgId : null,
+        includeOwnerFallback: isReqFromClient && Boolean(reqAgId),
         rangeId: r.range_id || (rg && rg.id) || null,
         rangeName: r.range_name || (rg && (rg.range_name || rg.name)) || '',
         country: r.country || (rg && rg.country) || '',
@@ -17741,9 +18307,11 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
         allocatedNumbers.push(item);
       });
     } else {
+      // Smart Priority Pool for Client Requests: Agent's Master Pool free numbers first, then Owner Pool fallback
       const pool = getRangeFreePool(numbers, {
-        isAgent: false,
-        agentId: null,
+        isAgent: Boolean(isClientReq && effAgentId),
+        agentId: isClientReq ? effAgentId : null,
+        includeOwnerFallback: Boolean(isClientReq && effAgentId),
         rangeId,
         rangeName: rangeLabel,
         country,

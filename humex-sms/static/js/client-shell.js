@@ -348,16 +348,14 @@ pgDashboard = async function () {
         weeklyLabels,
         weeklyTraffic,
         hero: {
-          label: 'Today SMS (API)',
+          label: 'Today SMS',
           value: apiTodaySms,
           yesterday: apiYestSms,
-          subtitle: 'API SMS on your numbers today (UTC)',
+          subtitle: 'SMS on your numbers today (UTC)',
           icon: 'fa-check',
           page: 'my-sms'
         },
-        moneyCards: [
-          { label: 'Monthly {W} SMS', value: wnTodaySms.toLocaleString(), sub: 'Daily file update: 12:00 PM PKT', icon: 'fa-tower-cell', page: clientHasWn ? 'cdr2' : 'my-sms' }
-        ],
+        moneyCards: [],
         shortcuts: [
           { label: 'My Numbers', page: 'my-numbers', icon: 'fa-mobile-screen', tone: 'blue' },
           { label: 'Ranges Add', page: 'sms-overview', icon: 'fa-table-list', tone: 'green' },

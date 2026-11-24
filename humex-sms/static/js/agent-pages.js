@@ -4570,6 +4570,250 @@ window.zyAgentDeleteBlockedNums = async function () {
   }
 };
 
+/* ═══ AGENT ALLOCATION HISTORY (PRIVATE AGENT-POOL LOGS) ═══════ */
+const zyAgtAllocHistState = { type: 'all', client_id: '', search: '', page: 1, limit: 25 };
+let zyAgtAllocHistSearchTimer = null;
+
+function zyAgtAllocHistBadge(cat, label) {
+  const map = {
+    allocation: { bg: '#ecfdf5', fg: '#047857', bd: '#a7f3d0', icon: 'fa-plus-circle' },
+    request:    { bg: '#eff6ff', fg: '#1d4ed8', bd: '#bfdbfe', icon: 'fa-paper-plane' },
+    return:     { bg: '#fff7ed', fg: '#c2410c', bd: '#fed7aa', icon: 'fa-rotate-left' },
+    transfer:   { bg: '#f5f3ff', fg: '#6d28d9', bd: '#ddd6fe', icon: 'fa-right-left' }
+  };
+  const st = map[cat] || { bg: '#f1f5f9', fg: '#334155', bd: '#cbd5e1', icon: 'fa-circle-info' };
+  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:6px;font-size:11.5px;font-weight:700;background:${st.bg};color:${st.fg};border:1px solid ${st.bd};white-space:nowrap;"><i class="fas ${st.icon}" style="font-size:10px;"></i>${zyEsc(label || cat || 'Event')}</span>`;
+}
+
+function zyAgtAllocHistPaytermBadge(pt) {
+  const v = String(pt || '').trim();
+  if (!v) return '<span style="color:#94a3b8;">—</span>';
+  const low = v.toLowerCase();
+  const isMonthly = low.includes('month');
+  const isWeekly = low.includes('week');
+  const bg = isMonthly ? '#f0f9ff' : isWeekly ? '#fefce8' : '#f1f5f9';
+  const fg = isMonthly ? '#0369a1' : isWeekly ? '#a16207' : '#475569';
+  const bd = isMonthly ? '#bae6fd' : isWeekly ? '#fde68a' : '#cbd5e1';
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;background:${bg};color:${fg};border:1px solid ${bd};white-space:nowrap;">${zyEsc(v)}</span>`;
+}
+
+async function zyAgtAllocHistLoad() {
+  const wrap = document.getElementById('agt-alloc-hist-body');
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="zy-loading" style="padding:32px;text-align:center;color:#64748b;"><i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>Loading allocation history…</div>`;
+  try {
+    const qs = new URLSearchParams({
+      type: zyAgtAllocHistState.type || 'all',
+      page: String(zyAgtAllocHistState.page || 1),
+      limit: String(zyAgtAllocHistState.limit || 25)
+    });
+    if (zyAgtAllocHistState.client_id) qs.set('client_id', String(zyAgtAllocHistState.client_id));
+    if (zyAgtAllocHistState.search) qs.set('search', zyAgtAllocHistState.search);
+
+    const res = await apiFetch('/api/agent/allocation-history?' + qs.toString());
+    const rows = Array.isArray(res?.data) ? res.data : [];
+    const total = Number(res?.total || 0);
+    const page = Number(res?.page || zyAgtAllocHistState.page || 1);
+    const limit = Number(res?.limit || zyAgtAllocHistState.limit || 25);
+    const sum = res?.summary || {};
+    const clients = Array.isArray(res?.clients) ? res.clients : [];
+
+    // Update KPI cards
+    const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setTxt('agt-ah-kpi-total', Number(sum.total || 0).toLocaleString());
+    setTxt('agt-ah-kpi-alloc', `${Number(sum.allocations || 0).toLocaleString()} (${Number(sum.total_nums_allocated || 0).toLocaleString()} nums)`);
+    setTxt('agt-ah-kpi-req', Number(sum.requests || 0).toLocaleString());
+    setTxt('agt-ah-kpi-ret', `${Number(sum.returns || 0).toLocaleString()} (${Number(sum.total_nums_returned || 0).toLocaleString()} nums)`);
+
+    // Update tab counts
+    setTxt('agt-ah-cnt-all', Number(sum.total || 0));
+    setTxt('agt-ah-cnt-allocation', Number(sum.allocations || 0));
+    setTxt('agt-ah-cnt-request', Number(sum.requests || 0));
+    setTxt('agt-ah-cnt-return', Number(sum.returns || 0));
+    setTxt('agt-ah-cnt-transfer', Number(sum.transfers || 0));
+
+    // Populate client filter dropdown preserving current selection
+    const sel = document.getElementById('agt-ah-client-sel');
+    if (sel) {
+      const curVal = String(zyAgtAllocHistState.client_id || '');
+      const opts = [`<option value="">All My Clients (${clients.length})</option>`]
+        .concat(clients.map(c => `<option value="${Number(c.id)}"${String(c.id) === curVal ? ' selected' : ''}>${zyEsc(c.username)}</option>`));
+      sel.innerHTML = opts.join('');
+    }
+
+    // Highlight active tab
+    document.querySelectorAll('#agt-ah-tabs .agt-ah-tab').forEach(btn => {
+      const active = btn.getAttribute('data-type') === zyAgtAllocHistState.type;
+      btn.style.background = active ? '#0284c7' : '#f8fafc';
+      btn.style.color = active ? '#ffffff' : '#334155';
+      btn.style.borderColor = active ? '#0284c7' : '#e2e8f0';
+    });
+
+    if (!rows.length) {
+      wrap.innerHTML = `
+        <div style="padding:44px 20px;text-align:center;color:#64748b;">
+          <i class="fas fa-clock-rotate-left" style="font-size:30px;color:#cbd5e1;margin-bottom:10px;display:block;"></i>
+          <div style="font-weight:700;color:#334155;font-size:14px;">No allocation history records found</div>
+          <div style="font-size:12.5px;margin-top:4px;">Client allocations, number requests, returns, and transfers will appear here automatically.</div>
+        </div>`;
+      return;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const startIdx = (page - 1) * limit + 1;
+    const endIdx = Math.min(total, page * limit);
+
+    const tableRows = rows.map(e => {
+      const isAgentActor = String(e.actor_role || '').toLowerCase() === 'agent';
+      const roleChip = isAgentActor
+        ? `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:#e0f2fe;color:#0369a1;margin-left:5px;">You</span>`
+        : `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:#dcfce7;color:#15803d;margin-left:5px;">Client</span>`;
+      const qtyColor = e.category === 'return' ? '#c2410c' : e.category === 'allocation' ? '#047857' : '#1d4ed8';
+      const qtyBg = e.category === 'return' ? '#fff7ed' : e.category === 'allocation' ? '#ecfdf5' : '#eff6ff';
+      return [
+        `<span style="white-space:nowrap;font-size:12px;color:#475569;font-weight:600;">${zyEsc(fmtShort(e.timestamp))}</span>`,
+        zyAgtAllocHistBadge(e.category, e.action_label),
+        `<div style="white-space:nowrap;"><strong style="color:#0f172a;">${zyEsc(e.actor_name || '—')}</strong>${roleChip}</div>`,
+        `<strong style="color:#1e293b;">${zyEsc(e.range_name || '—')}</strong>`,
+        zyAgtAllocHistPaytermBadge(e.payterm),
+        `<span style="display:inline-block;padding:2px 9px;border-radius:6px;font-weight:800;font-size:12px;background:${qtyBg};color:${qtyColor};">${Number(e.count || 0).toLocaleString()}</span>`,
+        `<span style="font-size:12px;color:#475569;word-break:break-word;">${zyEsc(e.detail || '—')}</span>`,
+        statusBadge(e.status || 'completed')
+      ];
+    });
+
+    const pagerHtml = totalPages > 1 ? `
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-top:1px solid #e2e8f0;background:#f8fafc;">
+        <div style="font-size:12.5px;color:#64748b;font-weight:600;">Showing ${startIdx}–${endIdx} of ${total.toLocaleString()} events</div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="btn btn-outline btn-sm" ${page <= 1 ? 'disabled' : ''} onclick="window.zyAgtAllocHistPage(${page - 1})"><i class="fas fa-chevron-left"></i> Prev</button>
+          <span style="font-size:12.5px;font-weight:700;color:#334155;padding:0 8px;">Page ${page} / ${totalPages}</span>
+          <button class="btn btn-outline btn-sm" ${page >= totalPages ? 'disabled' : ''} onclick="window.zyAgtAllocHistPage(${page + 1})">Next <i class="fas fa-chevron-right"></i></button>
+        </div>
+      </div>` : `
+      <div style="padding:10px 16px;border-top:1px solid #e2e8f0;background:#f8fafc;font-size:12px;color:#64748b;font-weight:600;">
+        Showing ${startIdx}–${endIdx} of ${total.toLocaleString()} events
+      </div>`;
+
+    wrap.innerHTML = `
+      <div style="overflow-x:auto;">
+        ${buildTable(['Date / Time', 'Action', 'Client / Account', 'Range', 'Payterm', 'Qty', 'Details', 'Status'], tableRows)}
+      </div>
+      ${pagerHtml}`;
+  } catch (err) {
+    console.error('Agent allocation history load error:', err);
+    wrap.innerHTML = `<div style="padding:28px;text-align:center;color:#dc2626;font-weight:600;">Failed to load allocation history. Please try refreshing.</div>`;
+    toast('Failed to load allocation history', 'error');
+  }
+}
+
+window.zyAgtAllocHistSetType = function (type) {
+  zyAgtAllocHistState.type = type || 'all';
+  zyAgtAllocHistState.page = 1;
+  zyAgtAllocHistLoad();
+};
+
+window.zyAgtAllocHistSetClient = function (clientId) {
+  zyAgtAllocHistState.client_id = clientId || '';
+  zyAgtAllocHistState.page = 1;
+  zyAgtAllocHistLoad();
+};
+
+window.zyAgtAllocHistSetSearch = function (val) {
+  clearTimeout(zyAgtAllocHistSearchTimer);
+  zyAgtAllocHistSearchTimer = setTimeout(() => {
+    zyAgtAllocHistState.search = String(val || '').trim();
+    zyAgtAllocHistState.page = 1;
+    zyAgtAllocHistLoad();
+  }, 260);
+};
+
+window.zyAgtAllocHistPage = function (p) {
+  zyAgtAllocHistState.page = Math.max(1, Number(p) || 1);
+  zyAgtAllocHistLoad();
+};
+
+window.zyAgtAllocHistRefresh = function () {
+  zyAgtAllocHistLoad();
+};
+
+async function pgAgentAllocationHistory(resetState = true) {
+  if (resetState) {
+    zyAgtAllocHistState.type = 'all';
+    zyAgtAllocHistState.client_id = '';
+    zyAgtAllocHistState.search = '';
+    zyAgtAllocHistState.page = 1;
+  }
+  const c = document.getElementById('page-content');
+  zyCrumb(['Allocation History']);
+  c.innerHTML = `
+    <div class="page-header" style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;">
+      <div>
+        <div class="page-title" style="display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-clock-rotate-left" style="color:#0284c7;"></i> Allocation History
+        </div>
+        <div class="page-subtitle">Private log of your clients' number allocations, requests, returns, and transfers</div>
+      </div>
+      <div class="page-actions">
+        <button class="btn btn-outline btn-sm" onclick="window.zyAgtAllocHistRefresh()">
+          <i class="fas fa-rotate"></i> Refresh
+        </button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px;">
+      <div class="card" style="padding:14px 16px;border-left:4px solid #0284c7;">
+        <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;">Total Events</div>
+        <div id="agt-ah-kpi-total" style="font-size:22px;font-weight:800;color:#0f172a;margin-top:4px;">—</div>
+      </div>
+      <div class="card" style="padding:14px 16px;border-left:4px solid #10b981;">
+        <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;">Allocations</div>
+        <div id="agt-ah-kpi-alloc" style="font-size:18px;font-weight:800;color:#047857;margin-top:6px;">—</div>
+      </div>
+      <div class="card" style="padding:14px 16px;border-left:4px solid #2563eb;">
+        <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;">Client Requests</div>
+        <div id="agt-ah-kpi-req" style="font-size:22px;font-weight:800;color:#1d4ed8;margin-top:4px;">—</div>
+      </div>
+      <div class="card" style="padding:14px 16px;border-left:4px solid #ea580c;">
+        <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;">Returns</div>
+        <div id="agt-ah-kpi-ret" style="font-size:18px;font-weight:800;color:#c2410c;margin-top:6px;">—</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;padding:12px 14px;">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;">
+        <div id="agt-ah-tabs" style="display:flex;flex-wrap:wrap;gap:6px;">
+          <button class="agt-ah-tab" data-type="all" onclick="window.zyAgtAllocHistSetType('all')" style="padding:6px 12px;border-radius:7px;border:1px solid #0284c7;background:#0284c7;color:#fff;font-size:12.5px;font-weight:700;cursor:pointer;">
+            All <span id="agt-ah-cnt-all" style="opacity:.85;margin-left:3px;">0</span>
+          </button>
+          <button class="agt-ah-tab" data-type="allocation" onclick="window.zyAgtAllocHistSetType('allocation')" style="padding:6px 12px;border-radius:7px;border:1px solid #e2e8f0;background:#f8fafc;color:#334155;font-size:12.5px;font-weight:700;cursor:pointer;">
+            Allocations <span id="agt-ah-cnt-allocation" style="opacity:.8;margin-left:3px;">0</span>
+          </button>
+          <button class="agt-ah-tab" data-type="request" onclick="window.zyAgtAllocHistSetType('request')" style="padding:6px 12px;border-radius:7px;border:1px solid #e2e8f0;background:#f8fafc;color:#334155;font-size:12.5px;font-weight:700;cursor:pointer;">
+            Requests <span id="agt-ah-cnt-request" style="opacity:.8;margin-left:3px;">0</span>
+          </button>
+          <button class="agt-ah-tab" data-type="return" onclick="window.zyAgtAllocHistSetType('return')" style="padding:6px 12px;border-radius:7px;border:1px solid #e2e8f0;background:#f8fafc;color:#334155;font-size:12.5px;font-weight:700;cursor:pointer;">
+            Returns <span id="agt-ah-cnt-return" style="opacity:.8;margin-left:3px;">0</span>
+          </button>
+          <button class="agt-ah-tab" data-type="transfer" onclick="window.zyAgtAllocHistSetType('transfer')" style="padding:6px 12px;border-radius:7px;border:1px solid #e2e8f0;background:#f8fafc;color:#334155;font-size:12.5px;font-weight:700;cursor:pointer;">
+            Transfers <span id="agt-ah-cnt-transfer" style="opacity:.8;margin-left:3px;">0</span>
+          </button>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+          <select id="agt-ah-client-sel" onchange="window.zyAgtAllocHistSetClient(this.value)" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:7px;font-size:12.5px;font-weight:600;color:#1e293b;background:#fff;min-width:170px;">
+            <option value="">All My Clients</option>
+          </select>
+          <input type="text" id="agt-ah-search" placeholder="Search client, range, notes…" oninput="window.zyAgtAllocHistSetSearch(this.value)" style="padding:7px 11px;border:1px solid #cbd5e1;border-radius:7px;font-size:12.5px;color:#1e293b;background:#fff;min-width:200px;">
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="agt-alloc-hist-body" style="padding:0;overflow:hidden;"></div>
+  `;
+  zyAgtAllocHistLoad();
+}
+
   const map = {
     'dashboard': () => pgDashboard(),
     'sms-ranges': pgSmsRanges, 'sms-overview': pgSmsRanges, 'sms-ratecard': pgSmsRanges,
@@ -4578,6 +4822,7 @@ window.zyAgentDeleteBlockedNums = async function () {
     'blocked-numbers': pgBlockedNumbers,
     'assign-to-client': pgMySmsNumbers,
     'transfer-history': pgAgentTransferHistory,
+    'allocation-history': () => pgAgentAllocationHistory(true),
     'client-requests': pgClientRequests,
     'news-clients': pgNewsClients, 'notifications': pgNewsClients,
     'live-chat': () => { if (window.HumexLiveChat) window.HumexLiveChat.renderPage('page-content'); },

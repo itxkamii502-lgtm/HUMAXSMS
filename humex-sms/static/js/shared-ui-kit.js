@@ -4714,7 +4714,7 @@ window.zyRenderLiveAccessTableBody = function () {
   }
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:34px;color:#64748b;font-size:13px;">
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:34px;color:#64748b;font-size:13px;">
       <i class="fas fa-satellite-dish" style="font-size:20px;color:#94a3b8;display:block;margin-bottom:8px;"></i>
       No API OTP messages available on this page.
     </td></tr>`;
@@ -4722,8 +4722,18 @@ window.zyRenderLiveAccessTableBody = function () {
     return;
   }
 
+  const fmtTime = (raw) => {
+    if (!raw) return '—';
+    if (typeof window.zyFormatUtc === 'function') {
+      const d = new Date(raw);
+      if (!isNaN(d.getTime())) return window.zyFormatUtc(d, false);
+    }
+    return String(raw).replace('T', ' ').replace(/\.\d+Z?$/i, '').slice(0, 19) || '—';
+  };
+
   tbody.innerHTML = rows.slice(0, window._zyLiveAccessLimit || 25).map(r => `
     <tr>
+      <td class="zy-la-time" style="white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12px;color:var(--sp-text-muted,#475569);">${esc(fmtTime(r.timestamp || r.created_at || r.created || ''))}</td>
       <td class="zy-la-range">${esc(r.range || 'International')}</td>
       <td style="white-space:nowrap;">
         <span class="zy-la-cli">${esc(r.cli || 'SMS')}</span>
@@ -4786,7 +4796,7 @@ window.zyFetchLiveAccessFeed = async function (silent = false, targetPage = null
     const res = await apiFetch(`/api/live-access?${qs.toString()}`);
     if (res && res.error) {
       if (!silent) {
-        tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:28px;color:#dc2626;font-weight:600;">${typeof escapeHtml === 'function' ? escapeHtml(res.error) : res.error}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:28px;color:#dc2626;font-weight:600;">${typeof escapeHtml === 'function' ? escapeHtml(res.error) : res.error}</td></tr>`;
       }
       return;
     }
@@ -4813,7 +4823,7 @@ window.zyFetchLiveAccessFeed = async function (silent = false, targetPage = null
   } catch (err) {
     if (!silent) {
       const msg = (err && err.message) || 'Could not load Live Access feed';
-      tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:28px;color:#dc2626;">${typeof escapeHtml === 'function' ? escapeHtml(msg) : msg}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:28px;color:#dc2626;">${typeof escapeHtml === 'function' ? escapeHtml(msg) : msg}</td></tr>`;
     }
   }
 };
@@ -4886,13 +4896,14 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
         <table class="data-table zy-la-table" style="width:100%;border-collapse:collapse;">
           <thead>
             <tr>
-              <th style="width:22%;text-align:left;">Range</th>
-              <th style="width:18%;text-align:left;">CLI</th>
-              <th style="width:60%;text-align:left;">SMS</th>
+              <th style="width:16%;text-align:left;white-space:nowrap;">Time</th>
+              <th style="width:20%;text-align:left;">Range</th>
+              <th style="width:15%;text-align:left;">CLI</th>
+              <th style="width:49%;text-align:left;">SMS</th>
             </tr>
           </thead>
           <tbody id="zy-live-access-tbody">
-            <tr><td colspan="3" style="text-align:center;padding:30px;color:var(--sp-text-muted,#64748b);">Loading Live Access stream…</td></tr>
+            <tr><td colspan="4" style="text-align:center;padding:30px;color:var(--sp-text-muted,#64748b);">Loading Live Access stream…</td></tr>
           </tbody>
         </table>
       </div>

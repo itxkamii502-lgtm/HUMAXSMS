@@ -24117,7 +24117,24 @@ function hydrateConversationForActor(conv, actor, allMessages) {
         : String(pinnedMsg.body || '').slice(0, 140),
       created_at: pinnedMsg.created_at
     } : null,
-    read_cursors: hideGroupMembersForClient ? {} : (conv.read_cursors || {}),
+    read_cursors: (() => {
+      if (hideGroupMembersForClient) return {};
+      const priv = (conv.read_cursors && typeof conv.read_cursors === 'object') ? conv.read_cursors : {};
+      const pub = (conv.public_read_cursors && typeof conv.public_read_cursors === 'object') ? conv.public_read_cursors : null;
+      if (!pub) return priv;
+      const out = {};
+      const allKeys = new Set([...Object.keys(priv), ...Object.keys(pub)]);
+      for (const k of allKeys) {
+        if (k === actor.key) {
+          out[k] = Number(priv[k] || 0);
+        } else if (Object.prototype.hasOwnProperty.call(pub, k)) {
+          out[k] = Number(pub[k] || 0);
+        } else {
+          out[k] = Number(priv[k] || 0);
+        }
+      }
+      return out;
+    })(),
     member_joined_after_id: hideGroupMembersForClient ? {} : (conv.member_joined_after_id || {}),
     is_pinned: Boolean(conv.pinned_by && typeof conv.pinned_by === 'object' && conv.pinned_by[actor.key]),
     pinned_at: (conv.pinned_by && typeof conv.pinned_by === 'object' && conv.pinned_by[actor.key]) || null,
@@ -24237,14 +24254,41 @@ app.post('/api/chat/direct', requireAuth, (req, res) => {
 function markConversationReadForActor(conv, convs, actor, latestId, allMessages) {
   if (!conv || !actor || !latestId || latestId <= 0) return false;
   if (!conv.read_cursors) conv.read_cursors = {};
+  if (!conv.public_read_cursors || typeof conv.public_read_cursors !== 'object') {
+    // Seed public_read_cursors from existing read_cursors so pre-existing seen ticks remain intact
+    conv.public_read_cursors = { ...conv.read_cursors };
+  }
   if (!conv.read_timestamps) conv.read_timestamps = {};
+
+  const isStealth = Boolean(actor.chat_stealth) || isActorStealth(actor.key);
   const prevRead = Number(conv.read_cursors[actor.key] || 0);
-  if (latestId <= prevRead) return false;
+  const prevPublic = Number(conv.public_read_cursors[actor.key] || 0);
+  const needPrivateAdvance = latestId > prevRead;
+  const needPublicAdvance = !isStealth && latestId > prevPublic;
+  if (!needPrivateAdvance && !needPublicAdvance) return false;
 
   const nowIso = new Date().toISOString();
-  conv.read_cursors[actor.key] = latestId;
-  conv.read_timestamps[actor.key] = nowIso;
+  if (needPrivateAdvance) {
+    conv.read_cursors[actor.key] = latestId;
+    conv.read_timestamps[actor.key] = nowIso;
+  }
+  if (needPublicAdvance) {
+    conv.public_read_cursors[actor.key] = latestId;
+  }
   writeDb('chat_conversations', convs);
+
+  // If Admin/Agent is in Hidden (Stealth) mode: clear their own unread badge locally,
+  // but NEVER emit a Seen/Blue-Tick read receipt or stamp read_by for clients/peers.
+  if (isStealth) {
+    sendChatWsEvent({
+      type: 'chat:read',
+      conversation_id: Number(conv.id),
+      actor_key: actor.key,
+      last_read_id: latestId,
+      read_at: nowIso
+    }, [actor.key]);
+    return true;
+  }
 
   // Stamp exact per-message seen_at timestamps in Groups & Announcement Channels for Admin's Seen/Unseen report
   if (isAgentGroupOrChannel(conv) && Array.isArray(allMessages)) {
@@ -24253,7 +24297,7 @@ function markConversationReadForActor(conv, convs, actor, latestId, allMessages)
       if (!m || Number(m.conversation_id) !== Number(conv.id)) continue;
       if (isMessageBeforeMemberJoin(conv, m, actor.key)) continue;
       const mid = Number(m.id);
-      if (mid > prevRead && mid <= latestId && m.sender_key !== actor.key && !m.silent_removed) {
+      if (mid > prevPublic && mid <= latestId && m.sender_key !== actor.key && !m.silent_removed) {
         if (!m.read_by || typeof m.read_by !== 'object') m.read_by = {};
         if (!m.read_by[actor.key]) {
           m.read_by[actor.key] = nowIso;
@@ -24397,9 +24441,15 @@ app.post('/api/chat/conversations/:id/messages', requireAuth, (req, res) => {
   allMessages.push(msgRecord);
   writeDb('chat_messages', allMessages);
 
-  // Update conversation preview + sender read cursor
+  // Update conversation preview + sender read cursor (preserve stealth privacy on public_read_cursors)
   if (!conv.read_cursors) conv.read_cursors = {};
+  if (!conv.public_read_cursors || typeof conv.public_read_cursors !== 'object') {
+    conv.public_read_cursors = { ...conv.read_cursors };
+  }
   conv.read_cursors[actor.key] = msgRecord.id;
+  if (!(Boolean(actor.chat_stealth) || isActorStealth(actor.key))) {
+    conv.public_read_cursors[actor.key] = msgRecord.id;
+  }
   conv.last_message_id = msgRecord.id;
   conv.last_message_preview = body.slice(0, 120);
   conv.last_message_sender_key = actor.key;
@@ -24558,7 +24608,13 @@ app.post('/api/chat/conversations/:id/messages-media', requireAuth, (req, res) =
       writeDb('chat_messages', allMessages);
 
       if (!latestConv.read_cursors) latestConv.read_cursors = {};
+      if (!latestConv.public_read_cursors || typeof latestConv.public_read_cursors !== 'object') {
+        latestConv.public_read_cursors = { ...latestConv.read_cursors };
+      }
       latestConv.read_cursors[actor.key] = msgRecord.id;
+      if (!(Boolean(actor.chat_stealth) || isActorStealth(actor.key))) {
+        latestConv.public_read_cursors[actor.key] = msgRecord.id;
+      }
       latestConv.last_message_id = msgRecord.id;
       latestConv.last_message_preview = body ? (`📷 ${body}`).slice(0, 120) : '📷 Photo';
       latestConv.last_message_sender_key = actor.key;
@@ -25843,6 +25899,7 @@ wss.on('connection', (ws, req) => {
       if (!curActor) return;
 
       if (msg.type === 'chat:typing') {
+        if (Boolean(curActor.chat_stealth) || isActorStealth(curActor.key)) return;
         const convId = Number(msg.conversation_id);
         const convs = readDb('chat_conversations') || [];
         const conv = convs.find(c => Number(c.id) === convId);

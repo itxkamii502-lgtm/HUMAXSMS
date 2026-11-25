@@ -4722,24 +4722,37 @@ window.zyRenderLiveAccessTableBody = function () {
     return;
   }
 
-  const fmtTime = (raw) => {
+  const fmtTimeCell = (raw) => {
     if (!raw) return '—';
+    let tsStr = '';
     if (typeof window.zyFormatUtc === 'function') {
       const d = new Date(raw);
-      if (!isNaN(d.getTime())) return window.zyFormatUtc(d, false);
+      if (!isNaN(d.getTime())) tsStr = window.zyFormatUtc(d, false);
     }
-    return String(raw).replace('T', ' ').replace(/\.\d+Z?$/i, '').slice(0, 19) || '—';
+    if (!tsStr) {
+      tsStr = String(raw).replace('T', ' ').replace(/\.\d+Z?$/i, '').slice(0, 19);
+    }
+    if (typeof window.zyFormatDateTimeStacked === 'function') {
+      return window.zyFormatDateTimeStacked(tsStr).h;
+    }
+    return esc(tsStr || '—');
   };
 
-  tbody.innerHTML = rows.slice(0, window._zyLiveAccessLimit || 25).map(r => `
+  tbody.innerHTML = rows.slice(0, window._zyLiveAccessLimit || 25).map(r => {
+    const smsText = String(r.sms || '');
+    const smsHtml = typeof window.zyRenderSmsCell === 'function'
+      ? window.zyRenderSmsCell(smsText, 32)
+      : `<div class="zy-sms-cell">${esc(smsText)}</div>`;
+    return `
     <tr>
-      <td class="zy-la-time" style="white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12px;color:var(--sp-text-muted,#475569);">${esc(fmtTime(r.timestamp || r.created_at || r.created || ''))}</td>
-      <td class="zy-la-range">${esc(r.range || 'International')}</td>
-      <td style="white-space:nowrap;">
+      <td class="zy-la-time">${fmtTimeCell(r.timestamp || r.created_at || r.created || '')}</td>
+      <td class="zy-la-range" title="${esc(r.range || 'International')}">${esc(r.range || 'International')}</td>
+      <td class="zy-la-cli-td">
         <span class="zy-la-cli">${esc(r.cli || 'SMS')}</span>
       </td>
-      <td class="zy-la-sms">${esc(r.sms || '')}</td>
-    </tr>`).join('');
+      <td class="zy-la-sms-td">${smsHtml}</td>
+    </tr>`;
+  }).join('');
   window.zyRenderLiveAccessPager();
 };
 
@@ -4892,14 +4905,14 @@ window.zyRenderLiveAccessPage = async function (opts = {}) {
         </span>
         <input type="text" id="zy-live-access-search" class="zy-la-search" oninput="zyOnLiveAccessSearchInput()" placeholder="Search Range, CLI, or SMS…">
       </div>
-      <div style="overflow-x:auto;">
-        <table class="data-table zy-la-table" style="width:100%;border-collapse:collapse;">
+      <div class="zy-dt-wrap zy-la-tbl-wrap">
+        <table class="zy-dt zy-dt2-table data-table zy-la-table">
           <thead>
             <tr>
-              <th style="width:16%;text-align:left;white-space:nowrap;">Time</th>
-              <th style="width:20%;text-align:left;">Range</th>
-              <th style="width:15%;text-align:left;">CLI</th>
-              <th style="width:49%;text-align:left;">SMS</th>
+              <th class="zy-la-th-time">Time</th>
+              <th class="zy-la-th-range">Range</th>
+              <th class="zy-la-th-cli">CLI</th>
+              <th class="zy-la-th-sms">SMS</th>
             </tr>
           </thead>
           <tbody id="zy-live-access-tbody">

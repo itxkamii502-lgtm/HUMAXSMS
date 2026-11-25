@@ -22953,7 +22953,25 @@ function chatActorKey(role, id) {
   return `${chatActorRole(role)}:${Number(id)}`;
 }
 
+function isActorStealth(actorKey) {
+  const [role, rawId] = String(actorKey || '').split(':');
+  const id = Number(rawId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  if (role === 'owner') {
+    const users = readDb('users') || [];
+    const u = users.find(x => Number(x.id) === id);
+    return Boolean(u && u.chat_stealth);
+  }
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    const a = agents.find(x => Number(x.id) === id);
+    return Boolean(a && a.chat_stealth);
+  }
+  return false;
+}
+
 function isActorOnline(key) {
+  if (isActorStealth(key)) return false;
   return (CHAT_ONLINE_COUNTS.get(key) || 0) > 0;
 }
 
@@ -23051,6 +23069,7 @@ function resolveLiveChatActor(sessionUser) {
       username: rec.username || sessionUser.username || 'Owner',
       display_name: rec.name || rec.username || sessionUser.username || 'Owner',
       avatar_url: rec.avatar_url || '',
+      chat_stealth: Boolean(rec.chat_stealth),
       agent_id: null
     };
   }
@@ -23064,6 +23083,7 @@ function resolveLiveChatActor(sessionUser) {
       username: rec.username || sessionUser.username || `Agent #${id}`,
       display_name: rec.name || rec.username || sessionUser.username || `Agent #${id}`,
       avatar_url: rec.avatar_url || '',
+      chat_stealth: Boolean(rec.chat_stealth),
       agent_id: id
     };
   }
@@ -23080,6 +23100,7 @@ function resolveLiveChatActor(sessionUser) {
     username: (rec && rec.username) || sessionUser.username || `Client #${id}`,
     display_name: (rec && (rec.name || rec.username)) || sessionUser.username || `Client #${id}`,
     avatar_url: (rec && rec.avatar_url) || '',
+    chat_stealth: false,
     agent_id: agentId > 0 ? agentId : null
   };
 }
@@ -23091,14 +23112,16 @@ function resolveActorSummaryByKey(actorKey) {
   if (role === 'owner') {
     const users = readDb('users') || [];
     const u = users.find(x => Number(x.id) === id);
-    if (!u) return { key: actorKey, role: 'owner', id, username: 'Owner', display_name: 'Owner', avatar_url: '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
-    return { key: actorKey, role: 'owner', id, username: u.username || 'Owner', display_name: u.name || u.username || 'Owner', avatar_url: u.avatar_url || '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    const stealth = Boolean(u && u.chat_stealth);
+    if (!u) return { key: actorKey, role: 'owner', id, username: 'Owner', display_name: 'Owner', avatar_url: '', online: false, last_seen: null };
+    return { key: actorKey, role: 'owner', id, username: u.username || 'Owner', display_name: u.name || u.username || 'Owner', avatar_url: u.avatar_url || '', online: stealth ? false : isActorOnline(actorKey), last_seen: stealth ? null : (CHAT_LAST_SEEN.get(actorKey) || null) };
   }
   if (role === 'agent') {
     const agents = readDb('agents') || [];
     const a = agents.find(x => Number(x.id) === id);
     if (!a) return null;
-    return { key: actorKey, role: 'agent', id, username: a.username || `Agent #${id}`, display_name: a.name || a.username || `Agent #${id}`, avatar_url: a.avatar_url || '', online: isActorOnline(actorKey), last_seen: CHAT_LAST_SEEN.get(actorKey) || null };
+    const stealth = Boolean(a.chat_stealth);
+    return { key: actorKey, role: 'agent', id, username: a.username || `Agent #${id}`, display_name: a.name || a.username || `Agent #${id}`, avatar_url: a.avatar_url || '', online: stealth ? false : isActorOnline(actorKey), last_seen: stealth ? null : (CHAT_LAST_SEEN.get(actorKey) || null) };
   }
   if (role === 'client') {
     const clients = readDb('clients') || [];
@@ -23125,7 +23148,7 @@ function getAllowedChatContacts(actor) {
         display_name: a.name || a.username || `Agent #${a.id}`,
         avatar_url: a.avatar_url || '',
         online: isActorOnline(key),
-        last_seen: CHAT_LAST_SEEN.get(key) || null
+        last_seen: isActorStealth(key) ? null : (CHAT_LAST_SEEN.get(key) || null)
       });
     }
     return list;
@@ -23147,7 +23170,7 @@ function getAllowedChatContacts(actor) {
         display_name: o.name || o.username || 'Owner',
         avatar_url: o.avatar_url || '',
         online: isActorOnline(key),
-        last_seen: CHAT_LAST_SEEN.get(key) || null
+        last_seen: isActorStealth(key) ? null : (CHAT_LAST_SEEN.get(key) || null)
       });
     }
     const clients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === actor.id && c.status !== 'deleted');
@@ -23182,7 +23205,7 @@ function getAllowedChatContacts(actor) {
         display_name: ag.name || ag.username || `Agent #${ag.id}`,
         avatar_url: ag.avatar_url || '',
         online: isActorOnline(key),
-        last_seen: CHAT_LAST_SEEN.get(key) || null
+        last_seen: isActorStealth(key) ? null : (CHAT_LAST_SEEN.get(key) || null)
       });
     }
   }
@@ -23825,6 +23848,20 @@ function processGroupSchedulesTick(nowDate = new Date()) {
       const shouldPostOpen = !ev.is_closed && conv.schedule.last_open_cycle !== ev.cycle_key;
       if (!shouldPostClose && !shouldPostOpen) continue;
 
+      // Night Close: do NOT insert a group message; show centered animated Night Popup overlay on clients instead
+      if (shouldPostClose) {
+        conv.schedule.last_close_cycle = ev.cycle_key;
+        convsDirty = true;
+        sendChatWsEvent({
+          type: 'chat:group_updated',
+          conversation_id: Number(conv.id),
+          schedule_changed: true,
+          auto_type: 'night_close'
+        }, conv.participants || []);
+        continue;
+      }
+
+      // Morning Open: auto-send the Good Morning welcome message into the group chat
       if (!allMessages) allMessages = readDb('chat_messages') || [];
       const agentKey = `agent:${Number(conv.owner_agent_id)}`;
       const adminSummary = resolveActorSummaryByKey(agentKey) || {
@@ -23834,8 +23871,8 @@ function processGroupSchedulesTick(nowDate = new Date()) {
         username: 'Admin'
       };
       const nowIso = nowDate.toISOString();
-      const autoType = shouldPostClose ? 'night_close' : 'morning_open';
-      const body = shouldPostClose ? ev.close_message : ev.open_message;
+      const autoType = 'morning_open';
+      const body = ev.open_message;
 
       const msgRecord = {
         id: nextId(allMessages, 'chat_messages'),
@@ -23853,8 +23890,7 @@ function processGroupSchedulesTick(nowDate = new Date()) {
       allMessages.push(msgRecord);
       msgsDirty = true;
 
-      if (shouldPostClose) conv.schedule.last_close_cycle = ev.cycle_key;
-      if (shouldPostOpen) conv.schedule.last_open_cycle = ev.cycle_key;
+      conv.schedule.last_open_cycle = ev.cycle_key;
 
       if (!conv.read_cursors) conv.read_cursors = {};
       conv.read_cursors[adminSummary.key] = msgRecord.id;
@@ -24035,15 +24071,14 @@ function hydrateConversationForActor(conv, actor, allMessages) {
     } : null,
     read_cursors: hideGroupMembersForClient ? {} : (conv.read_cursors || {}),
     member_joined_after_id: hideGroupMembersForClient ? {} : (conv.member_joined_after_id || {}),
+    is_pinned: Boolean(conv.pinned_by && typeof conv.pinned_by === 'object' && conv.pinned_by[actor.key]),
+    pinned_at: (conv.pinned_by && typeof conv.pinned_by === 'object' && conv.pinned_by[actor.key]) || null,
+    has_messages: Boolean(visibleLastMsg),
     last_message_id: visibleLastMsg ? Number(visibleLastMsg.id) : 0,
     last_message_preview: visibleLastMsg ? formatMessagePreviewText(visibleLastMsg) : '',
     last_message_sender_key: safeLastSenderKey,
     last_message_sender_name: safeLastSenderName,
-    last_message_at: (visibleLastMsg && visibleLastMsg.created_at)
-      || (conv.member_joined_at && conv.member_joined_at[actor.key])
-      || conv.last_message_at
-      || conv.updated_at
-      || conv.created_at,
+    last_message_at: visibleLastMsg ? visibleLastMsg.created_at : null,
     unread_count: unread,
     created_at: conv.created_at,
     updated_at: conv.updated_at
@@ -24065,7 +24100,18 @@ app.get('/api/chat/bootstrap', requireAuth, (req, res) => {
   const conversations = allConvs
     .filter(c => canAccessConversation(actor, c))
     .map(c => hydrateConversationForActor(c, actor, allMessages))
-    .sort((a, b) => new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0));
+    .sort((a, b) => {
+      if (Boolean(a.is_pinned) !== Boolean(b.is_pinned)) return a.is_pinned ? -1 : 1;
+      if (a.is_pinned && b.is_pinned) {
+        const pd = new Date(b.pinned_at || 0) - new Date(a.pinned_at || 0);
+        if (pd !== 0) return pd;
+      }
+      if (Boolean(a.has_messages) !== Boolean(b.has_messages)) return a.has_messages ? -1 : 1;
+      const ta = new Date(a.last_message_at || 0).getTime();
+      const tb = new Date(b.last_message_at || 0).getTime();
+      if (tb !== ta) return tb - ta;
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
 
   const total_unread = conversations.reduce((sum, c) => sum + (c.unread_count || 0), 0);
 
@@ -24128,7 +24174,7 @@ app.post('/api/chat/direct', requireAuth, (req, res) => {
       last_message_preview: '',
       last_message_sender_key: '',
       last_message_sender_name: '',
-      last_message_at: now,
+      last_message_at: null,
       created_at: now,
       updated_at: now
     };
@@ -24737,6 +24783,9 @@ app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, 
   if (!conv || !canAccessConversation(actor, conv)) {
     return res.status(403).json({ error: 'Access denied.' });
   }
+  if (conv.type === 'agent_channel' && actor.role === 'client') {
+    return res.status(403).json({ error: 'Removing channel messages is not allowed.' });
+  }
 
   const rawIds = Array.isArray(req.body && req.body.message_ids) ? req.body.message_ids : [];
   const targetIds = new Set(rawIds.map(x => Number(x)).filter(n => Number.isFinite(n) && n > 0));
@@ -24789,7 +24838,7 @@ app.post('/api/chat/conversations/:id/messages/bulk-delete', requireAuth, (req, 
   });
 });
 
-// POST /api/chat/conversations/:id/clear-history — clears entire conversation history for caller's view ONLY (preserves history for upline/other participant)
+// POST /api/chat/conversations/:id/clear-history — clears entire conversation history for caller's view ONLY (blocked for Clients in Channels)
 app.post('/api/chat/conversations/:id/clear-history', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
@@ -24799,6 +24848,9 @@ app.post('/api/chat/conversations/:id/clear-history', requireAuth, (req, res) =>
   const conv = convs.find(c => Number(c.id) === convId);
   if (!conv || !canAccessConversation(actor, conv)) {
     return res.status(403).json({ error: 'Access denied.' });
+  }
+  if (conv.type === 'agent_channel' && actor.role === 'client') {
+    return res.status(403).json({ error: 'Clearing channel messages is not allowed.' });
   }
 
   const allMessages = readDb('chat_messages') || [];
@@ -24819,6 +24871,81 @@ app.post('/api/chat/conversations/:id/clear-history', requireAuth, (req, res) =>
   res.json({
     success: true,
     cleared_count: clearedCount,
+    conversation: hydrateConversationForActor(conv, actor, allMessages)
+  });
+});
+
+// POST /api/chat/presence-mode — Owner / Agent toggle Online vs Invisible (Appear Offline)
+app.post('/api/chat/presence-mode', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+  if (actor.role !== 'owner' && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only Admin or Agent can change presence visibility.' });
+  }
+
+  const stealth = Boolean(req.body && req.body.stealth);
+  if (actor.role === 'owner') {
+    const users = readDb('users') || [];
+    const idx = users.findIndex(u => Number(u.id) === actor.id);
+    if (idx !== -1) {
+      users[idx].chat_stealth = stealth;
+      writeDb('users', users);
+    }
+  } else if (actor.role === 'agent') {
+    const agents = readDb('agents') || [];
+    const idx = agents.findIndex(a => Number(a.id) === actor.id);
+    if (idx !== -1) {
+      agents[idx].chat_stealth = stealth;
+      writeDb('agents', agents);
+    }
+  }
+
+  const hasSocket = (CHAT_ONLINE_COUNTS.get(actor.key) || 0) > 0;
+  const visibleOnline = !stealth && hasSocket;
+  const audience = getPresenceAudienceKeys(actor);
+  sendChatWsEvent({
+    type: 'chat:presence',
+    actor_key: actor.key,
+    online: visibleOnline,
+    last_seen: null
+  }, audience);
+
+  res.json({
+    success: true,
+    chat_stealth: stealth,
+    online: visibleOnline
+  });
+});
+
+// POST /api/chat/conversations/:id/pin-chat — Owner / Agent pins or unpins any accessible conversation to top of inbox
+app.post('/api/chat/conversations/:id/pin-chat', requireAuth, (req, res) => {
+  const actor = resolveLiveChatActor(req.sessionUser);
+  if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+  if (actor.role !== 'owner' && actor.role !== 'agent') {
+    return res.status(403).json({ error: 'Only Admin or Agent can pin conversations.' });
+  }
+
+  const convId = Number(req.params.id);
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === convId);
+  if (!conv || !canAccessConversation(actor, conv)) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  if (!conv.pinned_by || typeof conv.pinned_by !== 'object') conv.pinned_by = {};
+  const currentlyPinned = Boolean(conv.pinned_by[actor.key]);
+  const nextPinned = (req.body && typeof req.body.pinned === 'boolean') ? req.body.pinned : !currentlyPinned;
+  if (nextPinned) {
+    conv.pinned_by[actor.key] = new Date().toISOString();
+  } else {
+    delete conv.pinned_by[actor.key];
+  }
+  writeDb('chat_conversations', convs);
+
+  const allMessages = readDb('chat_messages') || [];
+  res.json({
+    success: true,
+    is_pinned: nextPinned,
     conversation: hydrateConversationForActor(conv, actor, allMessages)
   });
 });
@@ -25648,10 +25775,10 @@ wss.on('connection', (ws, req) => {
     actor_key: actorKey
   };
 
-  // Live Chat presence tracking (strictly scoped to allowed peers)
+  // Live Chat presence tracking (strictly scoped to allowed peers; respects Admin/Agent stealth mode)
   const prevOnlineCount = CHAT_ONLINE_COUNTS.get(actorKey) || 0;
   CHAT_ONLINE_COUNTS.set(actorKey, prevOnlineCount + 1);
-  if (prevOnlineCount === 0 && actor) {
+  if (prevOnlineCount === 0 && actor && !isActorStealth(actorKey)) {
     const audience = getPresenceAudienceKeys(actor);
     sendChatWsEvent({ type: 'chat:presence', actor_key: actorKey, online: true, last_seen: null }, audience);
   }
@@ -25728,7 +25855,7 @@ wss.on('connection', (ws, req) => {
       const seenTs = new Date().toISOString();
       CHAT_LAST_SEEN.set(actorKey, seenTs);
       const curActor = resolveLiveChatActor(user);
-      if (curActor) {
+      if (curActor && !isActorStealth(actorKey)) {
         const audience = getPresenceAudienceKeys(curActor);
         sendChatWsEvent({ type: 'chat:presence', actor_key: actorKey, online: false, last_seen: seenTs }, audience);
       }

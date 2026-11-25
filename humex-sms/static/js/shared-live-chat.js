@@ -3318,7 +3318,7 @@
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-emoji-toggle" title="Emoji" aria-label="Emoji"><i class="far fa-face-smile"></i></button>
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-img-btn" title="Send Photo" aria-label="Send Photo"><i class="far fa-image"></i></button>
               <input type="file" id="zy-chat-file-input" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none;">
-              <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" placeholder="${isCh ? 'Post an announcement to all clients...' : 'Type a message...'}"></textarea>
+              <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" enterkeyhint="enter" placeholder="${isCh ? 'Post an announcement to all clients...' : 'Type a message...'}"></textarea>
               <button type="button" class="zy-chat-send-btn" id="zy-chat-send" title="Send" aria-label="Send"><i class="fas fa-paper-plane"></i></button>
             </div>
           </div>
@@ -3531,7 +3531,7 @@
       });
       inp.addEventListener('input', () => {
         inp.style.height = 'auto';
-        inp.style.height = Math.min(84, inp.scrollHeight) + 'px';
+        inp.style.height = Math.min(120, inp.scrollHeight) + 'px';
         emitTypingSignal(conv.id);
       });
       inp.addEventListener('paste', (e) => {
@@ -3549,8 +3549,10 @@
           queueImagesForPreview(pastedImgs);
         }
       });
+      // Enter inserts a new line (never prematurely sends while typing);
+      // users send via the Send button or Ctrl/Cmd+Enter on desktop.
       inp.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
           e.preventDefault();
           sendMessage();
         }

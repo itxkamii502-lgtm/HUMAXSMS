@@ -415,6 +415,7 @@ function flushPendingWrites() {
 // ── High-Performance Indexed In-Memory Lookup for Numbers & Ingestion ──
 let CACHED_NUMBERS_BY_DIGITS = null;
 let CACHED_NUMBERS_BY_RAW = null;
+let CACHED_NUMBERS_BY_NOZERO = null;
 let CACHED_NUMBERS_MTIME = 0;
 
 function getIndexedNumbers() {
@@ -423,19 +424,49 @@ function getIndexedNumbers() {
     const numbers = readDb('numbers') || [];
     const byDigits = new Map();
     const byRaw = new Map();
+    const byNoZero = new Map();
     for (let i = 0; i < numbers.length; i++) {
       const n = numbers[i];
-      if (!n) continue;
+      if (!n || n.status === 'deleted') continue;
       const raw = String(n.number || '').trim();
       const d = raw.replace(/\D/g, '');
+      const dNo0 = d.replace(/^0+/, '');
       if (raw && !byRaw.has(raw)) byRaw.set(raw, n);
       if (d && !byDigits.has(d)) byDigits.set(d, n);
+      if (dNo0.length >= 6 && !byNoZero.has(dNo0)) byNoZero.set(dNo0, n);
     }
     CACHED_NUMBERS_BY_DIGITS = byDigits;
     CACHED_NUMBERS_BY_RAW = byRaw;
+    CACHED_NUMBERS_BY_NOZERO = byNoZero;
     CACHED_NUMBERS_MTIME = currentMtime;
   }
-  return { byDigits: CACHED_NUMBERS_BY_DIGITS, byRaw: CACHED_NUMBERS_BY_RAW };
+  return {
+    byDigits: CACHED_NUMBERS_BY_DIGITS,
+    byRaw: CACHED_NUMBERS_BY_RAW,
+    byNoZero: CACHED_NUMBERS_BY_NOZERO
+  };
+}
+
+function findPanelNumberFast(rawNumber) {
+  const clean = String(rawNumber || '').trim();
+  if (!clean) return null;
+  const { byDigits, byRaw, byNoZero } = getIndexedNumbers();
+  const digits = clean.replace(/\D/g, '');
+  let rec = byRaw.get(clean) || (digits ? byDigits.get(digits) : null) || null;
+  if (rec) return rec;
+  const dNo0 = digits.replace(/^0+/, '');
+  if (dNo0.length >= 6) {
+    rec = byNoZero.get(dNo0) || null;
+    if (rec) return rec;
+    // Handle E.164 (with 1-3 digit country code) matching a panel-stored local number (>= 8 digits)
+    for (let cut = 1; cut <= 3; cut++) {
+      if (dNo0.length - cut >= 8) {
+        const sub = byNoZero.get(dNo0.slice(cut));
+        if (sub) return sub;
+      }
+    }
+  }
+  return null;
 }
 
 // SMS id counter (persisted, never recomputed from a huge array on every SMS)
@@ -2662,7 +2693,8 @@ function ingestSms({
   whitenoise_sms_id = null,
   conversion_sent = false,
   conversion_at = null,
-  has_unique_ext_id = false
+  has_unique_ext_id = false,
+  require_panel_number = true
 }) {
   try {
     const cleanTo = String(to_number || '').trim();
@@ -2671,9 +2703,12 @@ function ingestSms({
       return { status: 'error', error: 'Missing number or message' };
     }
 
-    const { byDigits, byRaw } = getIndexedNumbers();
     const digits = cleanTo.replace(/\D/g, '');
-    let numberRec = byRaw.get(cleanTo) || byDigits.get(digits) || null;
+    let numberRec = findPanelNumberFast(cleanTo);
+    // Strict panel-number guard: ignore incoming API SMS for upstream provider numbers not present in our panel
+    if (require_panel_number && !numberRec) {
+      return { status: 'ok', logged: false, skipped_unregistered: true };
+    }
     const assignedNumberRec = (numberRec && (numberRec.agent_id || numberRec.client_id)) ? numberRec : null;
 
     const smsLog = readDb('sms_log') || [];
@@ -2688,11 +2723,6 @@ function ingestSms({
       hasUniqueExtId: Boolean(has_unique_ext_id)
     })) {
       return { status: 'ok', duplicate: true, sms_id: sms_id || dedupeKey };
-    }
-
-    if (!numberRec && digits.length >= 7) {
-      const allNums = readDb('numbers') || [];
-      numberRec = allNums.find(n => n && n.number && phoneDigitsVariantsMatch(n.number, digits)) || null;
     }
 
     const ranges = readDb('sms_ranges') || [];
@@ -3615,6 +3645,7 @@ async function pollSingleCrApiConnection(connId, force = false, options = {}) {
   let pulled = 0;
   let fetchedRows = 0;
   let dupSkipped = 0;
+  let unregisteredSkipped = 0;
   let invalidSkipped = 0;
   let usedLimit = isBackfill ? 5000 : 2000;
   let saturated = false;
@@ -3630,11 +3661,13 @@ async function pollSingleCrApiConnection(connId, force = false, options = {}) {
           { recordsLimit: 5000, backfill: true },
           { recordsLimit: 5000, backfill: false },
           { recordsLimit: 2000, backfill: false },
-          { recordsLimit: 500, backfill: false }
+          { recordsLimit: 500, backfill: false },
+          { recordsLimit: 200, backfill: false }
         ]
       : [
           { recordsLimit: 2000, backfill: false },
-          { recordsLimit: 500, backfill: false }
+          { recordsLimit: 500, backfill: false },
+          { recordsLimit: 200, backfill: false }
         ];
 
     let json = null;
@@ -3784,6 +3817,8 @@ async function pollSingleCrApiConnection(connId, force = false, options = {}) {
         pulled++;
       } else if (ingestRes && ingestRes.duplicate) {
         dupSkipped++;
+      } else if (ingestRes && ingestRes.skipped_unregistered) {
+        unregisteredSkipped++;
       } else {
         invalidSkipped++;
       }
@@ -3791,6 +3826,7 @@ async function pollSingleCrApiConnection(connId, force = false, options = {}) {
 
     const diagParts = [];
     if (fetchedRows > 0) diagParts.push(`fetched ${fetchedRows}`);
+    if (unregisteredSkipped > 0) diagParts.push(`${unregisteredSkipped} not in panel`);
     if (dupSkipped > 0) diagParts.push(`${dupSkipped} dup`);
     if (invalidSkipped > 0) diagParts.push(`${invalidSkipped} invalid`);
     if (saturated) diagParts.push(`limit ${usedLimit} hit`);

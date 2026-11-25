@@ -93,7 +93,7 @@
         <button class="zy-side-toggle" onclick="zyToggleSidebar()" title="Toggle Sidebar" aria-label="Toggle Sidebar"><i class="fas fa-bars"></i></button>
         <div class="zy-head-title" id="zy-logo" style="display:none;"><span class="zy-panel-badge"><img class="zy-badge-logo" src="/static/img/humex-sms-logo.png" alt="HUMAX SMS" onerror="this.style.display='none';"> <span class="zy-badge-name">HUMAX SMS</span></span></div>
         <div class="zy-crumb">
-          <div class="zy-crumb-left"><a onclick="loadPage('dashboard')">Home</a><span class="zy-sep">&raquo;</span><span id="breadcrumb">Dashboard</span></div>
+          <div class="zy-crumb-left"><a href="/ints/owner/SMSDashboard" data-page="dashboard" onclick="return window.zyNavClick ? window.zyNavClick(event, 'dashboard') : (event.preventDefault(), loadPage('dashboard'), false)">Home</a><span class="zy-sep">&raquo;</span><span id="breadcrumb">Dashboard</span></div>
           <div class="zy-crumb-clock" style="display:none;"><i class="far fa-clock"></i> <span id="zy-utc-time">—</span> UTC</div>
         </div>
       </div>

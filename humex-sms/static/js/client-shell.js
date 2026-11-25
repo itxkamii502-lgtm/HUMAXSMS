@@ -144,14 +144,14 @@ window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
     side.classList.add('zy-sidenav-flat');
     side.innerHTML = ZY_CLIENT_MENU.map((item) => {
       const svg = ZY_CLIENT_ICONS[item.page] || ZY_CLIENT_ICONS.dashboard;
-      return `<div class="zy-snav nav-item zy-snav-direct" id="nav-${item.page}" data-page="${item.page}" role="link" tabindex="0"
+      const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(item.page) : `/ints/client/${item.page}`;
+      return `<a class="zy-snav nav-item zy-snav-direct" id="nav-${item.page}" data-page="${item.page}" href="${href}"
             ${item.hiddenByDefault ? 'style="display:none;"' : ''}
-            onclick="loadPage('${item.page}')"
-            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${item.page}');}">
+            onclick="return window.zyNavClick ? window.zyNavClick(event, '${item.page}') : (event.preventDefault(), loadPage('${item.page}'), false)">
          <span class="zy-ic zy-cl-ic-box" style="--ic-fg:${item.color};--ic-bg:${item.tint};">${svg}</span>
          <span class="zy-snav-lbl">${item.label}</span>
          <i class="fas fa-chevron-right zy-caret zy-caret-direct" aria-hidden="true"></i>
-       </div>`;
+       </a>`;
     }).join('');
   }
 

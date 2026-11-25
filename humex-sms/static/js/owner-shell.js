@@ -132,20 +132,20 @@ if (typeof window.Chart === 'undefined') {
   if (side) side.innerHTML = ZY_ADMIN_MENU.map((g, gi) => {
     if (!g.t) {
       return g.items.map(([label, page, icon]) => {
-        return `<div class="zy-snav nav-item" id="nav-${page}" data-page="${page}" role="link" tabindex="0"
-                     onclick="loadPage('${page}')"
-                     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">
+        const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(page) : `/ints/owner/${page}`;
+        return `<a class="zy-snav nav-item" id="nav-${page}" data-page="${page}" href="${href}"
+                     onclick="return window.zyNavClick ? window.zyNavClick(event, '${page}') : (event.preventDefault(), loadPage('${page}'), false)">
            <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${icon}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${label}</span>
-           <i class="fas fa-chevron-right zy-caret zy-caret-sm"></i></div>`;
+           <i class="fas fa-chevron-right zy-caret zy-caret-sm"></i></a>`;
       }).join('');
     }
-    const subItems = g.items.map(([label, page, icon]) =>
-      `<div class="zy-ssub-item" id="nav-${page}" data-page="${page}" role="link" tabindex="0"
-            onclick="loadPage('${page}')"
-            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${page}');}">
+    const subItems = g.items.map(([label, page, icon]) => {
+      const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(page) : `/ints/owner/${page}`;
+      return `<a class="zy-ssub-item" id="nav-${page}" data-page="${page}" href="${href}"
+            onclick="return window.zyNavClick ? window.zyNavClick(event, '${page}') : (event.preventDefault(), loadPage('${page}'), false)">
          <i class="fas ${icon || 'fa-circle-dot'} zy-sub-ic" aria-hidden="true"></i><span class="zy-sub-txt">${label}</span>
-       </div>`
-    ).join('');
+       </a>`;
+    }).join('');
     return `<div class="zy-snav" id="grp-adm-${gi}" role="button" tabindex="0" aria-expanded="false" aria-controls="sb-${gi}"
                  onclick="zyToggleGroup('sb-${gi}', this)"
                  onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();zyToggleGroup('sb-${gi}', this);}">

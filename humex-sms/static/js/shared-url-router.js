@@ -103,7 +103,8 @@
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
       'audit-logs': 'AuditLogs',
-      'app-links': 'AppsLinks'
+      'app-links': 'AppsLinks',
+      'live-access': 'LiveAccess'
     },
     client: {
       'dashboard': 'SMSDashboard',
@@ -124,7 +125,8 @@
       'profile-security': 'ProfileSecurity',
       '2fa': 'TwoFactorAuth',
       'audit-logs': 'AuditLogs',
-      'app-links': 'AppsLinks'
+      'app-links': 'AppsLinks',
+      'live-access': 'LiveAccess'
     }
   };
   MAPS.admin = MAPS.owner;
@@ -157,14 +159,16 @@
       clientsmsstats: 'detailed-sms',
       smsrangestats: 'detailed-sms',
       smsnumberstats: 'detailed-sms',
-      allocationhistory: 'allocation-history'
+      allocationhistory: 'allocation-history',
+      liveaccess: 'live-access'
     },
     client: {
       profile: 'my-profile',
       livechat: 'live-chat',
       appslinks: 'app-links',
       smsranges: 'sms-overview',
-      notifications: 'news'
+      notifications: 'news',
+      liveaccess: 'live-access'
     }
   };
 
@@ -205,6 +209,29 @@
   function urlFor(page) {
     return `/ints/${role}/${slugFor(page)}`;
   }
+
+  function syncAllNavHrefs(root) {
+    try {
+      const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+      scope.querySelectorAll('a[data-page]').forEach(a => {
+        const p = a.getAttribute('data-page');
+        if (p) a.setAttribute('href', urlFor(p));
+      });
+    } catch (e) {}
+  }
+
+  window.zyPageUrl = urlFor;
+  window.zySyncNavHrefs = syncAllNavHrefs;
+  window.zyNavClick = function (e, page) {
+    // Allow native browser new-tab / new-window actions (Ctrl+Click, Cmd+Click, Shift+Click, Middle-Click)
+    if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button === 1)) {
+      return true;
+    }
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (typeof window.loadPage === 'function') window.loadPage(page);
+    return false;
+  };
+  syncAllNavHrefs();
 
   function resolveLabel(page) {
     if (!page || page === 'dashboard') return 'Dashboard';
@@ -291,13 +318,14 @@
         try { document.title = formatTitle(page); } catch (e) {}
       }
 
-      // 4. Sync active accordion group & canonical breadcrumb label
+      // 4. Sync active accordion group, canonical breadcrumb label & link hrefs
       if (typeof window.zySyncAccordionActive === 'function') {
         window.zySyncAccordionActive(page);
       }
       if (typeof window.zyUpdateBreadcrumb === 'function') {
         window.zyUpdateBreadcrumb(page, label);
       }
+      setTimeout(() => syncAllNavHrefs(), 0);
     };
   }
 

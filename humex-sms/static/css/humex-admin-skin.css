@@ -146,7 +146,8 @@ aside#sidebar:nth-of-type(1) > div:nth-of-type(1) > div#zy-clock:nth-of-type(4),
               padding 0.2s ease,
               visibility 0s linear 0s !important;
 }
-.adminui .zy-sidenav .zy-ssub div {
+.adminui .zy-sidenav .zy-ssub div,
+.adminui .zy-sidenav .zy-ssub a {
   display: flex !important;
   align-items: center !important;
   gap: 9px !important;
@@ -162,15 +163,18 @@ aside#sidebar:nth-of-type(1) > div:nth-of-type(1) > div#zy-clock:nth-of-type(4),
   box-shadow: none !important;
   cursor: pointer !important;
   text-shadow: none !important;
+  text-decoration: none !important;
   transition: background-color 0.16s cubic-bezier(0.16, 1, 0.3, 1),
               color 0.16s ease !important;
   position: relative !important;
 }
-.adminui .zy-sidenav .zy-ssub div::before {
+.adminui .zy-sidenav .zy-ssub div::before,
+.adminui .zy-sidenav .zy-ssub a::before {
   display: none !important;
   content: none !important;
 }
-.adminui .zy-sidenav .zy-ssub div:hover {
+.adminui .zy-sidenav .zy-ssub div:hover,
+.adminui .zy-sidenav .zy-ssub a:hover {
   background: var(--theme-struct-item-hover, rgba(15, 23, 42, 0.045)) !important;
   color: var(--theme-struct-text, #0f172a) !important;
   border-color: transparent !important;
@@ -178,8 +182,10 @@ aside#sidebar:nth-of-type(1) > div:nth-of-type(1) > div#zy-clock:nth-of-type(4),
   box-shadow: none !important;
   transform: none !important;
   text-shadow: none !important;
+  text-decoration: none !important;
 }
-.adminui .zy-sidenav .zy-ssub div.active {
+.adminui .zy-sidenav .zy-ssub div.active,
+.adminui .zy-sidenav .zy-ssub a.active {
   background: var(--theme-btn-primary-tint, rgba(37, 99, 235, 0.11)) !important;
   color: var(--theme-btn-primary, #2563eb) !important;
   border-color: transparent !important;

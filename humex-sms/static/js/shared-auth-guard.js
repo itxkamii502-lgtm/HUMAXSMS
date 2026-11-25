@@ -25,6 +25,14 @@
     return clean;
   }
 
+  function getServerHydratedUser() {
+    try {
+      const su = window.__INITIAL_SESSION_USER__;
+      if (su && typeof su === 'object' && su.role && su.username) return su;
+    } catch (e) {}
+    return null;
+  }
+
   function getActiveRole() {
     try {
       // 1. Check tab-isolated sessionStorage first (strictly prevents tab role mix-up)
@@ -46,6 +54,10 @@
         const u = JSON.parse(uStr);
         if (u && u.role) return u.role.trim();
       }
+
+      // 3. Server-verified HttpOnly cookie hydration (guaranteed same-login in any new tab)
+      const srvUser = getServerHydratedUser();
+      if (srvUser && srvUser.role) return String(srvUser.role).trim();
     } catch (e) {}
     return null;
   }
@@ -57,6 +69,9 @@
 
       const uStr = localStorage.getItem('admin_user') || localStorage.getItem('active_session_user');
       if (uStr) return JSON.parse(uStr);
+
+      const srvUser = getServerHydratedUser();
+      if (srvUser) return { ...srvUser };
     } catch (e) {}
     return null;
   }
@@ -66,7 +81,8 @@
       const flag = sessionStorage.getItem('admin_logged_in') || localStorage.getItem('admin_logged_in');
       const active = localStorage.getItem('active_session_active');
       const hasRole = !!getActiveRole();
-      return (flag === '1' || active === '1') && hasRole;
+      if ((flag === '1' || active === '1') && hasRole) return true;
+      return !!getServerHydratedUser();
     } catch (e) {
       return false;
     }
@@ -96,7 +112,7 @@
       try { sessionStorage.removeItem('session_token'); } catch (_) {}
       try { localStorage.removeItem('session_token'); } catch (_) {}
 
-      // Sync non-secret user metadata to sessionStorage
+      // Sync non-secret user metadata to sessionStorage (including from server cookie hydration)
       if (isLoggedIn()) {
         const user = getActiveUser();
         const role = getActiveRole();
@@ -104,7 +120,15 @@
         if (role) sessionStorage.setItem('session_role', role);
         if (user) {
           if (user.token) delete user.token;
-          sessionStorage.setItem('admin_user', JSON.stringify(user));
+          const userJson = JSON.stringify(user);
+          sessionStorage.setItem('admin_user', userJson);
+          try {
+            if (!localStorage.getItem('admin_logged_in')) localStorage.setItem('admin_logged_in', '1');
+            if (!localStorage.getItem('active_session_active')) localStorage.setItem('active_session_active', '1');
+            if (role && !localStorage.getItem('active_session_role')) localStorage.setItem('active_session_role', role);
+            if (!localStorage.getItem('admin_user')) localStorage.setItem('admin_user', userJson);
+            if (!localStorage.getItem('active_session_user')) localStorage.setItem('active_session_user', userJson);
+          } catch (_) {}
         }
       }
     } catch (e) {}

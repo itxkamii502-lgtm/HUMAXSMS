@@ -39,7 +39,8 @@ function zyCrumb(parts) {
   const host = document.querySelector('.zy-crumb-left') || document.querySelector('.zy-crumb');
   if (!host) return;
   const arr = Array.isArray(parts) ? parts : [];
-  host.innerHTML = `<a onclick="loadPage('dashboard')">Home</a>` +
+  const dashHref = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl('dashboard') : '#';
+  host.innerHTML = `<a href="${zyEsc(dashHref)}" data-page="dashboard" onclick="return window.zyNavClick ? window.zyNavClick(event, 'dashboard') : (event.preventDefault(), loadPage('dashboard'), false)">Home</a>` +
     arr.map((p, i) => `<span class="zy-sep">&raquo;</span>` +
       (i < arr.length - 1
         ? `<a>${zyEsc(p)}</a>`
@@ -1987,9 +1988,11 @@ function zyUpdateBreadcrumb(page, label) {
   const displayLabel = resolved || (page
     ? String(page).split('-').map(w => w ? (w.charAt(0).toUpperCase() + w.slice(1)) : '').join(' ')
     : 'Dashboard');
+  const dashHref = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl('dashboard') : '#';
+  const homeAnchor = `<a href="${zyEsc(dashHref)}" data-page="dashboard" onclick="return window.zyNavClick ? window.zyNavClick(event, 'dashboard') : (event.preventDefault(), loadPage('dashboard'), false)">Home</a>`;
   const leftHtml = isDash
-    ? `<a onclick="loadPage('dashboard')">Home</a><span class="zy-sep">&raquo;</span><span id="breadcrumb" class="zy-breadcrumb-current" data-breadcrumb="1">Dashboard</span>`
-    : `<a onclick="loadPage('dashboard')">Home</a><span class="zy-sep">&raquo;</span><span id="breadcrumb" class="zy-breadcrumb-current" data-breadcrumb="1">${zyEsc(displayLabel)}</span>`;
+    ? `${homeAnchor}<span class="zy-sep">&raquo;</span><span id="breadcrumb" class="zy-breadcrumb-current" data-breadcrumb="1">Dashboard</span>`
+    : `${homeAnchor}<span class="zy-sep">&raquo;</span><span id="breadcrumb" class="zy-breadcrumb-current" data-breadcrumb="1">${zyEsc(displayLabel)}</span>`;
 
   const leftContainer = crumb.querySelector('.zy-crumb-left');
   if (leftContainer) {
@@ -3909,12 +3912,13 @@ window.zyRenderUnifiedDashboard = function (cfg) {
 
   const quickTilesHtml = shortcuts.map((s, idx) => {
     const tone = s.tone || (idx % 2 === 0 ? 'blue' : 'green');
+    const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(s.page) : '#';
     return `
-    <div class="zy-ud-qtile zy-ud-qtile-${zyEsc(tone)}" data-tone="${zyEsc(tone)}" role="button" tabindex="0" onclick="loadPage('${zyEsc(s.page)}')"
-         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadPage('${zyEsc(s.page)}');}">
+    <a class="zy-ud-qtile zy-ud-qtile-${zyEsc(tone)}" data-tone="${zyEsc(tone)}" data-page="${zyEsc(s.page)}" href="${zyEsc(href)}"
+       onclick="return window.zyNavClick ? window.zyNavClick(event, '${zyEsc(s.page)}') : (event.preventDefault(), loadPage('${zyEsc(s.page)}'), false)">
       <div class="zy-ud-qtile-ic"><i class="fas ${zyEsc(s.icon || 'fa-circle-dot')}"></i></div>
       <div class="zy-ud-qtile-lbl">${zyEsc(s.label)}</div>
-    </div>
+    </a>
   `;
   }).join('');
 
@@ -3925,15 +3929,20 @@ window.zyRenderUnifiedDashboard = function (cfg) {
     </div>
   `).join('');
 
-  const sumItemsHtml = summaryRows.map(r => `
-    <div class="zy-ud-sum-item"${r.page ? ` style="cursor:pointer;" onclick="loadPage('${zyEsc(r.page)}')"` : ''}>
+  const sumItemsHtml = summaryRows.map(r => {
+    const inner = `
       <div class="zy-ud-sum-left">
         <div class="zy-ud-sum-ic${r.tone === 'red' ? ' is-red' : ''}"><i class="fas ${zyEsc(r.icon || 'fa-chart-simple')}"></i></div>
         <div class="zy-ud-sum-lbl">${zyEsc(r.label)}</div>
       </div>
       <div class="zy-ud-sum-val zy-ud-num${r.tone === 'red' ? ' is-red' : ''}">${zyEsc(String(r.value ?? '0'))}</div>
-    </div>
-  `).join('');
+    `;
+    if (r.page) {
+      const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(r.page) : '#';
+      return `<a class="zy-ud-sum-item" style="cursor:pointer;" data-page="${zyEsc(r.page)}" href="${zyEsc(href)}" onclick="return window.zyNavClick ? window.zyNavClick(event, '${zyEsc(r.page)}') : (event.preventDefault(), loadPage('${zyEsc(r.page)}'), false)">${inner}</a>`;
+    }
+    return `<div class="zy-ud-sum-item">${inner}</div>`;
+  }).join('');
 
   const rangesTableHtml = latestRanges.length ? `
     <div class="zy-ud-table-wrap">

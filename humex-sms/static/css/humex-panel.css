@@ -385,6 +385,7 @@ body.sidebar-open {
               border-color 0.18s ease !important;
   position: relative !important;
   user-select: none;
+  text-decoration: none !important;
 }
 .zy-sidenav .zy-snav .zy-snav-txt {
   white-space: nowrap;
@@ -440,7 +441,8 @@ body.sidebar-open {
 .zy-sidenav .zy-snav.open .zy-caret,
 .zy-sidenav .zy-snav[aria-expanded="true"] .zy-caret { transform: rotate(180deg); opacity: 1; color: var(--theme-btn-primary, #2563eb); }
 .zy-sidenav .zy-snav:focus-visible,
-.zy-sidenav .zy-ssub div:focus-visible {
+.zy-sidenav .zy-ssub div:focus-visible,
+.zy-sidenav .zy-ssub a:focus-visible {
   outline: 2px solid var(--theme-btn-primary, #2563eb) !important;
   outline-offset: -2px !important;
 }
@@ -487,7 +489,8 @@ body.sidebar-open {
   background: var(--theme-struct-border, #e2e8f0);
   opacity: 0.75;
 }
-.zy-sidenav .zy-ssub div {
+.zy-sidenav .zy-ssub div,
+.zy-sidenav .zy-ssub a {
   display: flex !important;
   align-items: center !important;
   gap: 9px !important;
@@ -503,16 +506,19 @@ body.sidebar-open {
   box-shadow: none !important;
   cursor: pointer !important;
   text-shadow: none !important;
+  text-decoration: none !important;
   transition: background-color 0.16s cubic-bezier(0.16, 1, 0.3, 1),
               color 0.16s ease !important;
   position: relative !important;
   user-select: none;
 }
-.zy-sidenav .zy-ssub div::before {
+.zy-sidenav .zy-ssub div::before,
+.zy-sidenav .zy-ssub a::before {
   display: none !important;
   content: none !important;
 }
-.zy-sidenav .zy-ssub div .zy-sub-ic {
+.zy-sidenav .zy-ssub div .zy-sub-ic,
+.zy-sidenav .zy-ssub a .zy-sub-ic {
   width: 14px;
   text-align: center;
   font-size: 11.5px;
@@ -520,33 +526,39 @@ body.sidebar-open {
   flex-shrink: 0;
   transition: opacity 0.16s ease, color 0.16s ease;
 }
-.zy-sidenav .zy-ssub div .zy-sub-txt {
+.zy-sidenav .zy-ssub div .zy-sub-txt,
+.zy-sidenav .zy-ssub a .zy-sub-txt {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
   flex: 1 1 auto;
 }
-.zy-sidenav .zy-ssub div:hover {
+.zy-sidenav .zy-ssub div:hover,
+.zy-sidenav .zy-ssub a:hover {
   background: var(--theme-struct-item-hover, rgba(15, 23, 42, 0.045)) !important;
   color: var(--theme-struct-text, #0f172a) !important;
   border-color: transparent !important;
   box-shadow: none !important;
   transform: none !important;
   text-shadow: none !important;
+  text-decoration: none !important;
 }
-.zy-sidenav .zy-ssub div:hover .zy-sub-ic {
+.zy-sidenav .zy-ssub div:hover .zy-sub-ic,
+.zy-sidenav .zy-ssub a:hover .zy-sub-ic {
   opacity: 0.95;
   color: var(--theme-btn-primary, #2563eb);
 }
-.zy-sidenav .zy-ssub div.active {
+.zy-sidenav .zy-ssub div.active,
+.zy-sidenav .zy-ssub a.active {
   background: var(--theme-btn-primary-tint, rgba(37, 99, 235, 0.11)) !important;
   color: var(--theme-btn-primary, #2563eb) !important;
   border-color: transparent !important;
   font-weight: 700 !important;
   box-shadow: none !important;
 }
-.zy-sidenav .zy-ssub div.active .zy-sub-ic {
+.zy-sidenav .zy-ssub div.active .zy-sub-ic,
+.zy-sidenav .zy-ssub a.active .zy-sub-ic {
   opacity: 1;
   color: var(--theme-btn-primary, #2563eb);
 }
@@ -6511,10 +6523,15 @@ td .monospace {
   color: var(--sp-text-primary, #0f172a);
   cursor: pointer;
   text-align: center;
+  text-decoration: none;
   transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1),
               border-color 0.16s ease,
               background-color 0.16s ease,
               box-shadow 0.16s ease;
+}
+a.zy-ud-sum-item {
+  text-decoration: none;
+  color: inherit;
 }
 .zy-ud-qtile:hover {
   transform: translateY(-2px);
@@ -6971,7 +6988,9 @@ body.dark .zy-ud-qtile-green:hover {
     font-size: 12.5px !important;
   }
   .zy-sidenav .zy-ssub div,
-  .adminui .zy-sidenav .zy-ssub div {
+  .zy-sidenav .zy-ssub a,
+  .adminui .zy-sidenav .zy-ssub div,
+  .adminui .zy-sidenav .zy-ssub a {
     min-height: 40px !important;
     padding: 8px 12px 8px 16px !important;
   }
@@ -9543,19 +9562,28 @@ body.dark .zy-sidenav .zy-ssub::before,
 }
 body.rmsui.dark .zy-sidenav .zy-ssub div,
 body.dark .zy-sidenav .zy-ssub div,
-[data-theme="dark"] .zy-sidenav .zy-ssub div {
+[data-theme="dark"] .zy-sidenav .zy-ssub div,
+body.rmsui.dark .zy-sidenav .zy-ssub a,
+body.dark .zy-sidenav .zy-ssub a,
+[data-theme="dark"] .zy-sidenav .zy-ssub a {
   background: transparent !important;
   color: #cbd5e1 !important;
 }
 body.rmsui.dark .zy-sidenav .zy-ssub div:hover,
 body.dark .zy-sidenav .zy-ssub div:hover,
-[data-theme="dark"] .zy-sidenav .zy-ssub div:hover {
+[data-theme="dark"] .zy-sidenav .zy-ssub div:hover,
+body.rmsui.dark .zy-sidenav .zy-ssub a:hover,
+body.dark .zy-sidenav .zy-ssub a:hover,
+[data-theme="dark"] .zy-sidenav .zy-ssub a:hover {
   background: rgba(255, 255, 255, 0.06) !important;
   color: #ffffff !important;
 }
 body.rmsui.dark .zy-sidenav .zy-ssub div.active,
 body.dark .zy-sidenav .zy-ssub div.active,
-[data-theme="dark"] .zy-sidenav .zy-ssub div.active {
+[data-theme="dark"] .zy-sidenav .zy-ssub div.active,
+body.rmsui.dark .zy-sidenav .zy-ssub a.active,
+body.dark .zy-sidenav .zy-ssub a.active,
+[data-theme="dark"] .zy-sidenav .zy-ssub a.active {
   background: rgba(59, 130, 246, 0.2) !important;
   color: #93c5fd !important;
 }
@@ -11223,11 +11251,13 @@ body.rmsui .zy-sidenav .zy-snav.open,
 body.rmsui .zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.active {
   font-weight: 600 !important;
 }
-body.rmsui .zy-sidenav .zy-ssub div {
+body.rmsui .zy-sidenav .zy-ssub div,
+body.rmsui .zy-sidenav .zy-ssub a {
   font-size: 12.5px !important;
   font-weight: 400 !important;
 }
-body.rmsui .zy-sidenav .zy-ssub div.active {
+body.rmsui .zy-sidenav .zy-ssub div.active,
+body.rmsui .zy-sidenav .zy-ssub a.active {
   font-weight: 600 !important;
 }
 

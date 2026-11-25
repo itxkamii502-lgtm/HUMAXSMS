@@ -7072,12 +7072,20 @@ function sendInjectedHtml(res, filePath, req = null) {
     let userThemeMode = '';
     let userLang = 'en';
     let isOwnerSession = false;
+    let initialSessionUser = null;
     if (req) {
       try {
         const sUser = getSessionUser(req);
         if (sUser && sUser.username) {
           const sRole = String(sUser.role || '').toLowerCase();
           if (sRole === 'owner' || sRole === 'admin') isOwnerSession = true;
+          initialSessionUser = {
+            id: sUser.id,
+            username: sUser.username,
+            role: sUser.role,
+            email: sUser.email || '',
+            full_name: sUser.full_name || sUser.username
+          };
           const found = findUserAnywhere(sUser.username);
           if (found && found.user) {
             if (found.user.theme_key && themeCatalog.some(t => t.key === found.user.theme_key)) {
@@ -7141,10 +7149,14 @@ function sendInjectedHtml(res, filePath, req = null) {
       : '';
 
     // Synchronous head injection right at top of <head> to eliminate FOUC and lag
+    const safeSessionJson = (!isLoginPage && initialSessionUser)
+      ? JSON.stringify(initialSessionUser).replace(/</g, '\\u003c')
+      : 'null';
     const injection = `${prodGuardHtml}
   <script>
     window.__BRAND_SETTINGS__ = ${JSON.stringify(safeSettings)};
     window.__USER_THEME__ = ${JSON.stringify(userThemePayload)};
+    window.__INITIAL_SESSION_USER__ = ${safeSessionJson};
     try { localStorage.setItem('app_brand_settings', JSON.stringify(window.__BRAND_SETTINGS__)); } catch(e){}
   </script>
   <style id="zero-fouc-shield">

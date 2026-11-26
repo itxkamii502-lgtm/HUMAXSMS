@@ -1070,17 +1070,18 @@
     };
   }
 
-  // Initial synchronous execution
+  // Initial synchronous execution (skip redundant /api/settings round-trip if server already injected __BRAND_SETTINGS__)
+  const _hasServerInjectedBrand = Boolean(window.__BRAND_SETTINGS__ && typeof window.__BRAND_SETTINGS__ === 'object');
   applyBrandTheme(_currentSettings);
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       initSidebarDrawer();
       applyBrandTheme(_currentSettings);
-      fetchLiveSettings();
+      if (!_hasServerInjectedBrand) fetchLiveSettings();
     });
   } else {
     initSidebarDrawer();
-    fetchLiveSettings();
+    if (!_hasServerInjectedBrand) fetchLiveSettings();
   }
 
   // Cross-tab & Cross-frame sync
@@ -1102,79 +1103,153 @@
     }
   });
 
-  // Real-time WebSocket listener for immediate instant propagation across all tabs
-  (function initBrandRealtimeSync() {
+  // Shared Single WebSocket Hub per Tab (replaces 3 duplicate WS connections per tab!)
+  (function initSharedWsHub() {
     try {
       if (typeof window === 'undefined' || !window.WebSocket) return;
-      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = wsProto + '//' + location.host + '/ws/live-traffic';
-      let brandWs = null;
+      const msgListeners = new Set();
+      const statusListeners = new Set();
+      let ws = null;
+      let connected = false;
+      let attempts = 0;
+      let everConnected = false;
+      let reconnectTimer = null;
+      let stopped = false;
+
+      function isLoginPage() {
+        const p = String(window.location.pathname || '').toLowerCase();
+        return p === '/login' || p.endsWith('/login.html') || p === '/';
+      }
+
+      function notifyStatus(isUp, wasReconnect) {
+        statusListeners.forEach(fn => {
+          try { fn(isUp, wasReconnect); } catch (_) {}
+        });
+      }
 
       function connect() {
+        if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         try {
-          brandWs = new WebSocket(wsUrl);
-          brandWs.onmessage = function (ev) {
-            try {
-              const payload = JSON.parse(ev.data);
-              if (!payload) return;
-              if (payload.type === 'brand_theme_updated' || payload.type === 'brand_updated' || payload.type === 'settings_updated') {
-                const newSettings = payload.settings || payload.data;
-                if (newSettings && typeof newSettings === 'object') {
-                  applyBrandTheme(newSettings);
-                }
-              }
-              if (payload.type === 'live_access_otp' && typeof window.zyHandleLiveAccessWsEvent === 'function') {
-                window.zyHandleLiveAccessWsEvent(payload.data || payload);
-              }
-              if (payload.type === 'live_access_config_updated' || payload.type === 'settings_updated') {
-                const cfg = payload.type === 'settings_updated' ? (payload.settings || payload.data || {}) : payload;
-                const hasKeys = ('live_access_agents_enabled' in cfg) || ('live_access_clients_enabled' in cfg);
-                if (hasKeys && typeof window.zySyncLiveAccessNav === 'function') {
-                  const p = String(window.location.pathname || '').toLowerCase();
-                  const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
-                  const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
-                  if (isAgentPanel || isClientPanel) {
-                    const enabled = isAgentPanel
-                      ? Boolean(cfg.live_access_agents_enabled)
-                      : Boolean(cfg.live_access_clients_enabled);
-                    window.zySyncLiveAccessNav(enabled);
-                    if (!enabled && document.getElementById('zy-live-access-tbody')) {
-                      if (typeof window.toast === 'function') window.toast('Live Access has been disabled by Administrator.', 'info');
-                      if (typeof window.loadPage === 'function') window.loadPage('dashboard');
-                    }
-                  }
-                }
-              }
-              if (payload.type === 'method_vault_access_updated') {
-                const p = String(window.location.pathname || '').toLowerCase();
-                const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
-                const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
-                if (isAgentPanel || isClientPanel) {
-                  const enabled = Boolean(payload.method_vault_access);
-                  window.ZY_METHOD_VAULT_ACCESS = enabled;
-                  const navEl = document.getElementById(isClientPanel ? 'nav-apps-method' : 'nav-method-vault');
-                  if (navEl) {
-                    navEl.classList.toggle('zy-nav-hidden', !enabled);
-                    navEl.hidden = !enabled;
-                    if (enabled) navEl.style.removeProperty('display');
-                    else navEl.style.setProperty('display', 'none', 'important');
-                  }
-                  if (!enabled && isClientPanel && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
-                    window.zyCloseClientAppsMethodDrawer();
-                  }
-                  if (typeof window.zySyncChatMethodVaultAccess === 'function') {
-                    window.zySyncChatMethodVaultAccess(enabled);
-                  }
-                }
-              }
-            } catch (err) {}
+          const sock = new WebSocket(proto + '//' + location.host + '/ws');
+          ws = sock;
+          sock.onopen = function () {
+            const wasReconnect = everConnected || attempts > 0;
+            connected = true;
+            everConnected = true;
+            attempts = 0;
+            notifyStatus(true, wasReconnect);
           };
-          brandWs.onclose = function () { setTimeout(connect, 6000); };
-          brandWs.onerror = function () { try { brandWs.close(); } catch (_) {} };
+          sock.onmessage = function (ev) {
+            let payload;
+            try { payload = JSON.parse(ev.data); } catch (_) { return; }
+            if (!payload || typeof payload !== 'object') return;
+            msgListeners.forEach(fn => {
+              try { fn(payload); } catch (_) {}
+            });
+          };
+          sock.onclose = function (ev) {
+            connected = false;
+            if (ws === sock) ws = null;
+            notifyStatus(false, false);
+            if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
+            // Stop reconnect storm if session is unauthorized (1008)
+            if (ev && ev.code === 1008) {
+              stopped = true;
+              return;
+            }
+            const delay = Math.min(15000, 1500 * Math.pow(1.6, Math.min(attempts++, 6)));
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connect, delay);
+          };
+          sock.onerror = function () {
+            try { sock.close(); } catch (_) {}
+          };
         } catch (_) {}
       }
 
-      setTimeout(connect, 1200);
+      window.ZySharedWs = {
+        connect,
+        isConnected: () => connected && Boolean(ws && ws.readyState === WebSocket.OPEN),
+        send: (obj) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify(obj)); return true; } catch (_) {}
+          }
+          return false;
+        },
+        subscribe: (fn) => {
+          if (typeof fn !== 'function') return () => {};
+          msgListeners.add(fn);
+          connect();
+          return () => msgListeners.delete(fn);
+        },
+        onStatus: (fn) => {
+          if (typeof fn !== 'function') return () => {};
+          statusListeners.add(fn);
+          try { fn(connected, false); } catch (_) {}
+          return () => statusListeners.delete(fn);
+        }
+      };
+
+      // Subscribe brand/theme, live access & method vault real-time events to the shared hub
+      window.ZySharedWs.subscribe(function (payload) {
+        if (!payload) return;
+        if (payload.type === 'brand_theme_updated' || payload.type === 'brand_updated' || payload.type === 'settings_updated') {
+          const newSettings = payload.settings || payload.data;
+          if (newSettings && typeof newSettings === 'object') {
+            applyBrandTheme(newSettings);
+          }
+        }
+        if (payload.type === 'live_access_otp' && typeof window.zyHandleLiveAccessWsEvent === 'function') {
+          window.zyHandleLiveAccessWsEvent(payload.data || payload);
+        }
+        if (payload.type === 'live_access_config_updated' || payload.type === 'settings_updated') {
+          const cfg = payload.type === 'settings_updated' ? (payload.settings || payload.data || {}) : payload;
+          const hasKeys = ('live_access_agents_enabled' in cfg) || ('live_access_clients_enabled' in cfg);
+          if (hasKeys && typeof window.zySyncLiveAccessNav === 'function') {
+            const p = String(window.location.pathname || '').toLowerCase();
+            const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
+            const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
+            if (isAgentPanel || isClientPanel) {
+              const enabled = isAgentPanel
+                ? Boolean(cfg.live_access_agents_enabled)
+                : Boolean(cfg.live_access_clients_enabled);
+              window.zySyncLiveAccessNav(enabled);
+              if (!enabled && document.getElementById('zy-live-access-tbody')) {
+                if (typeof window.toast === 'function') window.toast('Live Access has been disabled by Administrator.', 'info');
+                if (typeof window.loadPage === 'function') window.loadPage('dashboard');
+              }
+            }
+          }
+        }
+        if (payload.type === 'method_vault_access_updated') {
+          const p = String(window.location.pathname || '').toLowerCase();
+          const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
+          const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
+          if (isAgentPanel || isClientPanel) {
+            const enabled = Boolean(payload.method_vault_access);
+            window.ZY_METHOD_VAULT_ACCESS = enabled;
+            const navEl = document.getElementById(isClientPanel ? 'nav-apps-method' : 'nav-method-vault');
+            if (navEl) {
+              navEl.classList.toggle('zy-nav-hidden', !enabled);
+              navEl.hidden = !enabled;
+              if (enabled) navEl.style.removeProperty('display');
+              else navEl.style.setProperty('display', 'none', 'important');
+            }
+            if (!enabled && isClientPanel && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
+              window.zyCloseClientAppsMethodDrawer();
+            }
+            if (typeof window.zySyncChatMethodVaultAccess === 'function') {
+              window.zySyncChatMethodVaultAccess(enabled);
+            }
+          }
+        }
+      });
+
+      if (!isLoginPage()) {
+        setTimeout(connect, 250);
+      }
     } catch (e) {}
   })();
 

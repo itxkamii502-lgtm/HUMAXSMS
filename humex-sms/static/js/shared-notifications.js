@@ -1049,8 +1049,24 @@
     if (pill) pill.classList.toggle('is-online', connected);
   }
 
+  let _notifSharedBound = false;
   function connectWs() {
     if (window.__AUTH_BLOCKED__) return;
+    if (window.ZySharedWs && typeof window.ZySharedWs.subscribe === 'function') {
+      if (!_notifSharedBound) {
+        _notifSharedBound = true;
+        window.ZySharedWs.onStatus((isUp) => {
+          updateLiveIndicator(Boolean(isUp));
+        });
+        window.ZySharedWs.subscribe((data) => {
+          if (data && data.type === 'notification' && data.notification) {
+            handleIncomingNotification(data.notification);
+          }
+        });
+      }
+      window.ZySharedWs.connect();
+      return;
+    }
     if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }

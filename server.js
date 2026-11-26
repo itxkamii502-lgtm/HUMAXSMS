@@ -6614,15 +6614,21 @@ app.use((req, res, next) => {
 // Boot-unique asset version so browsers cache JS/CSS aggressively in production and auto-refresh on restart
 const ASSET_BUILD_VER = Date.now().toString(36);
 
-// Serve static assets from humex-sms/static with fast ETag & production browser caching
+// Serve static assets from humex-sms/static with fast ETag & versioned browser caching
 const staticOpts = {
   etag: true,
   lastModified: true,
-  maxAge: process.env.NODE_ENV === 'production' ? '7d' : 0,
+  maxAge: '7d',
   setHeaders: (res, filePath) => {
     const ext = path.extname(filePath || '').toLowerCase();
-    if (process.env.NODE_ENV === 'production' && /\.(js|css|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|eot)$/.test(ext)) {
-      res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+    const reqUrl = String((res.req && (res.req.originalUrl || res.req.url)) || '');
+    const isVersioned = /[?&]v=/.test(reqUrl);
+    if ((isVersioned || process.env.NODE_ENV === 'production') && /\.(js|css|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|eot)$/.test(ext)) {
+      res.setHeader('Cache-Control', isVersioned
+        ? 'public, max-age=604800, immutable'
+        : 'public, max-age=86400, stale-while-revalidate=86400');
+    } else if (/\.(png|jpe?g|webp|gif|svg|ico|woff2?|ttf|eot)$/.test(ext)) {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
     }
@@ -7273,12 +7279,10 @@ function sendInjectedHtml(res, filePath, req = null) {
       content = injection + content;
     }
 
-    if (process.env.NODE_ENV === 'production') {
-      content = content.replace(
-        /((?:src|href)=["']\/static\/(?:js|css)\/[^"']+\.(?:js|css))(["'])/g,
-        `$1?v=${ASSET_BUILD_VER}$2`
-      );
-    }
+    content = content.replace(
+      /((?:src|href)=["']\/static\/(?:js|css)\/[^"'?]+\.(?:js|css))(["'])/g,
+      `$1?v=${ASSET_BUILD_VER}$2`
+    );
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
@@ -27160,7 +27164,7 @@ wss.on('connection', (ws, req) => {
   const user = req ? getSessionUser(req) : null;
   if (!user || !wsOriginAllowed(req)) { try { ws.close(1008, 'unauthorized'); } catch (e) { /* ignore */ } return; }
   const open = wsConnPerIp.get(ip) || 0;
-  if (open >= 10) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
+  if (open >= 40) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
   wsConnPerIp.set(ip, open + 1);
 
   const actor = resolveLiveChatActor(user);

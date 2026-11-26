@@ -645,9 +645,32 @@
     }
   }
 
-  // ── Real-Time WebSocket Connection ──
+  // ── Real-Time WebSocket Connection (Shared Multiplexed Hub) ──
+  let _chatSharedWsBound = false;
   function connectWs() {
     if (window.__AUTH_BLOCKED__) return;
+    if (window.ZySharedWs && typeof window.ZySharedWs.subscribe === 'function') {
+      if (!_chatSharedWsBound) {
+        _chatSharedWsBound = true;
+        window.ZySharedWs.onStatus((isUp, wasReconnect) => {
+          state.wsConnected = Boolean(isUp);
+          updateConnectionStatus();
+          if (isUp && wasReconnect) {
+            fetchBootstrap(true).then(() => {
+              if (state.mounted && state.activeConvId) loadMessages(state.activeConvId, { silent: true });
+            });
+          }
+        });
+        window.ZySharedWs.subscribe((data) => {
+          if (!data || !data.type || !String(data.type).startsWith('chat:')) return;
+          handleWsEvent(data);
+        });
+      }
+      state.wsConnected = window.ZySharedWs.isConnected();
+      updateConnectionStatus();
+      window.ZySharedWs.connect();
+      return;
+    }
     if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     try {
@@ -687,6 +710,10 @@
   }
 
   function sendWsFrame(obj) {
+    if (window.ZySharedWs && typeof window.ZySharedWs.send === 'function') {
+      window.ZySharedWs.send(obj);
+      return;
+    }
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       try { state.ws.send(JSON.stringify(obj)); } catch (_) {}
     }

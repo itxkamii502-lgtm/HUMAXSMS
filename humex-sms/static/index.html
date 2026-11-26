@@ -51,7 +51,6 @@
 </script>
 <script src="/static/js/shared-brand-theme.js"></script>
 <script src="/static/js/shared-auth-guard.js"></script>
-<script src="/static/js/shared-profile-security.js"></script>
 <script>
   if (window.HumexAuth) {
     if (!window.HumexAuth.enforce(['Owner', 'Admin'])) {
@@ -61,12 +60,14 @@
   }
 </script>
 <link rel="stylesheet" href="/static/css/humex-global.css">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/css/cropper.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"></noscript>
+<link rel="stylesheet" href="/static/css/cropper.min.css" media="print" onload="this.media='all'">
 <link rel="stylesheet" href="/static/css/humex-panel.css">
 <link rel="stylesheet" href="/static/css/humex-admin-skin.css">
 <link rel="stylesheet" href="/static/css/humex-telecom.css">
@@ -123,7 +124,8 @@
   </div>
 </div>
 
-<script src="/static/js/cropper.min.js"></script>
+<script src="/static/js/shared-profile-security.js"></script>
+<script defer src="/static/js/cropper.min.js"></script>
 <script src="/static/js/owner-engine.js"></script>
 <script src="/static/js/owner-features.js"></script>
 <script src="/static/js/shared-ui-kit.js"></script>

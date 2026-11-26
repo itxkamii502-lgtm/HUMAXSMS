@@ -6466,6 +6466,8 @@ function getScopedWhitenoiseStatsAsVirtualSms(sessionUser, opts = {}) {
 app.use(compression({
   filter: (req, res) => {
     if (req.headers['x-no-compression']) return false;
+    const p = req.path || '';
+    if (p.startsWith('/api/method-vault/stream/') || p === '/api/method-vault/agent/upload-chunk') return false;
     return compression.filter(req, res);
   },
   threshold: 512
@@ -7780,7 +7782,7 @@ const API_RULES = [
   { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] },
   { p: /^\/method-vault\/agent(\/|$)/, roles: ['agent'] },
   { p: /^\/method-vault\/client(\/|$)/, roles: ['client'] },
-  { m: new Set(['GET']), p: /^\/method-vault\/stream(\/|$)/, roles: ['agent', 'client'] }
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/, roles: ['agent', 'client'] }
 ];
 // Client is default-deny: only these routes exist for them.
 const CLIENT_ALLOW = [
@@ -7807,7 +7809,7 @@ const CLIENT_ALLOW = [
   { m: new Set(['GET', 'POST']), p: /^\/payout-requests(\/|$)/ },
   { m: new Set(['GET']), p: /^\/payments(\/|$)/ },
   { m: new Set(['GET', 'POST']), p: /^\/method-vault\/client(\/|$)/ },
-  { m: new Set(['GET']), p: /^\/method-vault\/stream(\/|$)/ }
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/ }
 ];
 function ruleHit(list, p, method) { return list.some(r => (!r.m || r.m.has(method)) && r.p.test(p)); }
 
@@ -27897,6 +27899,9 @@ app.post('/api/method-vault/agent/items', requireAuth, (req, res) => {
 
       items.unshift(record);
       writeDb('method_vault_items', items);
+      if (uploadedFile && uploadedFile.path) {
+        optimizeMp4FastStartInBackground(uploadedFile.path);
+      }
       logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${record.video_size ? Math.round(record.video_size / 1048576 * 10) / 10 + ' MB' : 'text/links only'})`, 'method_vault_items');
 
       res.json({ success: true, item: record, storage: getMethodVaultStorageStats() });
@@ -28034,9 +28039,9 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
     res.json({
       success: true,
       upload_id: uploadId,
-      chunk_size: 768 * 1024,
-      max_chunk_size: 768 * 1024,
-      concurrency: 3,
+      chunk_size: 896 * 1024,
+      max_chunk_size: 896 * 1024,
+      concurrency: 4,
       mode: 'raw-parallel'
     });
   } catch (err) {
@@ -28096,6 +28101,10 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
       }
     }
 
+    if (req.socket && typeof req.socket.setNoDelay === 'function') {
+      try { req.socket.setNoDelay(true); } catch (_) {}
+    }
+
     const parts = [];
     let receivedLen = 0;
     let finished = false;
@@ -28108,6 +28117,7 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
       sess.activeWrites = Math.max(0, sess.activeWrites - 1);
       if (!res.headersSent) {
         res.setHeader('X-No-Compression', '1');
+        res.setHeader('X-Accel-Buffering', 'no');
         res.status(statusCode).json(payload);
       }
     };
@@ -28324,6 +28334,7 @@ app.post('/api/method-vault/agent/upload-complete', requireAuth, async (req, res
     };
     items.unshift(record);
     writeDb('method_vault_items', items);
+    optimizeMp4FastStartInBackground(finalPath);
     logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${Math.round(record.video_size / 1048576 * 10) / 10} MB)`, 'method_vault_items');
 
     res.json({ success: true, item: record, storage: getMethodVaultStorageStats() });
@@ -28773,8 +28784,62 @@ app.post('/api/method-vault/client/request', requireAuth, (req, res) => {
   res.json({ success: true, request: rec });
 });
 
-// ── PROTECTED HTTP 206 RANGE VIDEO STREAMING (Timed + Role-Verified) ─
-app.get('/api/method-vault/stream/:id', requireAuth, (req, res) => {
+// Optional non-blocking MP4 fast-start remux (moves moov atom before mdat if recorded on phone so playback starts instantly)
+function mp4NeedsFastStart(filePath) {
+  let fd = null;
+  try {
+    const ext = path.extname(String(filePath || '')).toLowerCase();
+    if (ext !== '.mp4' && ext !== '.m4v' && ext !== '.mov') return false;
+    const st = fs.statSync(filePath);
+    if (!st || st.size < 32) return false;
+    fd = fs.openSync(filePath, 'r');
+    const hdr = Buffer.alloc(16);
+    let pos = 0;
+    let seenMdat = false;
+    let hops = 0;
+    while (pos + 8 <= st.size && hops < 32) {
+      hops += 1;
+      fs.readSync(fd, hdr, 0, 16, pos);
+      let sz = hdr.readUInt32BE(0);
+      const type = hdr.slice(4, 8).toString('ascii');
+      if (sz === 1) sz = Number(hdr.readBigUInt64BE(8));
+      else if (sz === 0) sz = st.size - pos;
+      if (!Number.isFinite(sz) || sz < 8) break;
+      if (type === 'moov') return seenMdat;
+      if (type === 'mdat') seenMdat = true;
+      pos += sz;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} }
+  }
+}
+
+function optimizeMp4FastStartInBackground(filePath) {
+  if (!filePath || !mp4NeedsFastStart(filePath)) return;
+  const tmpOut = `${filePath}.faststart.mp4`;
+  execFile('ffmpeg', ['-y', '-loglevel', 'error', '-i', filePath, '-c', 'copy', '-movflags', '+faststart', tmpOut], { timeout: 45000 }, (err) => {
+    if (err) {
+      try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch (_) {}
+      return;
+    }
+    try {
+      const st = fs.existsSync(tmpOut) ? fs.statSync(tmpOut) : null;
+      if (st && st.size > 1024 && fs.existsSync(filePath)) {
+        fs.renameSync(tmpOut, filePath);
+      } else if (fs.existsSync(tmpOut)) {
+        fs.unlinkSync(tmpOut);
+      }
+    } catch (_) {
+      try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch (__) {}
+    }
+  });
+}
+
+// ── PROTECTED HTTP 206 RANGE VIDEO STREAMING (High-Speed Continuous + Timed + Role-Verified) ─
+function handleMethodVaultStream(req, res) {
   const sessionUser = req.sessionUser;
   const role = normRole(sessionUser.role);
   if (!hasMethodVaultAccess(sessionUser)) {
@@ -28830,24 +28895,54 @@ app.get('/api/method-vault/stream/:id', requireAuth, (req, res) => {
   }
   const fileSize = stat.size;
   const contentType = methodItem.video_mime || 'video/mp4';
+  const etag = `"mv-${fileSize}-${Math.floor(stat.mtimeMs)}"`;
+  const lastMod = stat.mtime.toUTCString();
   const range = req.headers.range;
+  const isHead = req.method.toUpperCase() === 'HEAD';
 
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  res.setHeader('Pragma', 'no-cache');
+  if (req.socket && typeof req.socket.setNoDelay === 'function') {
+    try { req.socket.setNoDelay(true); } catch (_) {}
+  }
+
+  // Private short-TTL caching + stable ETag/Last-Modified enables Chrome/Safari Range buffer continuity
+  // without ever allowing shared/proxy caching or breaking timed expiration.
+  res.setHeader('Cache-Control', 'private, max-age=180');
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', lastMod);
   res.setHeader('Content-Disposition', 'inline');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.setHeader('Accept-Ranges', 'bytes');
 
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
-    if (!match) {
+    if (!match || (!match[1] && !match[2])) {
       res.setHeader('Content-Range', `bytes */${fileSize}`);
       return res.status(416).end();
     }
-    const start = match[1] ? parseInt(match[1], 10) : 0;
-    const requestedEnd = match[2] ? parseInt(match[2], 10) : Math.min(start + 1024 * 1024 - 1, fileSize - 1);
-    const end = Math.min(requestedEnd, fileSize - 1);
-    if (isNaN(start) || isNaN(end) || start > end || start >= fileSize) {
+    let start;
+    let end;
+    if (!match[1] && match[2]) {
+      // Suffix byte range (e.g. bytes=-65536 used by players to inspect end-of-file moov atom)
+      const suffixLen = parseInt(match[2], 10);
+      if (!Number.isFinite(suffixLen) || suffixLen <= 0) {
+        res.setHeader('Content-Range', `bytes */${fileSize}`);
+        return res.status(416).end();
+      }
+      start = Math.max(0, fileSize - suffixLen);
+      end = fileSize - 1;
+    } else {
+      start = parseInt(match[1], 10);
+      if (match[2]) {
+        end = Math.min(parseInt(match[2], 10), fileSize - 1);
+      } else {
+        // Open-ended Range (bytes=start-): stream continuously up to 32 MB (full file for typical videos)
+        // so TCP ramps to full line speed instead of stalling every 1 MB!
+        const maxOpenWindow = 32 * 1024 * 1024;
+        end = Math.min(start + maxOpenWindow - 1, fileSize - 1);
+      }
+    }
+    if (isNaN(start) || isNaN(end) || start < 0 || start > end || start >= fileSize) {
       res.setHeader('Content-Range', `bytes */${fileSize}`);
       return res.status(416).end();
     }
@@ -28857,19 +28952,38 @@ app.get('/api/method-vault/stream/:id', requireAuth, (req, res) => {
       'Content-Length': chunkSize,
       'Content-Type': contentType
     });
-    const stream = fs.createReadStream(filePath, { start, end });
-    stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+    if (isHead) return res.end();
+    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 256 * 1024 });
+    const cleanup = () => { if (!stream.destroyed) stream.destroy(); };
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+    stream.on('error', () => {
+      cleanup();
+      if (!res.headersSent) res.status(500).end();
+      else if (!res.writableEnded) res.end();
+    });
     stream.pipe(res);
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': contentType
     });
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+    if (isHead) return res.end();
+    const stream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
+    const cleanup = () => { if (!stream.destroyed) stream.destroy(); };
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+    stream.on('error', () => {
+      cleanup();
+      if (!res.headersSent) res.status(500).end();
+      else if (!res.writableEnded) res.end();
+    });
     stream.pipe(res);
   }
-});
+}
+
+app.get('/api/method-vault/stream/:id', requireAuth, handleMethodVaultStream);
+app.head('/api/method-vault/stream/:id', requireAuth, handleMethodVaultStream);
 
 // ── CRITICAL: Safe API 404 handler (Must ALWAYS return JSON, never HTML) ─────
 app.all(['/api/*', '/crapi/*'], (req, res) => {

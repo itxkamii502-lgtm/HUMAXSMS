@@ -20609,6 +20609,40 @@ body.dark .zy-chat-more-mv-item {
   height: 100vh;
   object-fit: contain;
 }
+.zy-mv-video-loader {
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.zy-mv-video-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  background: #7c3aed;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zy-mv-video-retry-btn:hover {
+  background: #6d28d9;
+}
 .zy-mv-wm-floating {
   position: absolute;
   z-index: 6;

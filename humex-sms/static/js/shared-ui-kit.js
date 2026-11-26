@@ -5206,13 +5206,18 @@ window.zyRenderAppLinksPager = function(opts) {
           <video id="zy-mv-video"
                  class="zy-mv-video-el"
                  controls
+                 autoplay
                  controlsList="nodownload noplaybackrate noremoteplayback"
                  disablePictureInPicture
                  playsinline
-                 preload="metadata"
+                 preload="auto"
                  src="${mvEsc(streamUrl)}">
             Your browser does not support HTML5 video playback.
           </video>
+          <div class="zy-mv-video-loader" id="zy-mv-video-loader">
+            <i class="fas fa-spinner fa-spin"></i>
+            <span id="zy-mv-video-loader-txt">Loading video…</span>
+          </div>
           <div class="zy-mv-wm-floating" id="zy-mv-wm-floating" aria-hidden="true">${mvEsc(makeWmText())}</div>
           <div class="zy-mv-wm-ghost" id="zy-mv-wm-ghost" aria-hidden="true">${mvEsc(viewer.username)} ${mvEsc(viewer.id)}</div>
         </div>
@@ -5243,6 +5248,8 @@ window.zyRenderAppLinksPager = function(opts) {
 
     const stage = modal.querySelector('#zy-mv-player-stage');
     const video = modal.querySelector('#zy-mv-video');
+    const loader = modal.querySelector('#zy-mv-video-loader');
+    const loaderTxt = modal.querySelector('#zy-mv-video-loader-txt');
     const wmEl = modal.querySelector('#zy-mv-wm-floating');
     const fsBtn = modal.querySelector('#zy-mv-fs-btn');
     const closeBtn = modal.querySelector('#zy-mv-close-btn');
@@ -5255,8 +5262,85 @@ window.zyRenderAppLinksPager = function(opts) {
       stage.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
     }
     if (video) {
+      let stallRecoverTimer = null;
+      let retryCount = 0;
+      const showLoader = (msg) => {
+        if (!loader) return;
+        loader.style.display = 'flex';
+        const txtEl = loader.querySelector('#zy-mv-video-loader-txt');
+        if (txtEl && msg) txtEl.textContent = msg;
+      };
+      const hideLoader = () => {
+        if (stallRecoverTimer) { clearTimeout(stallRecoverTimer); stallRecoverTimer = null; }
+        if (loader) loader.style.display = 'none';
+      };
+      const armStallRecovery = (delayMs = 8000) => {
+        if (stallRecoverTimer) clearTimeout(stallRecoverTimer);
+        stallRecoverTimer = setTimeout(() => {
+          if (document.body.contains(video) && video.readyState < 3 && retryCount < 2) {
+            retryCount += 1;
+            reloadStreamAt(video.currentTime || 0);
+          }
+        }, delayMs);
+      };
+      const reloadStreamAt = (resumeSec) => {
+        if (!document.body.contains(video)) return;
+        const sep = streamUrl.includes('?') ? '&' : '?';
+        const nextUrl = `${streamUrl}${sep}_r=${Date.now()}`;
+        showLoader('Reconnecting video stream…');
+        video.src = nextUrl;
+        video.load();
+        armStallRecovery(10000);
+        const onReadyResume = () => {
+          video.removeEventListener('loadedmetadata', onReadyResume);
+          if (resumeSec > 0.5 && isFinite(video.duration) && resumeSec < video.duration - 0.5) {
+            try { video.currentTime = resumeSec; } catch (_) {}
+          }
+          video.play().catch(() => {});
+        };
+        video.addEventListener('loadedmetadata', onReadyResume);
+      };
+
+      armStallRecovery(12000);
       video.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
+      video.addEventListener('canplay', () => {
+        retryCount = 0;
+        hideLoader();
+        if (video.paused && video.currentTime === 0) {
+          video.play().catch(() => {});
+        }
+      });
+      video.addEventListener('playing', () => { retryCount = 0; hideLoader(); });
+      video.addEventListener('loadeddata', hideLoader);
+      video.addEventListener('waiting', () => {
+        showLoader('Buffering video…');
+        armStallRecovery(8000);
+      });
+      video.addEventListener('stalled', () => {
+        if (video.readyState < 3) {
+          showLoader('Buffering video…');
+          armStallRecovery(8000);
+        }
+      });
       video.addEventListener('error', () => {
+        if (stallRecoverTimer) { clearTimeout(stallRecoverTimer); stallRecoverTimer = null; }
+        if (retryCount < 1 && !(!isPreview && expiresAt && mvFormatCountdown(expiresAt).expired)) {
+          retryCount += 1;
+          reloadStreamAt(video.currentTime || 0);
+          return;
+        }
+        if (loader) {
+          loader.style.display = 'flex';
+          loader.innerHTML = `<i class="fas fa-triangle-exclamation" style="color:#fbbf24;"></i><span>Video stream interrupted</span><button type="button" class="zy-mv-video-retry-btn" id="zy-mv-video-retry"><i class="fas fa-rotate-right"></i> Retry</button>`;
+          const rbtn = loader.querySelector('#zy-mv-video-retry');
+          if (rbtn) {
+            rbtn.addEventListener('click', () => {
+              retryCount = 0;
+              loader.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span id="zy-mv-video-loader-txt">Reconnecting video…</span>`;
+              reloadStreamAt(video.currentTime || 0);
+            });
+          }
+        }
         if (typeof toast === 'function') {
           toast('Video stream unavailable or access expired.', 'error');
         }

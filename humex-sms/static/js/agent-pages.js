@@ -6332,12 +6332,15 @@ window.zyMvSubmitUpload = function() {
     return `${loadedMb}/${totalMb} MB…`;
   };
 
-  const setProgress = (loaded, total, labelOverride) => {
-    const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+  let maxReportedBytes = 0;
+  const setProgress = (loaded, total, labelOverride, allowReset = false) => {
+    const safeLoaded = allowReset ? loaded : Math.max(maxReportedBytes, loaded);
+    maxReportedBytes = safeLoaded;
+    const pct = total > 0 ? Math.min(99, Math.round((safeLoaded / total) * 100)) : 0;
     mgr.updateJob(job.id, {
-      loadedBytes: loaded,
+      loadedBytes: safeLoaded,
       pct,
-      statusText: labelOverride || formatSpeedEta(loaded, total)
+      statusText: labelOverride || formatSpeedEta(safeLoaded, total)
     });
   };
 
@@ -6398,14 +6401,25 @@ window.zyMvSubmitUpload = function() {
       }
 
       uploadId = initRes.upload_id;
+      const SAFE_PROXY_CHUNK = 768 * 1024; // Guaranteed under Nginx default 1 MB client_max_body_size
       const serverChunk = Number(initRes.chunk_size) || (4 * 1024 * 1024);
       const serverMaxChunk = Number(initRes.max_chunk_size) || (8 * 1024 * 1024);
-      let maxAllowedChunk = serverMaxChunk;
-      let currentChunkSize = file.size < 12 * 1024 * 1024
-        ? Math.min(2 * 1024 * 1024, serverChunk)
-        : serverChunk;
-      let targetConcurrency = Math.max(2, Math.min(6, Number(initRes.concurrency) || 4));
-      let hitProxyLimit = false;
+
+      // Check cached proxy body-size capability so we NEVER trigger full-file 413 restarts
+      let cachedCap = 0;
+      try { cachedCap = parseInt(sessionStorage.getItem('zy_mv_proxy_cap') || '0', 10) || 0; } catch (_) {}
+
+      let maxAllowedChunk = cachedCap > 0 ? Math.min(serverMaxChunk, cachedCap) : SAFE_PROXY_CHUNK;
+      let currentChunkSize = cachedCap >= 4 * 1024 * 1024
+        ? Math.min(serverChunk, maxAllowedChunk)
+        : SAFE_PROXY_CHUNK;
+      let targetConcurrency = cachedCap >= 4 * 1024 * 1024
+        ? Math.max(2, Math.min(6, Number(initRes.concurrency) || 4))
+        : 6; // 6 parallel 768KB streams = 4.5MB simultaneously in flight with ZERO 413 errors!
+      let hitProxyLimit = cachedCap > 0 && cachedCap <= SAFE_PROXY_CHUNK;
+      // For larger files (> 6 MB) when proxy cap is unknown, run ONE single 3 MB probe chunk while other workers blast 768 KB
+      let needsSingleProbe = (cachedCap === 0 && file.size > 6 * 1024 * 1024);
+      let probeDispatched = false;
 
       let nextCursor = 0;
       const retryQueue = [];
@@ -6444,7 +6458,8 @@ window.zyMvSubmitUpload = function() {
 
         xhr.upload.onprogress = (ev) => {
           if (aborted) return;
-          const loadedNow = ev.lengthComputable ? Math.min(len, ev.loaded) : 0;
+          // Cap unconfirmed socket-buffer progress at 85% of chunk until server returns 200 OK
+          const loadedNow = ev.lengthComputable ? Math.min(Math.round(len * 0.85), ev.loaded) : 0;
           inFlightBytes.set(wid, loadedNow);
           refreshProgress();
         };
@@ -6486,10 +6501,17 @@ window.zyMvSubmitUpload = function() {
         if (retryQueue.length > 0) return retryQueue.shift();
         if (nextCursor >= file.size) return null;
         const start = nextCursor;
-        const size = Math.min(currentChunkSize, maxAllowedChunk);
+        let size = Math.min(currentChunkSize, maxAllowedChunk);
+        let isProbe = false;
+        // Dispatch exactly ONE 3 MB probe chunk (after the first 768 KB chunk) to detect 512M Nginx without risking full-file retries
+        if (needsSingleProbe && !probeDispatched && start > 0 && (file.size - start) >= 3 * 1024 * 1024) {
+          probeDispatched = true;
+          isProbe = true;
+          size = 3 * 1024 * 1024;
+        }
         const end = Math.min(file.size, start + size);
         nextCursor = end;
-        return { start, end, attempts: 0 };
+        return { start, end, attempts: 0, isProbe };
       };
 
       const workerPromises = [];
@@ -6511,27 +6533,37 @@ window.zyMvSubmitUpload = function() {
             completedBytes += (task.end - task.start);
             refreshProgress();
 
+            // Probe succeeded! Proxy supports large chunks — unlock full 4–8 MB turbo mode for this & future uploads
+            if (task.isProbe) {
+              needsSingleProbe = false;
+              hitProxyLimit = false;
+              maxAllowedChunk = serverMaxChunk;
+              currentChunkSize = Math.min(serverChunk, serverMaxChunk);
+              try { sessionStorage.setItem('zy_mv_proxy_cap', String(serverMaxChunk)); } catch (_) {}
+            }
+
             const totalBps = smoothedBps || res.bps;
-            if (!hitProxyLimit && totalBps > 4 * 1024 * 1024 && currentChunkSize < maxAllowedChunk) {
+            if (!hitProxyLimit && maxAllowedChunk > SAFE_PROXY_CHUNK && totalBps > 4 * 1024 * 1024 && currentChunkSize < maxAllowedChunk) {
               currentChunkSize = Math.min(maxAllowedChunk, 8 * 1024 * 1024);
-            } else if (totalBps > 0 && totalBps < 350 * 1024 && currentChunkSize > 1024 * 1024) {
+            } else if (!hitProxyLimit && totalBps > 0 && totalBps < 350 * 1024 && currentChunkSize > 1024 * 1024) {
               currentChunkSize = 1024 * 1024;
             }
           } catch (chunkErr) {
             if (aborted || chunkErr.aborted) return;
 
+            // Proxy 413 Payload Too Large: jump STRAIGHT to safe 768 KB (never retry > 1 MB!) & cache for session
             if (chunkErr.httpStatus === 413 && (task.end - task.start) > 512 * 1024) {
               hitProxyLimit = true;
+              needsSingleProbe = false;
               const prevLen = task.end - task.start;
-              const nextLimit = prevLen > 2 * 1024 * 1024
-                ? 1536 * 1024
-                : (prevLen > 800 * 1024 ? 768 * 1024 : 512 * 1024);
+              const nextLimit = prevLen > SAFE_PROXY_CHUNK ? SAFE_PROXY_CHUNK : 512 * 1024;
               maxAllowedChunk = Math.min(maxAllowedChunk, nextLimit);
-              currentChunkSize = Math.min(currentChunkSize, maxAllowedChunk);
+              currentChunkSize = maxAllowedChunk;
               targetConcurrency = 6;
+              try { sessionStorage.setItem('zy_mv_proxy_cap', String(maxAllowedChunk)); } catch (_) {}
               const pieces = [];
               for (let p = task.start; p < task.end; p += maxAllowedChunk) {
-                pieces.push({ start: p, end: Math.min(task.end, p + maxAllowedChunk), attempts: 0 });
+                pieces.push({ start: p, end: Math.min(task.end, p + maxAllowedChunk), attempts: 0, isProbe: false });
               }
               for (let idx = pieces.length - 1; idx >= 0; idx--) retryQueue.unshift(pieces[idx]);
               ensureWorkers();
@@ -6591,13 +6623,13 @@ window.zyMvSubmitUpload = function() {
     }
   };
 
-  // Run detached in background: parallel raw-binary streaming for videos > 2 MB
-  if (file && file.size > 2 * 1024 * 1024) {
+  // Use parallel raw-binary streaming for any video > 768 KB (avoids single-request 413 restarts on 1 MB proxies)
+  if (file && file.size > 768 * 1024) {
     runParallelUpload();
     return;
   }
 
-  // Instant 1-request background path for text/links-only or small videos (<= 2 MB); auto-switches to parallel on HTTP 413
+  // Instant 1-request background path ONLY for text/links-only or tiny videos (<= 768 KB)
   let singleAborted = false;
   const fd = new FormData();
   fd.append('app_name', appName);
@@ -6619,12 +6651,13 @@ window.zyMvSubmitUpload = function() {
 
   xhr.upload.onprogress = (ev) => {
     if (singleAborted || !ev.lengthComputable) return;
-    setProgress(ev.loaded, ev.total);
+    setProgress(Math.min(Math.round(ev.total * 0.9), ev.loaded), ev.total);
   };
 
   xhr.onload = async () => {
     if (singleAborted) return;
     if (xhr.status === 413 && file) {
+      try { sessionStorage.setItem('zy_mv_proxy_cap', String(512 * 1024)); } catch (_) {}
       runParallelUpload();
       return;
     }

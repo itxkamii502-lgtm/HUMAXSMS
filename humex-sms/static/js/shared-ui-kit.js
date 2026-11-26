@@ -5112,10 +5112,11 @@ window.zyRenderAppLinksPager = function(opts) {
     return { username: String(u), id: id ? `#${id}` : '' };
   }
 
-  let _playerTimers = { wm: null, exp: null };
+  let _playerTimers = { wm: null, exp: null, stall: null };
   function clearPlayerTimers() {
     if (_playerTimers.wm) { clearInterval(_playerTimers.wm); _playerTimers.wm = null; }
     if (_playerTimers.exp) { clearInterval(_playerTimers.exp); _playerTimers.exp = null; }
+    if (_playerTimers.stall) { clearTimeout(_playerTimers.stall); _playerTimers.stall = null; }
   }
 
   window.zyCloseSecureMethodPlayer = function() {
@@ -5262,71 +5263,136 @@ window.zyRenderAppLinksPager = function(opts) {
       stage.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
     }
     if (video) {
-      let stallRecoverTimer = null;
       let retryCount = 0;
+      let lastProgressAt = Date.now();
+      let lastBufferedEnd = 0;
+      let isClosing = false;
+
+      const getBufferedAhead = () => {
+        try {
+          const b = video.buffered;
+          if (!b || !b.length) return 0;
+          const t = video.currentTime || 0;
+          for (let i = 0; i < b.length; i++) {
+            if (b.start(i) <= t + 0.5 && b.end(i) >= t) {
+              return Math.max(0, b.end(i) - t);
+            }
+          }
+          return 0;
+        } catch (_) { return 0; }
+      };
+
+      const markProgress = () => {
+        lastProgressAt = Date.now();
+        try {
+          if (video.buffered && video.buffered.length) {
+            lastBufferedEnd = video.buffered.end(video.buffered.length - 1);
+          }
+        } catch (_) {}
+      };
+
       const showLoader = (msg) => {
-        if (!loader) return;
+        if (!loader || isClosing) return;
         loader.style.display = 'flex';
         const txtEl = loader.querySelector('#zy-mv-video-loader-txt');
         if (txtEl && msg) txtEl.textContent = msg;
       };
       const hideLoader = () => {
-        if (stallRecoverTimer) { clearTimeout(stallRecoverTimer); stallRecoverTimer = null; }
+        if (_playerTimers.stall) { clearTimeout(_playerTimers.stall); _playerTimers.stall = null; }
         if (loader) loader.style.display = 'none';
       };
-      const armStallRecovery = (delayMs = 8000) => {
-        if (stallRecoverTimer) clearTimeout(stallRecoverTimer);
-        stallRecoverTimer = setTimeout(() => {
-          if (document.body.contains(video) && video.readyState < 3 && retryCount < 2) {
-            retryCount += 1;
-            reloadStreamAt(video.currentTime || 0);
-          }
-        }, delayMs);
-      };
-      const reloadStreamAt = (resumeSec) => {
-        if (!document.body.contains(video)) return;
+
+      const reloadStreamAt = (resumeSec, forceFreshUrl = false) => {
+        if (isClosing || !document.body.contains(video)) return;
         const sep = streamUrl.includes('?') ? '&' : '?';
-        const nextUrl = `${streamUrl}${sep}_r=${Date.now()}`;
-        showLoader('Reconnecting video stream…');
+        // Preserve clean streamUrl on soft recovery so browser reuses cached HTTP 206 byte ranges!
+        const nextUrl = forceFreshUrl ? `${streamUrl}${sep}_r=${Date.now()}` : streamUrl;
+        showLoader('Reconnecting video…');
+        markProgress();
         video.src = nextUrl;
         video.load();
-        armStallRecovery(10000);
         const onReadyResume = () => {
           video.removeEventListener('loadedmetadata', onReadyResume);
           if (resumeSec > 0.5 && isFinite(video.duration) && resumeSec < video.duration - 0.5) {
             try { video.currentTime = resumeSec; } catch (_) {}
           }
-          video.play().catch(() => {});
+          video.play().catch(() => { hideLoader(); });
         };
         video.addEventListener('loadedmetadata', onReadyResume);
       };
 
-      armStallRecovery(12000);
+      const scheduleDeadStreamCheck = () => {
+        if (_playerTimers.stall) clearTimeout(_playerTimers.stall);
+        _playerTimers.stall = setTimeout(() => {
+          _playerTimers.stall = null;
+          if (isClosing || !document.body.contains(video)) return;
+          // Never interrupt a paused/ended video, a ready video, or a video actively downloading bytes!
+          if (video.paused || video.ended || video.readyState >= 3 || getBufferedAhead() >= 2) {
+            hideLoader();
+            return;
+          }
+          const idleMs = Date.now() - lastProgressAt;
+          if (idleMs < 20000) {
+            // Bytes are still arriving normally — re-check later without killing the download
+            scheduleDeadStreamCheck();
+            return;
+          }
+          if (retryCount < 2) {
+            retryCount += 1;
+            reloadStreamAt(video.currentTime || 0, false);
+          }
+        }, 12000);
+      };
+
       video.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
+      video.addEventListener('progress', () => {
+        markProgress();
+        if (video.readyState >= 2 || getBufferedAhead() >= 1.5) hideLoader();
+      });
+      video.addEventListener('loadedmetadata', () => {
+        markProgress();
+        // If browser autoplay policy keeps the video paused, hide the spinner immediately so user can tap Play
+        if (video.paused) {
+          video.play().catch(() => { hideLoader(); });
+        }
+      });
+      video.addEventListener('loadeddata', () => { markProgress(); hideLoader(); });
       video.addEventListener('canplay', () => {
         retryCount = 0;
+        markProgress();
         hideLoader();
         if (video.paused && video.currentTime === 0) {
           video.play().catch(() => {});
         }
       });
-      video.addEventListener('playing', () => { retryCount = 0; hideLoader(); });
-      video.addEventListener('loadeddata', hideLoader);
+      video.addEventListener('playing', () => { retryCount = 0; markProgress(); hideLoader(); });
+      video.addEventListener('timeupdate', () => {
+        markProgress();
+        if (loader && loader.style.display !== 'none') hideLoader();
+      });
+      video.addEventListener('pause', () => {
+        if (_playerTimers.stall) { clearTimeout(_playerTimers.stall); _playerTimers.stall = null; }
+        if (video.readyState >= 2) hideLoader();
+      });
       video.addEventListener('waiting', () => {
-        showLoader('Buffering video…');
-        armStallRecovery(8000);
+        if (video.paused || video.ended) return;
+        showLoader('Buffering…');
+        scheduleDeadStreamCheck();
       });
       video.addEventListener('stalled', () => {
-        if (video.readyState < 3) {
-          showLoader('Buffering video…');
-          armStallRecovery(8000);
+        if (video.paused || video.ended || video.readyState >= 3 || getBufferedAhead() >= 2) return;
+        // Only show buffering if genuinely stalled with no recent progress
+        if (Date.now() - lastProgressAt > 4000) {
+          showLoader('Buffering…');
         }
+        scheduleDeadStreamCheck();
       });
       video.addEventListener('error', () => {
-        if (stallRecoverTimer) { clearTimeout(stallRecoverTimer); stallRecoverTimer = null; }
+        if (isClosing || !document.body.contains(video) || !video.getAttribute('src')) return;
+        if (_playerTimers.stall) { clearTimeout(_playerTimers.stall); _playerTimers.stall = null; }
         if (retryCount < 1 && !(!isPreview && expiresAt && mvFormatCountdown(expiresAt).expired)) {
           retryCount += 1;
-          reloadStreamAt(video.currentTime || 0);
+          reloadStreamAt(video.currentTime || 0, false);
           return;
         }
         if (loader) {
@@ -5337,7 +5403,7 @@ window.zyRenderAppLinksPager = function(opts) {
             rbtn.addEventListener('click', () => {
               retryCount = 0;
               loader.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span id="zy-mv-video-loader-txt">Reconnecting video…</span>`;
-              reloadStreamAt(video.currentTime || 0);
+              reloadStreamAt(video.currentTime || 0, true);
             });
           }
         }
@@ -5345,6 +5411,9 @@ window.zyRenderAppLinksPager = function(opts) {
           toast('Video stream unavailable or access expired.', 'error');
         }
       });
+
+      const _markClosing = () => { isClosing = true; };
+      if (closeBtn) closeBtn.addEventListener('click', _markClosing, true);
     }
     if (fsBtn && stage) {
       fsBtn.addEventListener('click', () => {

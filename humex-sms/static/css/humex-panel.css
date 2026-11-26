@@ -20626,6 +20626,7 @@ body.dark .zy-chat-more-mv-item {
   font-size: 13px;
   font-weight: 700;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
 }
 .zy-mv-video-retry-btn {
   display: inline-flex;
@@ -20639,6 +20640,7 @@ body.dark .zy-chat-more-mv-item {
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+  pointer-events: auto;
 }
 .zy-mv-video-retry-btn:hover {
   background: #6d28d9;

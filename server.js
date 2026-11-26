@@ -27147,6 +27147,25 @@ server.prependListener('upgrade', (req, socket) => {
 });
 
 const wsConnPerIp = new Map();
+// Clean up half-open/zombie WebSockets every 25s so mobile network switches never exhaust wsConnPerIp
+const wsLivenessSweep = setInterval(() => {
+  try {
+    wss.clients.forEach((sock) => {
+      if (sock.readyState !== 1) return;
+      if (sock.isAlive === false) {
+        sock._missedPongs = (sock._missedPongs || 0) + 1;
+        if (sock._missedPongs >= 2) {
+          try { sock.terminate(); } catch (_) {}
+          return;
+        }
+      }
+      sock.isAlive = false;
+      try { sock.ping(); } catch (_) {}
+    });
+  } catch (_) {}
+}, 25000);
+if (wsLivenessSweep && typeof wsLivenessSweep.unref === 'function') wsLivenessSweep.unref();
+
 function wsOriginAllowed(req) {
   const origin = req && req.headers && req.headers.origin;
   if (!origin) return true; // non-browser clients
@@ -27166,8 +27185,14 @@ wss.on('connection', (ws, req) => {
   const user = req ? getSessionUser(req) : null;
   if (!user || !wsOriginAllowed(req)) { try { ws.close(1008, 'unauthorized'); } catch (e) { /* ignore */ } return; }
   const open = wsConnPerIp.get(ip) || 0;
-  if (open >= 40) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
+  if (open >= 150) { try { ws.close(1013, 'too many connections'); } catch (e) { /* ignore */ } return; }
   wsConnPerIp.set(ip, open + 1);
+  ws.isAlive = true;
+  ws._missedPongs = 0;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    ws._missedPongs = 0;
+  });
 
   const actor = resolveLiveChatActor(user);
   const actorKey = actor ? actor.key : chatActorKey(user.role, user.id);
@@ -27192,11 +27217,19 @@ wss.on('connection', (ws, req) => {
   const now = new Date().toISOString();
   ws.send(JSON.stringify({ type: 'connected', time: now, timestamp: now, actor_key: actorKey }));
 
-  // Live Chat inbound WebSocket signals (typing & read receipts)
+  // Live Chat inbound WebSocket signals (typing, read receipts, and fast app-level ping/pong)
   ws.on('message', (raw) => {
+    ws.isAlive = true;
+    ws._missedPongs = 0;
     try {
       const msg = JSON.parse(String(raw || ''));
       if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'ping') {
+        if (ws.readyState === 1) {
+          try { ws.send(JSON.stringify({ type: 'pong', ts: Date.now() })); } catch (_) {}
+        }
+        return;
+      }
       const curActor = resolveLiveChatActor(user);
       if (!curActor) return;
 
@@ -27242,17 +27275,19 @@ wss.on('connection', (ws, req) => {
       const live = liveTrafficStats();
       const cachedLog = DB_CACHE.get('sms_log');
       const totalCount = Array.isArray(cachedLog) ? cachedLog.length : (readDb('sms_log') || []).length;
-      ws.send(JSON.stringify({
-        type: 'heartbeat',
-        time: ts,
-        timestamp: ts,
-        mps: live.mps,
-        total: totalCount,
-        success_rate: live.success_rate,
-        dlr: live.dlr
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: 'heartbeat',
+          time: ts,
+          timestamp: ts,
+          mps: live.mps,
+          total: totalCount,
+          success_rate: live.success_rate,
+          dlr: live.dlr
+        }));
+      } catch (_) {}
     }
-  }, 3000);
+  }, 10000);
   ws.on('close', () => {
     clearInterval(interval);
     wsConnPerIp.set(ip, Math.max(0, (wsConnPerIp.get(ip) || 1) - 1));
@@ -28817,8 +28852,11 @@ function mp4NeedsFastStart(filePath) {
   }
 }
 
+const fastStartCheckedFiles = new Set();
 function optimizeMp4FastStartInBackground(filePath) {
-  if (!filePath || !mp4NeedsFastStart(filePath)) return;
+  if (!filePath || fastStartCheckedFiles.has(filePath)) return;
+  fastStartCheckedFiles.add(filePath);
+  if (!mp4NeedsFastStart(filePath)) return;
   const tmpOut = `${filePath}.faststart.mp4`;
   execFile('ffmpeg', ['-y', '-loglevel', 'error', '-i', filePath, '-c', 'copy', '-movflags', '+faststart', tmpOut], { timeout: 45000 }, (err) => {
     if (err) {
@@ -28900,9 +28938,14 @@ function handleMethodVaultStream(req, res) {
   const range = req.headers.range;
   const isHead = req.method.toUpperCase() === 'HEAD';
 
+  // Lazily optimize any pre-existing MP4 whose moov atom is at EOF (deduplicated once per file)
+  optimizeMp4FastStartInBackground(filePath);
+
   if (req.socket && typeof req.socket.setNoDelay === 'function') {
     try { req.socket.setNoDelay(true); } catch (_) {}
   }
+  try { req.setTimeout(0); } catch (_) {}
+  try { res.setTimeout(0); } catch (_) {}
 
   // Private short-TTL caching + stable ETag/Last-Modified enables Chrome/Safari Range buffer continuity
   // without ever allowing shared/proxy caching or breaking timed expiration.
@@ -28913,6 +28956,10 @@ function handleMethodVaultStream(req, res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Accel-Buffering', 'no');
   res.setHeader('Accept-Ranges', 'bytes');
+
+  if (!range && req.headers['if-none-match'] && String(req.headers['if-none-match']).trim() === etag) {
+    return res.status(304).end();
+  }
 
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
@@ -28936,9 +28983,10 @@ function handleMethodVaultStream(req, res) {
       if (match[2]) {
         end = Math.min(parseInt(match[2], 10), fileSize - 1);
       } else {
-        // Open-ended Range (bytes=start-): stream continuously up to 32 MB (full file for typical videos)
-        // so TCP ramps to full line speed instead of stalling every 1 MB!
-        const maxOpenWindow = 32 * 1024 * 1024;
+        // Balanced open-ended Range window:
+        // - 2 MB from byte 0 -> instant metadata + first ~10-15s playback without saturating TCP or proxy caps
+        // - 4 MB for subsequent ranges -> smooth line-rate continuous streaming with zero proxy stalling
+        const maxOpenWindow = start === 0 ? (2 * 1024 * 1024) : (4 * 1024 * 1024);
         end = Math.min(start + maxOpenWindow - 1, fileSize - 1);
       }
     }

@@ -722,8 +722,14 @@
   function updateConnectionStatus() {
     const el = document.getElementById('zy-chat-conn-status');
     if (!el) return;
-    el.textContent = state.wsConnected ? 'Live' : 'Reconnecting...';
-    el.className = `zy-chat-conn ${state.wsConnected ? 'is-live' : 'is-warn'}`;
+    if (state.wsConnected) {
+      el.textContent = 'Live';
+      el.className = 'zy-chat-conn is-live';
+    } else {
+      const everUp = Boolean(window.ZySharedWs && typeof window.ZySharedWs.everConnected === 'function' && window.ZySharedWs.everConnected());
+      el.textContent = everUp ? 'Reconnecting...' : 'Connecting...';
+      el.className = 'zy-chat-conn is-warn';
+    }
   }
 
   function handleWsEvent(ev) {
@@ -4442,7 +4448,7 @@
                 <span>Panel</span>
               </button>
               <span class="zy-chat-left-title">Live Chat</span>
-              <span class="zy-chat-conn ${state.wsConnected ? 'is-live' : 'is-warn'}" id="zy-chat-conn-status">${state.wsConnected ? 'Live' : 'Reconnecting...'}</span>
+              <span class="zy-chat-conn ${state.wsConnected ? 'is-live' : 'is-warn'}" id="zy-chat-conn-status">${state.wsConnected ? 'Live' : ((window.ZySharedWs && typeof window.ZySharedWs.everConnected === 'function' && window.ZySharedWs.everConnected()) ? 'Reconnecting...' : 'Connecting...')}</span>
             </div>
             <div class="zy-chat-head-create-btns">
               ${isAdminRole ? `

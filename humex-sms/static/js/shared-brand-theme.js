@@ -1114,6 +1114,8 @@
       let attempts = 0;
       let everConnected = false;
       let reconnectTimer = null;
+      let pongWatchTimer = null;
+      let lastActivityAt = 0;
       let stopped = false;
 
       function isLoginPage() {
@@ -1125,6 +1127,56 @@
         statusListeners.forEach(fn => {
           try { fn(isUp, wasReconnect); } catch (_) {}
         });
+      }
+
+      function clearPongWatch() {
+        if (pongWatchTimer) {
+          clearTimeout(pongWatchTimer);
+          pongWatchTimer = null;
+        }
+      }
+
+      function forceReconnectNow() {
+        if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
+        clearTimeout(reconnectTimer);
+        clearPongWatch();
+        attempts = 0;
+        if (ws) {
+          const old = ws;
+          ws = null;
+          connected = false;
+          try { old.onclose = null; old.onerror = null; old.close(); } catch (_) {}
+        }
+        connect();
+      }
+
+      function probeOrReconnect() {
+        if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          clearTimeout(reconnectTimer);
+          attempts = 0;
+          connect();
+          return;
+        }
+        if (ws.readyState === WebSocket.OPEN) {
+          const idleMs = Date.now() - lastActivityAt;
+          if (idleMs > 18000) {
+            // Verify half-open mobile/NAT socket with fast app-level ping
+            try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch (_) {
+              forceReconnectNow();
+              return;
+            }
+            clearPongWatch();
+            const probeStart = Date.now();
+            pongWatchTimer = setTimeout(() => {
+              pongWatchTimer = null;
+              if (lastActivityAt < probeStart) {
+                forceReconnectNow();
+              }
+            }, 4000);
+          }
+        }
       }
 
       function connect() {
@@ -1139,18 +1191,23 @@
             connected = true;
             everConnected = true;
             attempts = 0;
+            lastActivityAt = Date.now();
+            clearPongWatch();
             notifyStatus(true, wasReconnect);
           };
           sock.onmessage = function (ev) {
+            lastActivityAt = Date.now();
+            clearPongWatch();
             let payload;
             try { payload = JSON.parse(ev.data); } catch (_) { return; }
-            if (!payload || typeof payload !== 'object') return;
+            if (!payload || typeof payload !== 'object' || payload.type === 'pong') return;
             msgListeners.forEach(fn => {
               try { fn(payload); } catch (_) {}
             });
           };
           sock.onclose = function (ev) {
             connected = false;
+            clearPongWatch();
             if (ws === sock) ws = null;
             notifyStatus(false, false);
             if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
@@ -1159,7 +1216,7 @@
               stopped = true;
               return;
             }
-            const delay = Math.min(15000, 1500 * Math.pow(1.6, Math.min(attempts++, 6)));
+            const delay = Math.min(5000, 600 * Math.pow(1.6, Math.min(attempts++, 5)));
             clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(connect, delay);
           };
@@ -1169,9 +1226,26 @@
         } catch (_) {}
       }
 
+      // Instant recovery when user wakes phone, switches back to tab, or network comes back online
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) probeOrReconnect();
+      });
+      window.addEventListener('online', function () {
+        clearTimeout(reconnectTimer);
+        attempts = 0;
+        connect();
+      });
+      window.addEventListener('pageshow', function () {
+        probeOrReconnect();
+      });
+      setInterval(function () {
+        if (!document.hidden) probeOrReconnect();
+      }, 20000);
+
       window.ZySharedWs = {
         connect,
         isConnected: () => connected && Boolean(ws && ws.readyState === WebSocket.OPEN),
+        everConnected: () => everConnected,
         send: (obj) => {
           if (ws && ws.readyState === WebSocket.OPEN) {
             try { ws.send(JSON.stringify(obj)); return true; } catch (_) {}

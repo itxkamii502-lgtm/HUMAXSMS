@@ -3321,6 +3321,9 @@ async function pgClientPaymentRequests(activeTab = 'all') {
           <div class="page-subtitle">Downline Client PKR payout approvals, receipt vouchers &amp; weekly PKR payout budget · FX: 1 USD = Rs. ${zyFmtMoney(fx, 2)} PKR</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-success btn-sm" onclick="loadPage('client-payment-tracker')">
+            <i class="fas fa-bullseye"></i> Live Payment Tracker
+          </button>
           <button type="button" class="btn btn-primary btn-sm" onclick="pgClientPaymentRequests('${zyEsc(activeTab)}')">
             <i class="fas fa-rotate"></i> Refresh
           </button>
@@ -3555,6 +3558,676 @@ window.zyAgtSubmitClientPayoutAction = async function(id, status) {
     toast(err.message || 'Failed to update payout request', 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Mark Paid'; }
   }
+};
+
+/* ═══ CLIENT LIVE PAYMENT TRACKER (Weekly Mon–Sun · API Only) ═══ */
+window._zyCptState = {
+  weekStart: null,
+  data: null,
+  search: '',
+  hideZero: false,
+  autoLive: true,
+  timer: null,
+  loading: false
+};
+
+window.zyCptStopLiveTimer = function() {
+  if (window._zyCptState && window._zyCptState.timer) {
+    clearInterval(window._zyCptState.timer);
+    window._zyCptState.timer = null;
+  }
+};
+
+window.zyCptStartLiveTimer = function() {
+  window.zyCptStopLiveTimer();
+  if (!window._zyCptState.autoLive) return;
+  window._zyCptState.timer = setInterval(() => {
+    const root = document.getElementById('zy-cpt-root');
+    if (!root) {
+      window.zyCptStopLiveTimer();
+      return;
+    }
+    if (document.hidden) return;
+    // Skip silent refresh while a modal is open so we don't disrupt typing
+    const modalOv = document.getElementById('modal-overlay');
+    if (modalOv && modalOv.classList.contains('open')) return;
+    zyCptFetchAndRender(window._zyCptState.weekStart, true);
+  }, 15000);
+};
+
+async function pgClientPaymentTracker(weekStart = null) {
+  const c = document.getElementById('page-content');
+  zyCrumb(['PAYMENTS', 'Client Payment Tracker']);
+  window.zyCptStopLiveTimer();
+  if (weekStart !== undefined && weekStart !== null) {
+    window._zyCptState.weekStart = weekStart || null;
+  }
+  c.innerHTML = `<div id="zy-cpt-root" class="zy-cpt-root"><div class="zy-loading">Loading live API payment tracker…</div></div>`;
+  await zyCptFetchAndRender(window._zyCptState.weekStart, false);
+  window.zyCptStartLiveTimer();
+}
+
+async function zyCptFetchAndRender(weekStart = null, silent = false) {
+  const root = document.getElementById('zy-cpt-root');
+  if (!root || window._zyCptState.loading) return;
+  window._zyCptState.loading = true;
+  try {
+    const qs = weekStart ? `?week_start=${encodeURIComponent(weekStart)}` : '';
+    const data = await apiFetch(`/api/agent/client-payment-tracker${qs}`);
+    if (!data || data.error) {
+      if (!silent) {
+        root.innerHTML = `<div class="zy-panel"><div class="zy-panel-body" style="padding:28px;text-align:center;color:var(--sp-danger);">${zyEsc(data?.error || 'Failed to load live payment tracker.')}</div></div>`;
+      }
+      return;
+    }
+    window._zyCptState.data = data;
+    window._zyCptState.weekStart = data.week_start || weekStart || null;
+    zyCptRender(silent);
+  } catch (err) {
+    if (!silent) {
+      root.innerHTML = `<div class="zy-panel"><div class="zy-panel-body" style="padding:28px;text-align:center;color:var(--sp-danger);">Failed to load Client Payment Tracker: ${zyEsc(err.message)}</div></div>`;
+    }
+  } finally {
+    window._zyCptState.loading = false;
+  }
+}
+
+function zyCptFmtPkr(val) {
+  const n = Number(val || 0);
+  if (!Number.isFinite(n)) return 'Rs. 0';
+  return 'Rs. ' + n.toLocaleString(undefined, { minimumFractionDigits: n % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 });
+}
+
+function zyCptFmtDayCell(val, sms) {
+  const n = Number(val || 0);
+  const cnt = Number(sms || 0);
+  if (n <= 0 && cnt <= 0) {
+    return `<span class="zy-cpt-zero">—</span>`;
+  }
+  return `<div class="zy-cpt-day-amt">${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div><div class="zy-cpt-day-sms">${cnt} SMS</div>`;
+}
+
+function zyCptRender(preserveFocus = false) {
+  const root = document.getElementById('zy-cpt-root');
+  const d = window._zyCptState.data;
+  if (!root || !d) return;
+
+  const activeElId = preserveFocus ? document.activeElement?.id : null;
+  const activeSelStart = preserveFocus && document.activeElement && typeof document.activeElement.selectionStart === 'number'
+    ? document.activeElement.selectionStart : null;
+  const prevScrolls = {};
+  root.querySelectorAll('.zy-cpt-table-scroll').forEach((el, idx) => {
+    prevScrolls[idx] = el.scrollLeft;
+  });
+
+  const target = Number(d.target_pkr || 0);
+  const days = Array.isArray(d.days) ? d.days : [];
+  const searchQ = String(window._zyCptState.search || '').trim().toLowerCase();
+  const hideZero = Boolean(window._zyCptState.hideZero);
+
+  const matchSearch = r => !searchQ || String(r.username || '').toLowerCase().includes(searchQ) || String(r.full_name || '').toLowerCase().includes(searchQ);
+  const reachedAll = Array.isArray(d.reached_clients) ? d.reached_clients : [];
+  const trackingAll = Array.isArray(d.tracking_clients) ? d.tracking_clients : [];
+
+  const reached = reachedAll.filter(matchSearch);
+  const tracking = trackingAll.filter(r => matchSearch(r) && (!hideZero || Number(r.week_total_pkr || 0) > 0 || Number(r.weekly_unpaid_payable_pkr || 0) > 0));
+
+  const sumR = d.summary?.reached || {};
+  const sumT = d.summary?.tracking || {};
+  const sumO = d.summary?.overall || {};
+
+  const weekOptions = (d.available_weeks || []).map(w =>
+    `<option value="${zyEsc(w.week_start)}" ${w.week_start === d.week_start ? 'selected' : ''}>${zyEsc(w.label)}</option>`
+  ).join('');
+
+  const lastSyncStr = d.server_time
+    ? String(d.server_time).replace('T', ' ').slice(11, 19) + ' UTC'
+    : 'Live';
+
+  const dayHeadersHtml = days.map(day => `
+    <th class="zy-cpt-th-day ${day.is_today ? 'is-today' : ''} ${day.is_future ? 'is-future' : ''}">
+      <div class="zy-cpt-th-day-name">${zyEsc(day.label)}${day.is_today ? ' <span class="zy-cpt-today-dot" title="Today (Live)"></span>' : ''}</div>
+      <div class="zy-cpt-th-day-date">${zyEsc(day.short_date)}</div>
+    </th>`).join('');
+
+  const buildRow = (r, isTopBox) => {
+    const initials = String(r.username || 'C').slice(0, 2).toUpperCase();
+    const daysCells = days.map((day, idx) => `
+      <td class="zy-cpt-td-day ${day.is_today ? 'is-today' : ''} ${day.is_future ? 'is-future' : ''}">
+        ${zyCptFmtDayCell(r.days_pkr?.[idx], r.days_sms?.[idx])}
+      </td>`).join('');
+
+    const pct = Math.min(100, Math.max(0, Number(r.progress_pct || 0)));
+    const hasPendingReq = Array.isArray(r.pending_requests) && r.pending_requests.length > 0;
+    const firstPending = hasPendingReq ? r.pending_requests[0] : null;
+    const canPayDirect = Number(r.weekly_unpaid_payable_pkr || 0) > 0.01;
+
+    let statusHtml = '';
+    if (isTopBox) {
+      if (r.status === 'paid') {
+        statusHtml = `
+          <span class="zy-cpt-badge is-paid"><i class="fas fa-circle-check"></i> Paid</span>
+          ${r.week_paid_pkr > 0 ? `<div class="zy-cpt-sub-note">Settled ${zyCptFmtPkr(r.week_paid_pkr)}</div>` : ''}`;
+      } else if (r.status === 'partial') {
+        statusHtml = `
+          <span class="zy-cpt-badge is-partial"><i class="fas fa-coins"></i> Partial Paid</span>
+          <div class="zy-cpt-sub-note">Paid ${zyCptFmtPkr(r.week_paid_pkr)} · Unpaid <strong>${zyCptFmtPkr(r.week_remaining_unpaid_pkr)}</strong></div>`;
+      } else if (hasPendingReq) {
+        statusHtml = `
+          <span class="zy-cpt-badge is-pending"><i class="fas fa-clock"></i> Req #${Number(firstPending.id)}</span>
+          <div class="zy-cpt-sub-note">Requested ${zyCptFmtPkr(firstPending.amount_pkr)}</div>`;
+      } else {
+        statusHtml = `
+          <span class="zy-cpt-badge is-ready"><i class="fas fa-bolt"></i> Ready to Pay</span>
+          <div class="zy-cpt-sub-note">Unpaid API: <strong>${zyCptFmtPkr(r.weekly_unpaid_payable_pkr)}</strong></div>`;
+      }
+    } else {
+      statusHtml = `
+        <div class="zy-cpt-prog-wrap">
+          <div class="zy-cpt-prog-meta">
+            <span>${Number(r.progress_pct || 0).toFixed(1)}%</span>
+            <span>${target > 0 ? `${zyCptFmtPkr(r.remaining_to_target_pkr)} left` : 'Tracking'}</span>
+          </div>
+          <div class="zy-cpt-prog-track"><div class="zy-cpt-prog-fill" style="width:${pct}%;"></div></div>
+          ${hasPendingReq ? `<div class="zy-cpt-sub-note" style="color:#d97706;">Pending Req #${Number(firstPending.id)} (${zyCptFmtPkr(firstPending.amount_pkr)})</div>` : (r.week_paid_pkr > 0 ? `<div class="zy-cpt-sub-note" style="color:#059669;">Paid: ${zyCptFmtPkr(r.week_paid_pkr)}</div>` : '')}
+        </div>`;
+    }
+
+    let actionHtml = '';
+    if (isTopBox) {
+      if (canPayDirect || hasPendingReq) {
+        actionHtml = `
+          <button type="button" class="btn btn-success btn-xs zy-cpt-pay-btn" onclick="zyCptOpenPayModal(${Number(r.client_id)})">
+            <i class="fas fa-money-bill-wave"></i> ${hasPendingReq ? 'Settle / Pay' : 'Pay Now'}
+          </button>`;
+      } else if (r.latest_paid_receipt) {
+        actionHtml = `
+          <button type="button" class="btn btn-outline btn-xs" onclick="zyCptPrintReceipt(${Number(r.client_id)})">
+            <i class="fas fa-file-invoice"></i> Receipt
+          </button>`;
+      } else {
+        actionHtml = `<span class="zy-cpt-settled-txt"><i class="fas fa-check"></i> Settled</span>`;
+      }
+    } else {
+      if (canPayDirect || hasPendingReq) {
+        actionHtml = `
+          <button type="button" class="btn btn-outline btn-xs zy-cpt-pay-soft" onclick="zyCptOpenPayModal(${Number(r.client_id)})" title="Settle available Weekly API balance (${zyCptFmtPkr(r.weekly_unpaid_payable_pkr)})">
+            <i class="fas fa-wallet"></i> Pay
+          </button>`;
+      } else if (r.latest_paid_receipt) {
+        actionHtml = `
+          <button type="button" class="btn btn-outline btn-xs" onclick="zyCptPrintReceipt(${Number(r.client_id)})">
+            <i class="fas fa-file-invoice"></i> Receipt
+          </button>`;
+      } else {
+        actionHtml = `<span class="zy-cpt-muted-act">Tracking</span>`;
+      }
+    }
+
+    const totalSubHtml = isTopBox
+      ? (r.over_target_pkr > 0
+          ? `<div class="zy-cpt-over-tag">+${zyCptFmtPkr(r.over_target_pkr)} over target</div>`
+          : `<div class="zy-cpt-over-tag">Target hit (${Number(r.progress_pct || 100).toFixed(0)}%)</div>`)
+      : `<div class="zy-cpt-day-sms">${Number(r.week_sms_count || 0).toLocaleString()} SMS</div>`;
+
+    return `
+      <tr class="zy-cpt-row ${isTopBox ? 'is-reached-row' : ''} ${r.status === 'paid' ? 'is-paid-row' : ''}">
+        <td class="zy-cpt-td-client">
+          <div class="zy-cpt-client-cell">
+            <div class="zy-cpt-avatar ${isTopBox ? 'is-green' : 'is-blue'}">${zyEsc(initials)}</div>
+            <div class="zy-cpt-client-meta">
+              <div class="zy-cpt-client-name">${zyEsc(r.username)}</div>
+              <div class="zy-cpt-client-sub">
+                <span>${Number(r.week_sms_count || 0).toLocaleString()} SMS</span>
+                ${r.saved_wallet ? `<span class="zy-cpt-wallet-dot" title="${zyEsc(r.saved_method + ': ' + r.saved_wallet)}">· ${zyEsc(r.saved_method)}</span>` : ''}
+              </div>
+            </div>
+          </div>
+        </td>
+        ${daysCells}
+        <td class="zy-cpt-td-total">
+          <div class="zy-cpt-total-amt ${isTopBox ? 'is-green' : ''}">${zyCptFmtPkr(r.week_total_pkr)}</div>
+          ${totalSubHtml}
+        </td>
+        <td class="zy-cpt-td-status">${statusHtml}</td>
+        <td class="zy-cpt-td-act">${actionHtml}</td>
+      </tr>`;
+  };
+
+  const buildFooter = (list, label, showUnpaid) => {
+    const daySums = [0, 0, 0, 0, 0, 0, 0];
+    let totPkr = 0;
+    let totSms = 0;
+    let totUnpaid = 0;
+    for (const r of list) {
+      for (let i = 0; i < 7; i++) daySums[i] += Number(r.days_pkr?.[i] || 0);
+      totPkr += Number(r.week_total_pkr || 0);
+      totSms += Number(r.week_sms_count || 0);
+      totUnpaid += Number(r.week_remaining_unpaid_pkr || 0);
+    }
+    return `
+      <tfoot>
+        <tr class="zy-cpt-tfoot-row">
+          <td class="zy-cpt-td-client"><strong>${zyEsc(label)} (${list.length})</strong></td>
+          ${daySums.map((v, i) => `<td class="zy-cpt-td-day ${days[i]?.is_today ? 'is-today' : ''}"><strong>${v > 0 ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</strong></td>`).join('')}
+          <td class="zy-cpt-td-total"><strong>${zyCptFmtPkr(totPkr)}</strong><div class="zy-cpt-day-sms">${totSms.toLocaleString()} SMS</div></td>
+          <td class="zy-cpt-td-status">${showUnpaid ? `<span class="zy-cpt-sub-note">Week Unpaid: <strong>${zyCptFmtPkr(totUnpaid)}</strong></span>` : ''}</td>
+          <td class="zy-cpt-td-act"></td>
+        </tr>
+      </tfoot>`;
+  };
+
+  root.innerHTML = `
+    <div class="zy-cpt-header">
+      <div class="zy-cpt-header-left">
+        <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span><i class="fas fa-bullseye" style="color:#059669;"></i> Client Live Payment Tracker</span>
+          <span class="zy-cpt-live-chip ${d.is_current_week && window._zyCptState.autoLive ? 'is-live' : ''}">
+            <span class="zy-cpt-pulse"></span>
+            ${d.is_current_week ? 'LIVE · API Weekly' : 'Archive Week · API Only'}
+          </span>
+        </div>
+        <div class="page-subtitle">
+          Mon–Sun UTC: <strong>${zyEsc(d.week_start)}</strong> to <strong>${zyEsc(d.week_end)}</strong> · Strictly API SMS traffic (Whitenoise excluded) · Updated ${zyEsc(lastSyncStr)}
+        </div>
+      </div>
+      <div class="zy-cpt-header-controls">
+        <div class="zy-cpt-week-nav">
+          <button type="button" class="btn btn-outline btn-sm" onclick="zyCptSwitchWeek('${zyEsc(d.prev_week_start)}')" title="Previous Week">
+            <i class="fas fa-chevron-left"></i>
+          </button>
+          <select id="cpt-week-select" class="zy-input zy-cpt-week-select" onchange="zyCptSwitchWeek(this.value)">
+            ${weekOptions}
+          </select>
+          <button type="button" class="btn btn-outline btn-sm" ${d.next_week_start ? `onclick="zyCptSwitchWeek('${zyEsc(d.next_week_start)}')"` : 'disabled'} title="Next Week">
+            <i class="fas fa-chevron-right"></i>
+          </button>
+        </div>
+        <button type="button" class="btn ${window._zyCptState.autoLive ? 'btn-success' : 'btn-outline'} btn-sm" onclick="zyCptToggleAutoLive()" title="Toggle 15s automatic live tracking">
+          <i class="fas fa-tower-broadcast"></i> ${window._zyCptState.autoLive ? 'Live: ON' : 'Live: OFF'}
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="zyCptFetchAndRender(window._zyCptState.weekStart, false)">
+          <i class="fas fa-rotate"></i> Refresh
+        </button>
+      </div>
+    </div>
+
+    <!-- Target Control + Search Bar -->
+    <div class="zy-cpt-toolbar-card">
+      <div class="zy-cpt-target-group">
+        <div class="zy-cpt-target-icon"><i class="fas fa-flag-checkered"></i></div>
+        <div class="zy-cpt-target-fields">
+          <label class="zy-lbl" for="cpt-target-input" style="margin:0 0 3px;">Per-Client Weekly Target (PKR)</label>
+          <div class="zy-cpt-target-input-row">
+            <div class="zy-cpt-rs-wrap">
+              <span class="zy-cpt-rs-prefix">Rs.</span>
+              <input type="number" id="cpt-target-input" class="zy-input zy-crs-num" min="0" step="50" value="${target}" placeholder="1500">
+            </div>
+            <button type="button" class="btn btn-primary btn-sm" id="cpt-save-target-btn" onclick="zyCptSaveTarget()">
+              <i class="fas fa-check"></i> Save Target
+            </button>
+          </div>
+          <div class="zy-cpt-target-hint">Any client whose Mon–Sun API earnings reach <strong>${zyCptFmtPkr(target)}</strong> automatically moves into the Top Ready Box while live tracking continues through Sunday.</div>
+        </div>
+      </div>
+      <div class="zy-cpt-search-group">
+        <div class="zy-cpt-search-wrap">
+          <i class="fas fa-magnifying-glass"></i>
+          <input type="text" id="cpt-search-input" class="zy-input" value="${zyEsc(window._zyCptState.search)}" placeholder="Search client username…" oninput="zyCptOnSearch(this.value)">
+        </div>
+        <button type="button" class="btn btn-outline btn-sm" onclick="loadPage('client-payment-requests')">
+          <i class="fas fa-money-bill-transfer"></i> Requests Queue
+        </button>
+      </div>
+    </div>
+
+    <!-- 4 KPI Summary Cards -->
+    <div class="zy-cpt-kpi-grid">
+      <div class="zy-cpt-kpi is-green">
+        <div class="zy-cpt-kpi-lbl">Target Reached (Top Box)</div>
+        <div class="zy-cpt-kpi-val">${Number(sumR.count || 0)} <span class="zy-cpt-kpi-unit">Members</span></div>
+        <div class="zy-cpt-kpi-sub">${zyCptFmtPkr(sumR.week_total_pkr)} · ${Number(sumR.week_sms_count || 0).toLocaleString()} SMS</div>
+      </div>
+      <div class="zy-cpt-kpi is-blue">
+        <div class="zy-cpt-kpi-lbl">Tracking Below Target</div>
+        <div class="zy-cpt-kpi-val">${Number(sumT.count || 0)} <span class="zy-cpt-kpi-unit">Members</span></div>
+        <div class="zy-cpt-kpi-sub">${zyCptFmtPkr(sumT.week_total_pkr)} · ${Number(sumT.week_sms_count || 0).toLocaleString()} SMS</div>
+      </div>
+      <div class="zy-cpt-kpi is-amber">
+        <div class="zy-cpt-kpi-lbl">Top Box Unpaid Ready</div>
+        <div class="zy-cpt-kpi-val">${zyCptFmtPkr(sumR.week_remaining_unpaid_pkr)}</div>
+        <div class="zy-cpt-kpi-sub">Total API Unpaid: ${zyCptFmtPkr(sumR.total_unpaid_payable_pkr)}</div>
+      </div>
+      <div class="zy-cpt-kpi is-teal">
+        <div class="zy-cpt-kpi-lbl">Settled for This Week</div>
+        <div class="zy-cpt-kpi-val">${zyCptFmtPkr(sumO.week_paid_pkr)}</div>
+        <div class="zy-cpt-kpi-sub">Week Total: ${zyCptFmtPkr(sumO.week_total_pkr)} (${Number(sumO.week_sms_count || 0).toLocaleString()} SMS)</div>
+      </div>
+    </div>
+
+    <!-- BOX 1 (TOP): TARGET REACHED — READY FOR PAYOUT -->
+    <div class="zy-cpt-box is-reached">
+      <div class="zy-cpt-box-head">
+        <div class="zy-cpt-box-title-wrap">
+          <div class="zy-cpt-box-icon is-green"><i class="fas fa-trophy"></i></div>
+          <div>
+            <div class="zy-cpt-box-title">
+              Target Reached (${target > 0 ? '≥ ' + zyCptFmtPkr(target) : 'Active'}) — Ready for Payout
+              <span class="zy-cpt-count-badge is-green">${reached.length}</span>
+            </div>
+            <div class="zy-cpt-box-sub">Auto-promoted members · Live Mon–Sun API counting stays active until Sunday · Pay directly even without a client request</div>
+          </div>
+        </div>
+        <div class="zy-cpt-box-totals">
+          <div class="zy-cpt-box-stat"><span>Box Total</span><strong>${zyCptFmtPkr(sumR.week_total_pkr)}</strong></div>
+          <div class="zy-cpt-box-stat"><span>Unpaid Ready</span><strong style="color:#059669;">${zyCptFmtPkr(sumR.week_remaining_unpaid_pkr)}</strong></div>
+        </div>
+      </div>
+      <div class="zy-cpt-box-body">
+        ${reached.length > 0 ? `
+          <div class="zy-cpt-table-scroll">
+            <table class="zy-cpt-table">
+              <thead>
+                <tr>
+                  <th class="zy-cpt-th-client">Member</th>
+                  ${dayHeadersHtml}
+                  <th class="zy-cpt-th-total">Week Total</th>
+                  <th class="zy-cpt-th-status">Payout Status</th>
+                  <th class="zy-cpt-th-act">Action</th>
+                </tr>
+              </thead>
+              <tbody>${reached.map(r => buildRow(r, true)).join('')}</tbody>
+              ${buildFooter(reached, 'Top Box Total', true)}
+            </table>
+          </div>
+        ` : `
+          <div class="zy-cpt-empty">
+            <i class="fas fa-bullseye"></i>
+            <div>
+              <strong>No clients have reached ${zyCptFmtPkr(target)} yet this week</strong>
+              <span>As soon as any member's live Mon–Sun API earnings reach ${zyCptFmtPkr(target)}, they automatically move from the tracking box below into this top payout box.</span>
+            </div>
+          </div>
+        `}
+      </div>
+    </div>
+
+    <!-- BOX 2 (BOTTOM): LIVE MEMBER TRACKING — BELOW TARGET -->
+    <div class="zy-cpt-box is-tracking">
+      <div class="zy-cpt-box-head">
+        <div class="zy-cpt-box-title-wrap">
+          <div class="zy-cpt-box-icon is-blue"><i class="fas fa-chart-line"></i></div>
+          <div>
+            <div class="zy-cpt-box-title">
+              Live Member Tracking (${target > 0 ? '< ' + zyCptFmtPkr(target) : 'All Members'})
+              <span class="zy-cpt-count-badge is-blue">${tracking.length}</span>
+            </div>
+            <div class="zy-cpt-box-sub">Daily Mon–Sun API earnings countdown · Sorted highest first so members closest to target appear at the top</div>
+          </div>
+        </div>
+        <div class="zy-cpt-box-totals">
+          <label class="zy-cpt-hidezero-lbl">
+            <input type="checkbox" ${hideZero ? 'checked' : ''} onchange="zyCptToggleHideZero(this.checked)">
+            <span>Hide Rs. 0</span>
+          </label>
+          <div class="zy-cpt-box-stat"><span>Box Total</span><strong>${zyCptFmtPkr(sumT.week_total_pkr)}</strong></div>
+        </div>
+      </div>
+      <div class="zy-cpt-box-body">
+        ${tracking.length > 0 ? `
+          <div class="zy-cpt-table-scroll">
+            <table class="zy-cpt-table">
+              <thead>
+                <tr>
+                  <th class="zy-cpt-th-client">Member</th>
+                  ${dayHeadersHtml}
+                  <th class="zy-cpt-th-total">Week Total</th>
+                  <th class="zy-cpt-th-status">Target Progress</th>
+                  <th class="zy-cpt-th-act">Action</th>
+                </tr>
+              </thead>
+              <tbody>${tracking.map(r => buildRow(r, false)).join('')}</tbody>
+              ${buildFooter(tracking, 'Tracking Box Total', false)}
+            </table>
+          </div>
+        ` : `
+          <div class="zy-cpt-empty">
+            <i class="fas fa-users"></i>
+            <div>
+              <strong>${searchQ ? 'No matching clients in tracking box' : (hideZero ? 'No active below-target clients (Rs. 0 hidden)' : 'All members have reached the weekly target!')}</strong>
+              <span>${hideZero ? 'Uncheck "Hide Rs. 0" to view all downline members.' : 'Every client meeting the target is listed in the Top Box above.'}</span>
+            </div>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+
+  root.querySelectorAll('.zy-cpt-table-scroll').forEach((el, idx) => {
+    if (prevScrolls[idx]) el.scrollLeft = prevScrolls[idx];
+  });
+  if (activeElId) {
+    const el = document.getElementById(activeElId);
+    if (el) {
+      el.focus();
+      if (activeSelStart !== null && typeof el.setSelectionRange === 'function') {
+        try { el.setSelectionRange(activeSelStart, activeSelStart); } catch (_) {}
+      }
+    }
+  }
+}
+
+window.zyCptSwitchWeek = function(weekStart) {
+  window._zyCptState.weekStart = weekStart || null;
+  zyCptFetchAndRender(window._zyCptState.weekStart, false);
+};
+
+window.zyCptToggleAutoLive = function() {
+  window._zyCptState.autoLive = !window._zyCptState.autoLive;
+  if (window._zyCptState.autoLive) window.zyCptStartLiveTimer();
+  else window.zyCptStopLiveTimer();
+  zyCptRender(false);
+};
+
+window.zyCptToggleHideZero = function(checked) {
+  window._zyCptState.hideZero = Boolean(checked);
+  zyCptRender(false);
+};
+
+window.zyCptOnSearch = function(val) {
+  window._zyCptState.search = String(val || '');
+  zyCptRender(true);
+};
+
+window.zyCptSaveTarget = async function() {
+  const inp = document.getElementById('cpt-target-input');
+  const val = parseFloat(inp?.value);
+  if (isNaN(val) || val < 0) {
+    toast('Enter a valid PKR target (0 or positive amount)', 'error');
+    return;
+  }
+  const btn = document.getElementById('cpt-save-target-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const res = await apiFetch('/api/agent/client-payment-tracker/target', {
+      method: 'PUT',
+      body: JSON.stringify({ target_pkr: val })
+    });
+    if (res && res.success) {
+      toast(`Client weekly target updated to ${zyCptFmtPkr(res.target_pkr)}`, 'success');
+      await zyCptFetchAndRender(window._zyCptState.weekStart, false);
+    } else {
+      toast(res?.error || 'Failed to update target', 'error');
+    }
+  } catch (err) {
+    toast(err.message || 'Failed to update target', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Save Target'; }
+  }
+};
+
+window._zyCptFindClient = function(clientId) {
+  const d = window._zyCptState.data;
+  if (!d) return null;
+  const cid = Number(clientId);
+  return (d.reached_clients || []).find(r => Number(r.client_id) === cid)
+    || (d.tracking_clients || []).find(r => Number(r.client_id) === cid)
+    || null;
+};
+
+window.zyCptOpenPayModal = function(clientId) {
+  const d = window._zyCptState.data;
+  const r = window._zyCptFindClient(clientId);
+  if (!d || !r) return;
+
+  const pendingReqs = Array.isArray(r.pending_requests) ? r.pending_requests : [];
+  const firstPending = pendingReqs[0] || null;
+  const maxDirect = Number(r.weekly_unpaid_payable_pkr || 0);
+  const weekUnpaid = Number(r.week_remaining_unpaid_pkr || 0);
+  const defaultAmt = weekUnpaid > 0.01 ? weekUnpaid : maxDirect;
+
+  const methods = ['Bank Transfer (IBAN)', 'JazzCash', 'Easypaisa', 'SadaPay / NayaPay', 'Cash / Direct'];
+  const savedMethod = methods.includes(r.saved_method) ? r.saved_method : 'Bank Transfer (IBAN)';
+
+  const pendingBlock = firstPending ? `
+    <div class="zy-cpt-modal-pending">
+      <div style="font-weight:700;color:#b45309;margin-bottom:6px;">
+        <i class="fas fa-clock"></i> Client already submitted Pending Request #${Number(firstPending.id)} (${zyCptFmtPkr(firstPending.amount_pkr)})
+      </div>
+      <div style="font-size:12px;color:#78350f;margin-bottom:8px;">
+        Method: <strong>${zyEsc(firstPending.method)}</strong>${firstPending.wallet ? ` · Account: <span class="monospace">${zyEsc(firstPending.wallet)}</span>` : ''}
+      </div>
+      <label class="zy-cpt-radio-opt">
+        <input type="radio" name="cpt-pay-mode" value="settle_request" checked onchange="zyCptTogglePayMode()">
+        <span>Settle Pending Request #${Number(firstPending.id)} (${zyCptFmtPkr(firstPending.amount_pkr)})</span>
+      </label>
+      ${maxDirect > 0.01 ? `
+        <label class="zy-cpt-radio-opt">
+          <input type="radio" name="cpt-pay-mode" value="direct" onchange="zyCptTogglePayMode()">
+          <span>Direct Agent Payout (from remaining unpaid API balance: ${zyCptFmtPkr(maxDirect)})</span>
+        </label>` : ''}
+      <input type="hidden" id="cpt-settle-req-id" value="${Number(firstPending.id)}">
+    </div>` : '';
+
+  const hideDirectInitially = Boolean(firstPending);
+
+  zyModal(`Direct Weekly (API) Payout — ${zyEsc(r.username)}`, `
+    <div class="zy-cpt-modal-summary">
+      <div class="zy-cpt-ms-item">
+        <span>Tracked Week</span>
+        <strong>${zyEsc(d.week_start)} → ${zyEsc(d.week_end)}</strong>
+      </div>
+      <div class="zy-cpt-ms-item">
+        <span>Week Earned (API)</span>
+        <strong style="color:#059669;">${zyCptFmtPkr(r.week_total_pkr)}</strong>
+      </div>
+      <div class="zy-cpt-ms-item">
+        <span>Unpaid API Balance</span>
+        <strong style="color:#1d4ed8;">${zyCptFmtPkr(maxDirect)}</strong>
+      </div>
+    </div>
+    ${pendingBlock}
+    <div id="cpt-direct-fields" style="${hideDirectInitially ? 'display:none;' : ''}">
+      <div class="form-group" style="margin-bottom:10px;">
+        <label class="zy-lbl" style="font-weight:600;">Payout Amount (PKR) *</label>
+        <input type="number" id="cpt-pay-amount" class="zy-input zy-crs-num" min="1" max="${maxDirect}" step="0.01" value="${defaultAmt > 0 ? defaultAmt : ''}" style="width:100%;height:38px;">
+        <div class="zy-cpt-quick-fills">
+          ${weekUnpaid > 0.01 ? `<button type="button" class="zy-cpt-qf-btn" onclick="document.getElementById('cpt-pay-amount').value='${weekUnpaid}'">This Week Unpaid (${zyCptFmtPkr(weekUnpaid)})</button>` : ''}
+          ${maxDirect > 0.01 && Math.abs(maxDirect - weekUnpaid) > 0.01 ? `<button type="button" class="zy-cpt-qf-btn" onclick="document.getElementById('cpt-pay-amount').value='${maxDirect}'">Full Unpaid API (${zyCptFmtPkr(maxDirect)})</button>` : ''}
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:10px;">
+        <label class="zy-lbl" style="font-weight:600;">Payment Method</label>
+        <select id="cpt-pay-method" class="zy-input" style="width:100%;height:38px;">
+          ${methods.map(m => `<option value="${zyEsc(m)}" ${m === savedMethod ? 'selected' : ''}>${zyEsc(m)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group" style="margin-bottom:10px;">
+        <label class="zy-lbl" style="font-weight:600;">Client Account / IBAN / Wallet</label>
+        <input type="text" id="cpt-pay-wallet" class="zy-input" style="width:100%;height:38px;" value="${zyEsc(r.saved_wallet || '')}" placeholder="JazzCash / Easypaisa / Bank Account / IBAN">
+      </div>
+    </div>
+    <div class="form-group" style="margin-bottom:10px;">
+      <label class="zy-lbl" style="font-weight:600;">Transaction Reference / Slip ID (Optional)</label>
+      <input type="text" id="cpt-pay-txid" class="zy-input" style="width:100%;height:38px;" placeholder="TRX ID / Bank Reference">
+    </div>
+    <div class="form-group" style="margin-bottom:4px;">
+      <label class="zy-lbl" style="font-weight:600;">Note (Optional)</label>
+      <input type="text" id="cpt-pay-notes" class="zy-input" style="width:100%;height:36px;" placeholder="Weekly API settlement note">
+    </div>
+    <div style="font-size:11.5px;color:#64748b;margin-top:8px;">
+      <i class="fas fa-shield-halved" style="color:#059669;"></i> Deducts strictly from this client's Weekly (API) balance, creates a paid receipt &amp; credit note, and notifies the client automatically. Whitenoise funds are untouched.
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="btn btn-success btn-sm" id="btn-cpt-confirm-pay" onclick="zyCptSubmitPay(${Number(r.client_id)})">
+      <i class="fas fa-check"></i> Confirm &amp; Mark Paid
+    </button>
+  `);
+};
+
+window.zyCptTogglePayMode = function() {
+  const mode = document.querySelector('input[name="cpt-pay-mode"]:checked')?.value || 'direct';
+  const box = document.getElementById('cpt-direct-fields');
+  if (box) box.style.display = mode === 'settle_request' ? 'none' : '';
+};
+
+window.zyCptSubmitPay = async function(clientId) {
+  const d = window._zyCptState.data;
+  const modeEl = document.querySelector('input[name="cpt-pay-mode"]:checked');
+  const mode = modeEl ? modeEl.value : 'direct';
+  const txid = String(document.getElementById('cpt-pay-txid')?.value || '').trim();
+  const notes = String(document.getElementById('cpt-pay-notes')?.value || '').trim();
+  const payload = {
+    client_id: Number(clientId),
+    week_start: d?.week_start || '',
+    txid,
+    notes
+  };
+
+  if (mode === 'settle_request') {
+    payload.settle_request_id = Number(document.getElementById('cpt-settle-req-id')?.value || 0);
+  } else {
+    const amt = parseFloat(document.getElementById('cpt-pay-amount')?.value || '0');
+    if (!Number.isFinite(amt) || amt <= 0) {
+      toast('Enter a valid positive PKR payout amount', 'error');
+      return;
+    }
+    payload.amount_pkr = amt;
+    payload.method = String(document.getElementById('cpt-pay-method')?.value || 'Bank Transfer (IBAN)').trim();
+    payload.wallet = String(document.getElementById('cpt-pay-wallet')?.value || '').trim();
+  }
+
+  const btn = document.getElementById('btn-cpt-confirm-pay');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
+  try {
+    const res = await apiFetch('/api/agent/client-payment-tracker/pay', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.success) {
+      closeModal();
+      const paidAmt = Number(res.payout?.amount_pkr || res.payout?.amount || payload.amount_pkr || 0);
+      toast(`Client paid ${zyCptFmtPkr(paidAmt)} successfully`, 'success');
+      await zyCptFetchAndRender(window._zyCptState.weekStart, false);
+    } else {
+      toast(res?.error || 'Failed to settle client payout', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Confirm &amp; Mark Paid'; }
+    }
+  } catch (err) {
+    toast(err.message || 'Failed to settle client payout', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Confirm &amp; Mark Paid'; }
+  }
+};
+
+window.zyCptPrintReceipt = function(clientId) {
+  const d = window._zyCptState.data;
+  const r = window._zyCptFindClient(clientId);
+  if (!r || !r.latest_paid_receipt) return;
+  const rec = r.latest_paid_receipt;
+  const siteName = (window.__BRAND_SETTINGS__ && window.__BRAND_SETTINGS__.site_name) || 'HUMAX SMS';
+  const html = `<html><head><title>Weekly API Payout Receipt #${Number(rec.id)}</title><style>body{font-family:Arial,sans-serif;padding:28px;max-width:640px;margin:0 auto;color:#0f172a}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:13px}th{background:#f8fafc;color:#475569}</style></head><body><h2>${zyEsc(siteName)} — Client Weekly (API) Payout Receipt</h2><p>Receipt #PKR-${Number(rec.id)} · Week: <strong>${zyEsc(d?.week_start || '')} to ${zyEsc(d?.week_end || '')}</strong> · Status: <strong>PAID</strong></p><table><tr><th>Client</th><th>Method</th><th>Account / Wallet</th><th>Tx Reference</th></tr><tr><td>${zyEsc(r.username)}</td><td>${zyEsc(rec.method || '—')}</td><td>${zyEsc(rec.wallet || '—')}</td><td>${zyEsc(rec.txid || 'Paid')}</td></tr></table><h3 style="text-align:right;color:#059669;margin-top:18px;">Total Paid: Rs. ${zyFmtMoney(rec.amount_pkr, 2)} PKR</h3></body></html>`;
+  if (typeof zyPrintHtml === 'function') zyPrintHtml(html);
 };
 
 /* ═══ BANK ACCOUNTS ═════════════════════════════════════════ */
@@ -4975,12 +5648,14 @@ async function pgAgentAllocationHistory(resetState = true) {
     'credit-notes': pgCreditNotes,
     'payment-requests': pgPaymentRequests, 'my-earnings': pgPaymentRequests, 'bank-accounts': pgBankAccounts,
     'client-payment-requests': () => pgClientPaymentRequests('all'),
+    'client-payment-tracker': () => pgClientPaymentTracker(),
     'usd-statements': () => pgStatements('USD'), 'eur-statements': () => pgStatements('EUR'),
     'gbp-statements': () => pgStatements('GBP')
   };
   const prev = loadPage;
   loadPage = function (page) {
     if (page !== 'live-chat' && window.HumexLiveChat) window.HumexLiveChat.unmount();
+    if (page !== 'client-payment-tracker' && window.zyCptStopLiveTimer) window.zyCptStopLiveTimer();
     if (map[page]) {
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('nav-' + page)?.classList.add('active');

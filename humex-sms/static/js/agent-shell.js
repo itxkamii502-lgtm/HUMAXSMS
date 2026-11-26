@@ -36,6 +36,7 @@ const ZY_AGENT_MENU = [
   { t: "PAYMENTS", i: 'fa-wallet', c: '#059669', items: [
       ['My Payment Requests', 'payment-requests', 'fa-hand-holding-dollar'],
       ['Client Payment Requests', 'client-payment-requests', 'fa-money-bill-transfer'],
+      ['Client Payment Tracker', 'client-payment-tracker', 'fa-bullseye'],
       ['Credit Notes', 'credit-notes', 'fa-receipt'],
       ['Statements', 'usd-statements', 'fa-file-invoice-dollar'],
   ] },
@@ -64,6 +65,7 @@ const ZY_LABELS = {
   'blocked-numbers': 'Blocked Numbers',
   'client-requests': 'Client Number Requests',
   'client-payment-requests': 'Client Payment Requests',
+  'client-payment-tracker': 'Client Payment Tracker',
   'my-clients': 'Clients',
   'notifications': 'Notifications',
   'news-clients': 'Notifications',

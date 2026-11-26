@@ -7748,7 +7748,7 @@ const API_RULES = [
   { m: new Set(['PATCH', 'DELETE']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent'] },
   { m: new Set(['POST']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent', 'client'] },
   { m: WRITE_METHODS, p: /^\/payments(\/|$)/, roles: ['owner', 'agent'] },
-  { p: /^\/agent\/(client-rates|pkr-target|allocation-history)(\/|$)/, roles: ['agent'] },
+  { p: /^\/agent\/(client-rates|pkr-target|allocation-history|client-payment-tracker)(\/|$)/, roles: ['agent'] },
   { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] }
 ];
 // Client is default-deny: only these routes exist for them.
@@ -9676,6 +9676,647 @@ app.put('/api/agent/pkr-target', requireAuth, (req, res) => {
   writeDb('agents', agents);
   const stats = getAgentClientWeeklyPkrStats(sessionUser.id);
   res.json({ success: true, ...stats });
+});
+
+// ── Agent Live Weekly (API-Only) Client Payment Tracker ─────────
+function computeAgentClientPaymentTracker(agentId, requestedWeekStart = null) {
+  const aid = Number(agentId);
+  const agents = readDb('agents') || [];
+  const ag = agents.find(a => Number(a.id) === aid) || {};
+  const fx = getUsdToPkrRate();
+
+  const now = new Date();
+  const todayYmd = now.toISOString().slice(0, 10);
+  const currentWeekStart = getUtcWeekMondayYmd(todayYmd);
+
+  let weekStartYmd = currentWeekStart;
+  if (requestedWeekStart && /^\d{4}-\d{2}-\d{2}$/.test(String(requestedWeekStart).trim())) {
+    const snapped = getUtcWeekMondayYmd(String(requestedWeekStart).trim());
+    if (snapped && snapped <= currentWeekStart) {
+      weekStartYmd = snapped;
+    }
+  }
+  const weekEndYmd = addDaysYmd(weekStartYmd, 6);
+  const isCurrentWeek = weekStartYmd === currentWeekStart;
+  const prevWeekStart = addDaysYmd(weekStartYmd, -7);
+  const nextWeekStart = addDaysYmd(weekStartYmd, 7);
+  const canGoNext = nextWeekStart <= currentWeekStart;
+
+  const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const days = DAY_LABELS.map((label, idx) => {
+    const ymd = addDaysYmd(weekStartYmd, idx);
+    return {
+      idx,
+      key: label.toLowerCase(),
+      label,
+      ymd,
+      short_date: ymd.slice(5),
+      is_today: ymd === todayYmd,
+      is_future: ymd > todayYmd
+    };
+  });
+  const dayIndexByYmd = new Map(days.map(d => [d.ymd, d.idx]));
+
+  // Resolve per-client target (PKR): custom tracker target > agent client min payout > global min payout > default 1500
+  let targetPkr = 1500;
+  let targetSource = 'default';
+  if (ag.client_payment_target_pkr !== undefined && ag.client_payment_target_pkr !== null && ag.client_payment_target_pkr !== '') {
+    const v = Number(ag.client_payment_target_pkr);
+    if (Number.isFinite(v) && v >= 0) {
+      targetPkr = round2(v);
+      targetSource = 'custom_tracker';
+    }
+  } else if (ag.client_min_payout_pkr !== undefined && ag.client_min_payout_pkr !== null && ag.client_min_payout_pkr !== '' && Number(ag.client_min_payout_pkr) > 0) {
+    targetPkr = round2(Number(ag.client_min_payout_pkr));
+    targetSource = 'agent_min_payout';
+  } else if (getGlobalMinPayoutPkr() > 0) {
+    targetPkr = round2(getGlobalMinPayoutPkr());
+    targetSource = 'global_min_payout';
+  }
+
+  const allClients = (readDb('clients') || []).filter(c => c && Number(c.agent_id) === aid);
+  const clientById = new Map();
+  const clientByUsername = new Map();
+  const weeklyMap = new Map();
+
+  for (const cl of allClients) {
+    const cid = Number(cl.id);
+    const uname = String(cl.username || '').trim().toLowerCase();
+    clientById.set(cid, cl);
+    if (uname) clientByUsername.set(uname, cl);
+    weeklyMap.set(cid, {
+      day_pkr: [0, 0, 0, 0, 0, 0, 0],
+      day_sms: [0, 0, 0, 0, 0, 0, 0],
+      week_total_pkr: 0,
+      week_total_usd: 0,
+      week_sms_count: 0,
+      last_sms_at: null
+    });
+  }
+
+  // Strictly API-only SMS (exclude ALL Whitenoise / Monthly {W} records)
+  const wnRangesMap = buildRangesLookupMap();
+  const wnTags = getWhitenoiseProviderTags();
+  const allSms = readSmsWithArchive();
+  for (const s of allSms) {
+    if (!s || s.client_deleted) continue;
+    const isWn = Boolean(
+      s.is_whitenoise ||
+      String(s.source || '').toLowerCase() === 'whitenoise' ||
+      String(s.provider || '').toLowerCase().includes('whitenoise') ||
+      String(s.payout_schedule || '').toLowerCase() === 'monthly30_5' ||
+      isWhitenoiseRecord(s, wnRangesMap, wnTags)
+    );
+    if (isWn) continue;
+    const rawPt = migrateLegacyPayterm(s.payterm || s.payterms || 'Weekly');
+    if (rawPt === 'Monthly') continue;
+
+    // Match downline client owned by this Agent
+    let cl = null;
+    if (s.client_id != null && s.client_id !== '') {
+      cl = clientById.get(Number(s.client_id)) || null;
+    }
+    if (!cl && s.client_username) {
+      cl = clientByUsername.get(String(s.client_username).trim().toLowerCase()) || null;
+    }
+    if (!cl) continue;
+
+    const rawTs = String(s.timestamp || s.date || '').replace('T', ' ');
+    const tsYmd = normalizeYmd(rawTs.slice(0, 10));
+    if (!tsYmd || tsYmd < weekStartYmd || tsYmd > weekEndYmd) continue;
+    const dIdx = dayIndexByYmd.get(tsYmd);
+    if (dIdx === undefined) continue;
+
+    const amtUsd = Number(s.client_amount) || 0;
+    const amtPkr = s.client_amount_pkr != null
+      ? Number(s.client_amount_pkr) || 0
+      : amtUsd * (Number(s.fx_usd_to_pkr) || fx);
+
+    const bucket = weeklyMap.get(Number(cl.id));
+    if (!bucket) continue;
+    bucket.day_pkr[dIdx] += amtPkr;
+    bucket.day_sms[dIdx] += 1;
+    bucket.week_total_pkr += amtPkr;
+    bucket.week_total_usd += amtUsd;
+    bucket.week_sms_count += 1;
+    const isoTs = String(s.timestamp || s.date || '');
+    if (isoTs && (!bucket.last_sms_at || isoTs > bucket.last_sms_at)) {
+      bucket.last_sms_at = isoTs;
+    }
+  }
+
+  const allPayouts = readDb('payout_requests') || [];
+  const payoutPkrVal = p => {
+    if (String(p.currency || 'PKR').toUpperCase() === 'PKR') {
+      return Number(p.paid_amount_pkr != null ? p.paid_amount_pkr : (p.amount_pkr != null ? p.amount_pkr : (p.amount || 0)));
+    }
+    return Number(p.amount || 0) * (Number(p.fx_usd_to_pkr) || fx);
+  };
+
+  const rows = [];
+  for (const cl of allClients) {
+    const cid = Number(cl.id);
+    const uname = String(cl.username || '').trim();
+    const unameLow = uname.toLowerCase();
+    const bucket = weeklyMap.get(cid);
+    const dayPkrRounded = bucket.day_pkr.map(v => round2(v));
+    const weekTotalPkr = round2(bucket.week_total_pkr);
+    const weekTotalUsd = round4(bucket.week_total_usd);
+
+    // Compute exact Weekly (API) wallet balance excluding Monthly {W}
+    const split = computeUserSplitWallets(
+      { role: 'Client', id: cid, username: uname, agent_id: aid },
+      allPayouts,
+      now
+    );
+    const ww = split.weekly_wallet || {};
+    const weeklyBalancePkr = Math.max(0, round2(Number(ww.balance_pkr || 0)));
+    const weeklyPendingPkr = Math.max(0, round2(Number(ww.pending_pkr || 0)));
+    const weeklyUnpaidPayablePkr = Math.max(0, round2(weeklyBalancePkr - weeklyPendingPkr));
+    const weeklyMaturedAvailablePkr = Math.max(0, round2(Number(ww.available_pkr || 0)));
+
+    // Inspect this client's weekly payout requests
+    const clientWeeklyPayouts = allPayouts.filter(p => {
+      if (!p) return false;
+      if (getPayoutRequestType(p) !== 'weekly') return false;
+      const pRole = String(p.role || p.recipient_role || '').toLowerCase();
+      if (pRole && pRole !== 'client') return false;
+      const pUser = String(p.recipient_username || p.username || p.user || '').trim().toLowerCase();
+      return (pUser && pUser === unameLow) || Number(p.client_id || p.user_id) === cid;
+    });
+
+    const pendingRequests = clientWeeklyPayouts
+      .filter(p => ['pending', 'approved'].includes(String(p.status || '').toLowerCase()))
+      .map(p => ({
+        id: Number(p.id),
+        amount_pkr: round2(payoutPkrVal(p)),
+        method: String(p.method || p.mode || 'Bank Transfer (IBAN)'),
+        wallet: String(p.wallet || p.address || ''),
+        created: String(p.timestamp || p.created || '')
+      }));
+
+    const paidThisWeekPayouts = clientWeeklyPayouts.filter(p => {
+      const st = String(p.status || '').toLowerCase();
+      if (st !== 'paid' && st !== 'completed') return false;
+      if (p.tracked_week_start) {
+        return String(p.tracked_week_start) === weekStartYmd;
+      }
+      return false;
+    });
+
+    const weekPaidPkr = round2(paidThisWeekPayouts.reduce((sum, p) => sum + payoutPkrVal(p), 0));
+    const latestWeekPaid = paidThisWeekPayouts[0] || null;
+    const latestAnyPayout = clientWeeklyPayouts[0] || null;
+
+    const savedMethod = String(
+      latestAnyPayout?.method || latestAnyPayout?.mode || cl.payment_method || 'Bank Transfer (IBAN)'
+    ).trim();
+    const savedWallet = String(
+      latestAnyPayout?.wallet || latestAnyPayout?.address || cl.wallet || cl.iban || ''
+    ).trim();
+
+    const targetReached = targetPkr > 0 ? (weekTotalPkr + 1e-6 >= targetPkr) : (weekTotalPkr > 0);
+    const remainingToTargetPkr = targetPkr > 0 ? Math.max(0, round2(targetPkr - weekTotalPkr)) : 0;
+    const overTargetPkr = targetPkr > 0 ? Math.max(0, round2(weekTotalPkr - targetPkr)) : 0;
+    const progressPct = targetPkr > 0
+      ? Math.min(999, Math.round((weekTotalPkr / targetPkr) * 1000) / 10)
+      : (weekTotalPkr > 0 ? 100 : 0);
+
+    // Remaining unpaid amount specifically attributable to this tracked week (never exceeding total unpaid API balance)
+    const weekRemainingUnpaidPkr = Math.max(0, round2(Math.min(
+      Math.max(0, weekTotalPkr - weekPaidPkr),
+      weeklyUnpaidPayablePkr
+    )));
+
+    // Status classification
+    let status = 'tracking';
+    if (weekTotalPkr > 0 && ((weekPaidPkr > 0 && weekRemainingUnpaidPkr <= 0.01) || (weeklyUnpaidPayablePkr <= 0.01 && weeklyPendingPkr <= 0.01 && weekPaidPkr >= weekTotalPkr - 0.01))) {
+      status = 'paid';
+    } else if (weekPaidPkr > 0 && weekRemainingUnpaidPkr > 0.01) {
+      status = 'partial';
+    } else if (pendingRequests.length > 0) {
+      status = 'pending_request';
+    } else if (targetReached) {
+      status = weeklyUnpaidPayablePkr > 0.01 ? 'ready' : 'paid';
+    }
+
+    rows.push({
+      client_id: cid,
+      username: uname,
+      full_name: String(cl.name || cl.full_name || '').trim(),
+      account_status: String(cl.status || 'active').toLowerCase(),
+      days_pkr: dayPkrRounded,
+      days_sms: bucket.day_sms,
+      week_total_pkr: weekTotalPkr,
+      week_total_usd: weekTotalUsd,
+      week_sms_count: bucket.week_sms_count,
+      last_sms_at: bucket.last_sms_at,
+      target_reached: targetReached,
+      progress_pct: progressPct,
+      remaining_to_target_pkr: remainingToTargetPkr,
+      over_target_pkr: overTargetPkr,
+      week_paid_pkr: weekPaidPkr,
+      week_remaining_unpaid_pkr: weekRemainingUnpaidPkr,
+      weekly_unpaid_payable_pkr: weeklyUnpaidPayablePkr,
+      weekly_matured_available_pkr: weeklyMaturedAvailablePkr,
+      weekly_pending_pkr: weeklyPendingPkr,
+      pending_requests: pendingRequests,
+      latest_paid_receipt: latestWeekPaid ? {
+        id: Number(latestWeekPaid.id),
+        amount_pkr: round2(payoutPkrVal(latestWeekPaid)),
+        method: String(latestWeekPaid.method || 'Direct Transfer'),
+        wallet: String(latestWeekPaid.wallet || ''),
+        txid: String(latestWeekPaid.txid || latestWeekPaid.transaction_id || ''),
+        paid_at: String(latestWeekPaid.paid_at || latestWeekPaid.timestamp || '')
+      } : null,
+      saved_method: savedMethod,
+      saved_wallet: savedWallet,
+      status
+    });
+  }
+
+  const reachedClients = rows
+    .filter(r => r.target_reached)
+    .sort((a, b) => {
+      const aPaid = a.status === 'paid' ? 1 : 0;
+      const bPaid = b.status === 'paid' ? 1 : 0;
+      if (aPaid !== bPaid) return aPaid - bPaid;
+      if (b.week_total_pkr !== a.week_total_pkr) return b.week_total_pkr - a.week_total_pkr;
+      return a.username.localeCompare(b.username);
+    });
+
+  const trackingClients = rows
+    .filter(r => !r.target_reached)
+    .sort((a, b) => {
+      if (b.week_total_pkr !== a.week_total_pkr) return b.week_total_pkr - a.week_total_pkr;
+      return a.username.localeCompare(b.username);
+    });
+
+  const sumGroup = (list) => {
+    const dayTotals = [0, 0, 0, 0, 0, 0, 0];
+    const daySms = [0, 0, 0, 0, 0, 0, 0];
+    let weekPkr = 0;
+    let weekSms = 0;
+    let weekPaidPkr = 0;
+    let weekRemainingUnpaidPkr = 0;
+    let totalUnpaidPayablePkr = 0;
+    for (const r of list) {
+      for (let i = 0; i < 7; i++) {
+        dayTotals[i] += Number(r.days_pkr[i] || 0);
+        daySms[i] += Number(r.days_sms[i] || 0);
+      }
+      weekPkr += Number(r.week_total_pkr || 0);
+      weekSms += Number(r.week_sms_count || 0);
+      weekPaidPkr += Number(r.week_paid_pkr || 0);
+      weekRemainingUnpaidPkr += Number(r.week_remaining_unpaid_pkr || 0);
+      totalUnpaidPayablePkr += Number(r.weekly_unpaid_payable_pkr || 0);
+    }
+    return {
+      count: list.length,
+      day_totals_pkr: dayTotals.map(v => round2(v)),
+      day_totals_sms: daySms,
+      week_total_pkr: round2(weekPkr),
+      week_sms_count: weekSms,
+      week_paid_pkr: round2(weekPaidPkr),
+      week_remaining_unpaid_pkr: round2(weekRemainingUnpaidPkr),
+      total_unpaid_payable_pkr: round2(totalUnpaidPayablePkr)
+    };
+  };
+
+  // Build recent 8 Mon–Sun weeks for quick navigation
+  const availableWeeks = [];
+  for (let w = 0; w < 8; w++) {
+    const ws = addDaysYmd(currentWeekStart, -w * 7);
+    const we = addDaysYmd(ws, 6);
+    availableWeeks.push({
+      week_start: ws,
+      week_end: we,
+      label: w === 0 ? `Current Live Week (${ws} → ${we})` : (w === 1 ? `Last Week (${ws} → ${we})` : `${ws} → ${we}`),
+      is_current: w === 0
+    });
+  }
+
+  return {
+    week_start: weekStartYmd,
+    week_end: weekEndYmd,
+    today_ymd: todayYmd,
+    is_current_week: isCurrentWeek,
+    prev_week_start: prevWeekStart,
+    next_week_start: canGoNext ? nextWeekStart : null,
+    available_weeks: availableWeeks,
+    days,
+    target_pkr: targetPkr,
+    target_source: targetSource,
+    fx_usd_to_pkr: fx,
+    server_time: now.toISOString(),
+    reached_clients: reachedClients,
+    tracking_clients: trackingClients,
+    summary: {
+      total_clients: rows.length,
+      reached: sumGroup(reachedClients),
+      tracking: sumGroup(trackingClients),
+      overall: sumGroup(rows)
+    }
+  };
+}
+
+app.get('/api/agent/client-payment-tracker', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const weekStart = req.query.week_start ? String(req.query.week_start).trim() : null;
+  if (weekStart && !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+    return res.status(400).json({ error: 'Invalid week_start format. Expected YYYY-MM-DD.' });
+  }
+  const data = computeAgentClientPaymentTracker(sessionUser.id, weekStart);
+  res.json(data);
+});
+
+app.put('/api/agent/client-payment-tracker/target', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const rawTarget = req.body?.target_pkr;
+  const target = Number(rawTarget);
+  if (rawTarget === undefined || rawTarget === null || rawTarget === '' || !Number.isFinite(target) || target < 0 || target > 100000000) {
+    return res.status(400).json({ error: 'Enter a valid target_pkr (0 or positive PKR amount).' });
+  }
+  const agents = readDb('agents') || [];
+  const idx = agents.findIndex(a => Number(a.id) === Number(sessionUser.id));
+  if (idx === -1) return res.status(404).json({ error: 'Agent account not found.' });
+
+  agents[idx].client_payment_target_pkr = round2(target);
+  if (req.body?.sync_min_payout === true) {
+    agents[idx].client_min_payout_pkr = round2(target);
+  }
+  writeDb('agents', agents);
+  logAudit(sessionUser.username || 'Agent', 'Update Client Payment Target', `Set per-client weekly target to Rs. ${round2(target)} PKR`, 'agents');
+  res.json({
+    success: true,
+    target_pkr: round2(target),
+    client_min_payout_pkr: agents[idx].client_min_payout_pkr ?? getGlobalMinPayoutPkr()
+  });
+});
+
+app.post('/api/agent/client-payment-tracker/pay', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  const agentId = Number(sessionUser.id);
+  const clientId = Number(req.body?.client_id);
+  if (!Number.isInteger(clientId) || clientId <= 0) {
+    return res.status(400).json({ error: 'Valid client_id is required.' });
+  }
+
+  const clients = readDb('clients') || [];
+  const cIdx = clients.findIndex(c => c && Number(c.id) === clientId);
+  if (cIdx === -1) return res.status(404).json({ error: 'Client not found.' });
+  const clientRec = clients[cIdx];
+  if (Number(clientRec.agent_id) !== agentId) {
+    return res.status(403).json({ error: 'Forbidden. You can only pay your own downline clients.' });
+  }
+
+  const rawWeekStart = String(req.body?.week_start || '').trim();
+  const weekStartYmd = /^\d{4}-\d{2}-\d{2}$/.test(rawWeekStart)
+    ? getUtcWeekMondayYmd(rawWeekStart)
+    : getUtcWeekMondayYmd(new Date());
+  const weekEndYmd = addDaysYmd(weekStartYmd, 6);
+
+  const method = String(req.body?.method || 'Bank Transfer (IBAN)').trim().slice(0, 80) || 'Bank Transfer (IBAN)';
+  const wallet = String(req.body?.wallet || '').trim().slice(0, 180);
+  const txid = String(req.body?.txid || '').trim().slice(0, 120);
+  const notes = String(req.body?.notes || '').trim().slice(0, 260);
+  const settleRequestId = req.body?.settle_request_id != null && req.body?.settle_request_id !== ''
+    ? Number(req.body.settle_request_id)
+    : null;
+
+  const fx = getUsdToPkrRate();
+  const nowIso = new Date().toISOString();
+  const payouts = readDb('payout_requests') || [];
+
+  // Mode 1: Settle an existing pending Weekly (API) payout request submitted by the client
+  if (settleRequestId && Number.isInteger(settleRequestId)) {
+    const pIdx = payouts.findIndex(p => p && Number(p.id) === settleRequestId);
+    if (pIdx === -1) return res.status(404).json({ error: 'Pending payout request not found.' });
+    const existingReq = payouts[pIdx];
+    const reqRole = String(existingReq.role || existingReq.recipient_role || '').toLowerCase();
+    const reqClientMatch = Number(existingReq.client_id || existingReq.user_id) === clientId
+      || String(existingReq.username || existingReq.user || '').trim().toLowerCase() === String(clientRec.username || '').trim().toLowerCase();
+    if (reqRole !== 'client' || !reqClientMatch || getPayoutRequestType(existingReq) !== 'weekly') {
+      return res.status(403).json({ error: 'Forbidden. Payout request does not belong to this client weekly API queue.' });
+    }
+    const prevSt = String(existingReq.status || '').toLowerCase();
+    if (prevSt === 'paid' || prevSt === 'completed') {
+      return res.status(409).json({ error: `Payout request #${existingReq.id} is already paid.` });
+    }
+    const reqFx = Number(existingReq.fx_usd_to_pkr) || fx;
+    const reqCur = String(existingReq.currency || 'PKR').toUpperCase();
+    const rawAmt = Number(existingReq.amount || 0);
+    const pkrAmt = reqCur === 'PKR' ? round2(rawAmt) : round2(rawAmt * reqFx);
+    const usdAmt = reqCur === 'PKR' ? (existingReq.amount_usd != null ? Number(existingReq.amount_usd) : round6(pkrAmt / reqFx)) : round6(rawAmt);
+
+    const currentBal = Number(clients[cIdx].balance || 0);
+    const currentBalPkr = clients[cIdx].balance_pkr != null ? Number(clients[cIdx].balance_pkr) : round2(currentBal * reqFx);
+    if (currentBalPkr + 0.01 < pkrAmt) {
+      return res.status(409).json({ error: `Insufficient client PKR balance (Rs. ${cleanMoneyStr(currentBalPkr, 2)}) for payout of Rs. ${cleanMoneyStr(pkrAmt, 2)}` });
+    }
+
+    clients[cIdx].balance_pkr = Math.max(0, round2(currentBalPkr - pkrAmt));
+    clients[cIdx].balance = Math.max(0, Math.round((currentBal - usdAmt) * 1000000) / 1000000);
+    writeDb('clients', clients);
+
+    payouts[pIdx] = {
+      ...existingReq,
+      status: 'paid',
+      paid_at: nowIso,
+      paid_by_username: sessionUser.username,
+      paid_by_role: 'Agent',
+      paid_amount_pkr: pkrAmt,
+      txid: txid || existingReq.txid || '',
+      notes: notes || existingReq.notes || '',
+      tracked_week_start: weekStartYmd,
+      tracked_week_end: weekEndYmd
+    };
+    writeDb('payout_requests', payouts);
+
+    try {
+      const creditNotes = readDb('credit_notes') || [];
+      creditNotes.unshift({
+        id: nextId(creditNotes, 'credit_notes'),
+        date: nowIso,
+        created: nowIso,
+        agent_id: agentId,
+        client_id: clientId,
+        user_id: clientId,
+        username: clientRec.username,
+        role: 'Client',
+        payout_request_id: existingReq.id,
+        amount: pkrAmt,
+        amount_usd: usdAmt,
+        currency: 'PKR',
+        fx_usd_to_pkr: reqFx,
+        term: 'Weekly',
+        reason: `Weekly Tracker Payout #${existingReq.id} (${weekStartYmd} to ${weekEndYmd})`,
+        status: 'settled'
+      });
+      writeDb('credit_notes', creditNotes);
+    } catch (cnErr) {
+      console.error('Failed to log tracker credit note:', cnErr);
+    }
+
+    sendInstantNotification({
+      recipient_role: 'client',
+      recipient_id: clientId,
+      recipient_username: clientRec.username,
+      title: `Weekly (API) Payout Paid (Rs. ${cleanMoneyStr(pkrAmt, 2)} PKR)`,
+      message: `Your weekly payout request #${existingReq.id} for Rs. ${cleanMoneyStr(pkrAmt, 2)} PKR (${weekStartYmd} to ${weekEndYmd}) has been paid by ${sessionUser.username}${txid ? ` · Ref: ${txid}` : ''}.`,
+      type: 'payout',
+      category: 'payments',
+      action_page: 'payout-requests',
+      status: 'paid',
+      actor_role: 'Agent',
+      actor_name: sessionUser.username,
+      metadata: { payout_id: existingReq.id, amount: pkrAmt, currency: 'PKR', week_start: weekStartYmd }
+    });
+
+    logAudit(sessionUser.username || 'Agent', 'Tracker Settle Client Payout', `Settled request #${existingReq.id} for ${clientRec.username}: Rs. ${pkrAmt} PKR (${weekStartYmd}..${weekEndYmd})`, 'payout_requests');
+    return res.json({
+      success: true,
+      mode: 'settled_request',
+      payout: payouts[pIdx],
+      remaining_balance_pkr: clients[cIdx].balance_pkr
+    });
+  }
+
+  // Mode 2: Direct Agent-initiated Weekly (API) payout (even if client has not submitted a request)
+  const reqAmountPkr = round2(Number(req.body?.amount_pkr));
+  if (!Number.isFinite(reqAmountPkr) || reqAmountPkr <= 0) {
+    return res.status(400).json({ error: 'Enter a valid positive PKR payout amount.' });
+  }
+
+  const split = computeUserSplitWallets(
+    { role: 'Client', id: clientId, username: clientRec.username, agent_id: agentId },
+    payouts,
+    new Date()
+  );
+  const ww = split.weekly_wallet || {};
+  const currentBal = Number(clients[cIdx].balance || 0);
+  const currentBalPkr = clients[cIdx].balance_pkr != null ? Number(clients[cIdx].balance_pkr) : round2(currentBal * fx);
+  const maxWeeklyApiPayablePkr = Math.max(0, round2(Math.min(
+    currentBalPkr,
+    Math.max(0, Number(ww.balance_pkr || 0) - Number(ww.pending_pkr || 0))
+  )));
+
+  if (maxWeeklyApiPayablePkr <= 0.01) {
+    return res.status(409).json({
+      error: Number(ww.pending_pkr || 0) > 0
+        ? `No extra unpaid Weekly (API) balance available — Rs. ${cleanMoneyStr(ww.pending_pkr, 2)} PKR is already reserved in a pending request. Settle the pending request instead.`
+        : 'Client has Rs. 0 unpaid Weekly (API) balance available to pay.'
+    });
+  }
+
+  if (reqAmountPkr > maxWeeklyApiPayablePkr + 0.01) {
+    return res.status(409).json({
+      error: `Amount exceeds client's unpaid Weekly (API) balance (Max payable: Rs. ${cleanMoneyStr(maxWeeklyApiPayablePkr, 2)} PKR). Whitenoise / Monthly funds are kept strictly separate.`
+    });
+  }
+
+  const finalPkrAmt = round2(Math.min(reqAmountPkr, maxWeeklyApiPayablePkr));
+  const finalUsdAmt = round6(finalPkrAmt / fx);
+
+  clients[cIdx].balance_pkr = Math.max(0, round2(currentBalPkr - finalPkrAmt));
+  clients[cIdx].balance = Math.max(0, Math.round((currentBal - finalUsdAmt) * 1000000) / 1000000);
+  writeDb('clients', clients);
+
+  const newPayout = {
+    id: nextId(payouts, 'payout_requests'),
+    user_id: clientId,
+    client_id: clientId,
+    agent_id: agentId,
+    username: clientRec.username,
+    user: clientRec.username,
+    recipient_username: clientRec.username,
+    role: 'Client',
+    recipient_role: 'client',
+    payout_type: 'weekly',
+    payterm: 'Weekly',
+    schedule: 'Weekly (API)',
+    source: 'agent_weekly_tracker',
+    tracked_week_start: weekStartYmd,
+    tracked_week_end: weekEndYmd,
+    currency: 'PKR',
+    amount: finalPkrAmt,
+    amount_pkr: finalPkrAmt,
+    paid_amount_pkr: finalPkrAmt,
+    amount_usd: finalUsdAmt,
+    fx_usd_to_pkr: fx,
+    method,
+    mode: method,
+    wallet: wallet || 'Direct Agent Payout',
+    txid: txid || '',
+    notes: notes || `Direct Weekly (API) Settlement (${weekStartYmd} to ${weekEndYmd})`,
+    status: 'paid',
+    timestamp: nowIso,
+    created: nowIso,
+    paid_at: nowIso,
+    paid_by_username: sessionUser.username,
+    paid_by_role: 'Agent'
+  };
+
+  payouts.unshift(newPayout);
+  writeDb('payout_requests', payouts);
+
+  try {
+    const creditNotes = readDb('credit_notes') || [];
+    creditNotes.unshift({
+      id: nextId(creditNotes, 'credit_notes'),
+      date: nowIso,
+      created: nowIso,
+      agent_id: agentId,
+      client_id: clientId,
+      user_id: clientId,
+      username: clientRec.username,
+      role: 'Client',
+      payout_request_id: newPayout.id,
+      amount: finalPkrAmt,
+      amount_usd: finalUsdAmt,
+      currency: 'PKR',
+      fx_usd_to_pkr: fx,
+      term: 'Weekly',
+      reason: `Direct Weekly (API) Payout #${newPayout.id} (${weekStartYmd} to ${weekEndYmd})`,
+      status: 'settled'
+    });
+    writeDb('credit_notes', creditNotes);
+  } catch (cnErr) {
+    console.error('Failed to log direct tracker credit note:', cnErr);
+  }
+
+  sendInstantNotification({
+    recipient_role: 'client',
+    recipient_id: clientId,
+    recipient_username: clientRec.username,
+    title: `Weekly (API) Payout Paid (Rs. ${cleanMoneyStr(finalPkrAmt, 2)} PKR)`,
+    message: `Your agent ${sessionUser.username} directly settled Rs. ${cleanMoneyStr(finalPkrAmt, 2)} PKR for Weekly (API) week ${weekStartYmd} to ${weekEndYmd} via ${method}${txid ? ` · Ref: ${txid}` : ''}.`,
+    type: 'payout',
+    category: 'payments',
+    action_page: 'payout-requests',
+    status: 'paid',
+    actor_role: 'Agent',
+    actor_name: sessionUser.username,
+    metadata: { payout_id: newPayout.id, amount: finalPkrAmt, currency: 'PKR', week_start: weekStartYmd, direct_tracker: true }
+  });
+
+  logAudit(sessionUser.username || 'Agent', 'Direct Weekly Client Payout', `Directly paid ${clientRec.username} Rs. ${finalPkrAmt} PKR for week ${weekStartYmd}..${weekEndYmd} via ${method}`, 'payout_requests');
+
+  res.json({
+    success: true,
+    mode: 'direct_payout',
+    payout: newPayout,
+    remaining_balance_pkr: clients[cIdx].balance_pkr
+  });
 });
 
 app.get('/api/client/rate-card', requireAuth, (req, res) => {

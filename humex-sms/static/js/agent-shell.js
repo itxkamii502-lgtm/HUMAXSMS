@@ -126,8 +126,9 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
       if (!g.t) {
         return g.items.map(([label, page, icon]) => {
           const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(page) : `/ints/agent/${page}`;
-          return `<a class="zy-snav nav-item" id="nav-${page}" data-page="${page}" href="${href}"
-                ${(page === 'live-access' || page === 'method-vault') ? 'style="display:none;"' : ''}
+          const hideDef = (page === 'live-access' || page === 'method-vault');
+          return `<a class="zy-snav nav-item${hideDef ? ' zy-nav-hidden' : ''}" id="nav-${page}" data-page="${page}" href="${href}"
+                ${hideDef ? 'hidden style="display:none !important;"' : ''}
                 onclick="return window.zyNavClick ? window.zyNavClick(event, '${page}') : (event.preventDefault(), loadPage('${page}'), false)">
              <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${icon}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${label}</span>
              <i class="fas fa-chevron-right zy-caret zy-caret-sm"></i>
@@ -136,8 +137,9 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
       }
       const subItems = g.items.map(([label, page, icon]) => {
         const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(page) : `/ints/agent/${page}`;
-        return `<a class="zy-ssub-item" id="nav-${page}" data-page="${page}" href="${href}"
-              ${page === 'cdr2' ? 'style="display:none;"' : ''}
+        const hideSub = (page === 'cdr2');
+        return `<a class="zy-ssub-item${hideSub ? ' zy-nav-hidden' : ''}" id="nav-${page}" data-page="${page}" href="${href}"
+              ${hideSub ? 'hidden style="display:none !important;"' : ''}
               onclick="return window.zyNavClick ? window.zyNavClick(event, '${page}') : (event.preventDefault(), loadPage('${page}'), false)">
            <i class="fas ${icon || 'fa-circle-dot'} zy-sub-ic" aria-hidden="true"></i><span class="zy-sub-txt">${label}</span>
          </a>`;
@@ -190,23 +192,30 @@ window.ZY_WHITENOISE_ACCESS = false;
 window.ZY_APP_LINKS_ACCESS = true;
 window.ZY_LIVE_ACCESS_ENABLED = false;
 window.ZY_METHOD_VAULT_ACCESS = false;
+function _zySetNavVisible(el, visible) {
+  if (!el) return;
+  const show = Boolean(visible);
+  el.classList.toggle('zy-nav-hidden', !show);
+  el.hidden = !show;
+  if (show) {
+    el.style.removeProperty('display');
+  } else {
+    el.style.setProperty('display', 'none', 'important');
+  }
+}
 window.zySyncLiveAccessNav = function(enabled) {
   window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
-  const laEl = document.getElementById('nav-live-access');
-  if (laEl) laEl.style.display = window.ZY_LIVE_ACCESS_ENABLED ? '' : 'none';
+  _zySetNavVisible(document.getElementById('nav-live-access'), window.ZY_LIVE_ACCESS_ENABLED);
 };
 window.zyRefreshWhitenoiseNav = function(me) {
   const allowed = Boolean(me && me.whitenoise_access);
   window.ZY_WHITENOISE_ACCESS = allowed;
-  const el = document.getElementById('nav-cdr2');
-  if (el) el.style.display = allowed ? '' : 'none';
+  _zySetNavVisible(document.getElementById('nav-cdr2'), allowed);
   window.ZY_APP_LINKS_ACCESS = true;
-  const appEl = document.getElementById('nav-app-links');
-  if (appEl) appEl.style.display = '';
+  _zySetNavVisible(document.getElementById('nav-app-links'), true);
   const mvAllowed = Boolean(me && me.method_vault_access);
   window.ZY_METHOD_VAULT_ACCESS = mvAllowed;
-  const mvEl = document.getElementById('nav-method-vault');
-  if (mvEl) mvEl.style.display = mvAllowed ? '' : 'none';
+  _zySetNavVisible(document.getElementById('nav-method-vault'), mvAllowed);
   if (me && typeof me.live_access_enabled === 'boolean') {
     window.zySyncLiveAccessNav(me.live_access_enabled);
   }

@@ -387,6 +387,14 @@ body.sidebar-open {
   user-select: none;
   text-decoration: none !important;
 }
+.zy-nav-hidden,
+.zy-sidenav .zy-snav.zy-nav-hidden,
+.adminui .zy-sidenav .zy-snav.zy-nav-hidden,
+.zy-sidenav.zy-sidenav-flat .zy-snav.zy-snav-direct.zy-nav-hidden,
+.zy-sidenav .zy-ssub-item.zy-nav-hidden,
+.zy-sidenav [hidden] {
+  display: none !important;
+}
 .zy-sidenav .zy-snav .zy-snav-txt {
   white-space: nowrap;
   overflow: hidden;

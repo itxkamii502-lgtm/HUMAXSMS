@@ -5576,7 +5576,11 @@ window.zyRenderAppLinksPager = function(opts) {
         if (res && res.error && /not enabled|forbidden/i.test(String(res.error))) {
           window.ZY_METHOD_VAULT_ACCESS = false;
           const mvNav = document.getElementById('nav-apps-method');
-          if (mvNav) mvNav.style.display = 'none';
+          if (mvNav) {
+            mvNav.classList.add('zy-nav-hidden');
+            mvNav.hidden = true;
+            mvNav.style.setProperty('display', 'none', 'important');
+          }
           window.zyCloseClientAppsMethodDrawer();
           return;
         }
@@ -5588,7 +5592,11 @@ window.zyRenderAppLinksPager = function(opts) {
       if (err && /not enabled|forbidden|403/i.test(String(err.message || ''))) {
         window.ZY_METHOD_VAULT_ACCESS = false;
         const mvNav = document.getElementById('nav-apps-method');
-        if (mvNav) mvNav.style.display = 'none';
+        if (mvNav) {
+          mvNav.classList.add('zy-nav-hidden');
+          mvNav.hidden = true;
+          mvNav.style.setProperty('display', 'none', 'important');
+        }
         window.zyCloseClientAppsMethodDrawer();
         return;
       }

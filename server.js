@@ -27376,12 +27376,16 @@ function getMethodVaultStorageStats() {
 
   return {
     used_bytes: usedBytes,
+    used_gb: Math.round((usedBytes / (1024 * 1024 * 1024)) * 1000) / 1000,
     max_bytes: METHOD_VAULT_MAX_BYTES,
+    max_gb: Math.round((METHOD_VAULT_MAX_BYTES / (1024 * 1024 * 1024)) * 100) / 100,
     remaining_bytes: remainingCapBytes,
     used_pct: usedPct,
+    used_percent: usedPct,
     file_count: fileCount,
     max_file_bytes: METHOD_VAULT_MAX_FILE_BYTES,
     disk_free_bytes: diskFreeBytes,
+    disk_free_gb: diskFreeBytes !== null ? Math.round((diskFreeBytes / (1024 * 1024 * 1024)) * 100) / 100 : null,
     disk_total_bytes: diskTotalBytes,
     min_free_bytes: METHOD_VAULT_MIN_FREE_BYTES,
     vps_low_disk: vpsLowDisk,
@@ -27633,29 +27637,41 @@ app.get('/api/owner/method-vault/agents', requireAuth, (req, res) => {
   }
   const agents = readDb('agents') || [];
   const items = readDb('method_vault_items') || [];
+  const requests = readDb('method_vault_requests') || [];
   const storage = getMethodVaultStorageStats();
 
   const perAgentMap = new Map();
   for (const it of items) {
     if (!it) continue;
     const aid = Number(it.agent_id);
-    const prev = perAgentMap.get(aid) || { count: 0, bytes: 0, active_count: 0 };
+    const prev = perAgentMap.get(aid) || { count: 0, bytes: 0, active_count: 0, pending_requests: 0 };
     prev.count += 1;
     if (it.active !== false) prev.active_count += 1;
     prev.bytes += Number(it.video_size || 0);
     perAgentMap.set(aid, prev);
   }
+  for (const r of requests) {
+    if (!r || r.status !== 'pending') continue;
+    const aid = Number(r.agent_id);
+    const prev = perAgentMap.get(aid) || { count: 0, bytes: 0, active_count: 0, pending_requests: 0 };
+    prev.pending_requests += 1;
+    perAgentMap.set(aid, prev);
+  }
 
   const list = agents.map(a => {
-    const st = perAgentMap.get(Number(a.id)) || { count: 0, bytes: 0, active_count: 0 };
+    const st = perAgentMap.get(Number(a.id)) || { count: 0, bytes: 0, active_count: 0, pending_requests: 0 };
     return {
       id: Number(a.id),
       username: a.username,
+      full_name: a.full_name || a.name || '',
       status: a.status || 'active',
       method_vault_access: Boolean(a.method_vault_access),
+      method_count: st.count,
       video_count: st.count,
       active_apps_count: st.active_count,
-      used_bytes: st.bytes
+      used_bytes: st.bytes,
+      used_mb: Math.round((st.bytes / (1024 * 1024)) * 10) / 10,
+      pending_requests: st.pending_requests
     };
   });
 
@@ -27671,7 +27687,8 @@ app.put('/api/owner/method-vault/agents/:id', requireAuth, (req, res) => {
   const idx = agents.findIndex(a => Number(a.id) === agentId);
   if (idx === -1) return res.status(404).json({ error: 'Agent not found.' });
 
-  const enabled = Boolean(req.body && req.body.method_vault_access);
+  const body = req.body || {};
+  const enabled = Boolean('method_vault_access' in body ? body.method_vault_access : body.enabled);
   agents[idx].method_vault_access = enabled;
   writeDb('agents', agents);
 
@@ -27691,7 +27708,7 @@ app.put('/api/owner/method-vault/agents/:id', requireAuth, (req, res) => {
     actor_name: req.sessionUser.username || 'Owner'
   });
 
-  res.json({ success: true, agent_id: agentId, method_vault_access: enabled });
+  res.json({ success: true, agent_id: agentId, username: agents[idx].username, method_vault_access: enabled, enabled });
 });
 
 // ── AGENT: Vault Bootstrap (Storage + Methods + Requests + Targets) ─

@@ -7925,7 +7925,7 @@ window.toggleOwnerAgentVaultAccess = async function(agentId, enabled, checkboxEl
   try {
     const res = await apiFetch(`/api/owner/method-vault/agents/${Number(agentId)}`, {
       method: 'PUT',
-      body: JSON.stringify({ enabled: Boolean(enabled) })
+      body: JSON.stringify({ method_vault_access: Boolean(enabled), enabled: Boolean(enabled) })
     });
     if (res && res.success) {
       toast(`Apps Method Vault ${enabled ? 'enabled' : 'disabled'} for ${res.username || 'Agent'}`, 'success');

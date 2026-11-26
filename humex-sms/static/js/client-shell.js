@@ -152,8 +152,8 @@ window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
     side.innerHTML = ZY_CLIENT_MENU.map((item) => {
       const svg = ZY_CLIENT_ICONS[item.page] || ZY_CLIENT_ICONS.dashboard;
       const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(item.page) : `/ints/client/${item.page}`;
-      return `<a class="zy-snav nav-item zy-snav-direct" id="nav-${item.page}" data-page="${item.page}" href="${href}"
-            ${item.hiddenByDefault ? 'style="display:none;"' : ''}
+      return `<a class="zy-snav nav-item zy-snav-direct${item.hiddenByDefault ? ' zy-nav-hidden' : ''}" id="nav-${item.page}" data-page="${item.page}" href="${href}"
+            ${item.hiddenByDefault ? 'hidden style="display:none !important;"' : ''}
             onclick="return window.zyNavClick ? window.zyNavClick(event, '${item.page}') : (event.preventDefault(), loadPage('${item.page}'), false)">
          <span class="zy-ic zy-cl-ic-box" style="--ic-fg:${item.color};--ic-bg:${item.tint};">${svg}</span>
          <span class="zy-snav-lbl">${item.label}</span>
@@ -199,24 +199,31 @@ window.ZY_WHITENOISE_ACCESS = false;
 window.ZY_APP_LINKS_ACCESS = false;
 window.ZY_LIVE_ACCESS_ENABLED = false;
 window.ZY_METHOD_VAULT_ACCESS = false;
+function _zySetClientNavVisible(el, visible) {
+  if (!el) return;
+  const show = Boolean(visible);
+  el.classList.toggle('zy-nav-hidden', !show);
+  el.hidden = !show;
+  if (show) {
+    el.style.removeProperty('display');
+  } else {
+    el.style.setProperty('display', 'none', 'important');
+  }
+}
 window.zySyncLiveAccessNav = function(enabled) {
   window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
-  const laEl = document.getElementById('nav-live-access');
-  if (laEl) laEl.style.display = window.ZY_LIVE_ACCESS_ENABLED ? '' : 'none';
+  _zySetClientNavVisible(document.getElementById('nav-live-access'), window.ZY_LIVE_ACCESS_ENABLED);
 };
 window.zyRefreshWhitenoiseNav = function(me) {
   const allowed = Boolean(me && me.whitenoise_access);
   window.ZY_WHITENOISE_ACCESS = allowed;
-  const el = document.getElementById('nav-cdr2');
-  if (el) el.style.display = allowed ? '' : 'none';
+  _zySetClientNavVisible(document.getElementById('nav-cdr2'), allowed);
   const appAllowed = Boolean(me && me.app_links_access);
   window.ZY_APP_LINKS_ACCESS = appAllowed;
-  const appEl = document.getElementById('nav-app-links');
-  if (appEl) appEl.style.display = appAllowed ? '' : 'none';
+  _zySetClientNavVisible(document.getElementById('nav-app-links'), appAllowed);
   const mvAllowed = Boolean(me && me.method_vault_access);
   window.ZY_METHOD_VAULT_ACCESS = mvAllowed;
-  const mvEl = document.getElementById('nav-apps-method');
-  if (mvEl) mvEl.style.display = mvAllowed ? '' : 'none';
+  _zySetClientNavVisible(document.getElementById('nav-apps-method'), mvAllowed);
   if (me && typeof me.live_access_enabled === 'boolean') {
     window.zySyncLiveAccessNav(me.live_access_enabled);
   }

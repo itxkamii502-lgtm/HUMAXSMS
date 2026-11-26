@@ -186,15 +186,20 @@
     const allowed = Boolean(meObj.method_vault_access);
     window.ZY_METHOD_VAULT_ACCESS = allowed;
     const role = String(meObj.role || '').toLowerCase();
+    const setNav = (el, show) => {
+      if (!el) return;
+      el.classList.toggle('zy-nav-hidden', !show);
+      el.hidden = !show;
+      if (show) el.style.removeProperty('display');
+      else el.style.setProperty('display', 'none', 'important');
+    };
     if (role === 'client') {
-      const mvEl = document.getElementById('nav-apps-method');
-      if (mvEl) mvEl.style.display = allowed ? '' : 'none';
+      setNav(document.getElementById('nav-apps-method'), allowed);
       if (!allowed && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
         window.zyCloseClientAppsMethodDrawer();
       }
     } else if (role === 'agent') {
-      const mvEl = document.getElementById('nav-method-vault');
-      if (mvEl) mvEl.style.display = allowed ? '' : 'none';
+      setNav(document.getElementById('nav-method-vault'), allowed);
     }
   }
 

@@ -13572,8 +13572,83 @@ body.dark-mode .zy-modal-alert.is-success,
 .zy-smart-range-select {
   width: 100%;
 }
+.zy-smart-actions-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.zy-smart-create-btn {
+  white-space: nowrap;
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #047857;
+  background: rgba(16, 185, 129, 0.08);
+  font-weight: 600;
+}
+.zy-smart-create-btn:hover {
+  background: #059669;
+  border-color: #059669;
+  color: #ffffff;
+}
+[data-theme="dark"] .zy-smart-create-btn {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.42);
+  background: rgba(16, 185, 129, 0.14);
+}
+[data-theme="dark"] .zy-smart-create-btn:hover {
+  background: #059669;
+  color: #ffffff;
+}
 .zy-smart-commit-btn {
   white-space: nowrap;
+}
+.zy-sqr-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  color: var(--text-primary, #1e293b);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.zy-sqr-banner i {
+  color: #2563eb;
+  flex-shrink: 0;
+}
+.zy-sqr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-bottom: 10px;
+}
+@media (max-width: 560px) {
+  .zy-sqr-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.zy-sqr-auto-import {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-top: 6px;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.zy-sqr-auto-import input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #059669;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 .zy-smart-imported-banner {
   display: flex;

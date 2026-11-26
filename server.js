@@ -11827,12 +11827,36 @@ app.post('/api/numbers/smart-sheet-preview', requireAuth, upload.single('file'),
         totalNew++;
       }
 
+      const matchDigits = newDigits.length ? newDigits : grp.entries.map(e => e.digits);
       const match = findBestRangeMatch(
         grp.label,
-        newDigits.length ? newDigits : grp.entries.map(e => e.digits),
+        matchDigits,
         ownerRanges,
         filename
       );
+
+      // Compute common leading digit prefix & country for 1-click Quick Create Range
+      let detectedPrefix = '';
+      if (matchDigits.length) {
+        let lcp = String(matchDigits[0] || '');
+        for (let i = 1; i < matchDigits.length && lcp.length > 0; i++) {
+          const cur = String(matchDigits[i] || '');
+          let j = 0;
+          const maxLen = Math.min(lcp.length, cur.length, 8);
+          while (j < maxLen && lcp[j] === cur[j]) j++;
+          lcp = lcp.slice(0, j);
+        }
+        detectedPrefix = lcp.length >= 2 ? lcp.slice(0, 6) : String(matchDigits[0] || '').slice(0, 5);
+      }
+      let detectedCountry = '';
+      if (matchDigits.length && typeof detectCountry === 'function') {
+        const dc = String(detectCountry(matchDigits[0]) || '').trim();
+        if (dc && dc !== '—' && dc.toLowerCase() !== 'unknown') detectedCountry = dc;
+      }
+      if (!detectedCountry) {
+        const cleanLbl = String(grp.label || '').replace(/[_-]+/g, ' ').replace(/\d+/g, ' ').trim();
+        detectedCountry = cleanLbl.split(/\s+/).slice(0, 2).join(' ') || String(grp.label || '').trim();
+      }
 
       const groupKey = `grp_${idx + 1}`;
       processedGroups.push({
@@ -11845,6 +11869,8 @@ app.post('/api/numbers/smart-sheet-preview', requireAuth, upload.single('file'),
         duplicate_in_file_count: dupInFileCount,
         sample_new: newNumbers.slice(0, 8),
         sample_existing: existingSamples,
+        detected_prefix: detectedPrefix,
+        detected_country: detectedCountry,
         suggested_range_id: match.suggested_range_id,
         suggested_range_name: match.suggested_range_name,
         match_confidence: match.match_confidence,

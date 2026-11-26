@@ -9698,9 +9698,14 @@ function renderSmartSheetImportBody() {
                 ${rangeOptionsHtml(activeTargetId)}
               </select>
             </div>
-            <button type="button" class="btn btn-primary zy-smart-commit-btn" id="smart-btn-${escapeHtml(g.group_key)}" onclick="zyCommitSmartGroup('${escapeHtml(g.group_key)}')">
-              <i class="fas fa-plus-circle"></i> Add ${g.new_count} New Numbers
-            </button>
+            <div class="zy-smart-actions-btns">
+              <button type="button" class="btn btn-outline zy-smart-create-btn" onclick="zyOpenSmartQuickCreateRange('${escapeHtml(g.group_key)}')" title="Create a new Range with this sheet name right here">
+                <i class="fas fa-folder-plus"></i> Create Range
+              </button>
+              <button type="button" class="btn btn-primary zy-smart-commit-btn" id="smart-btn-${escapeHtml(g.group_key)}" onclick="zyCommitSmartGroup('${escapeHtml(g.group_key)}')">
+                <i class="fas fa-plus-circle"></i> Add ${g.new_count} New Numbers
+              </button>
+            </div>
           `}
         </div>
       </div>
@@ -9868,6 +9873,272 @@ async function zyCommitAllMatchedSmartGroups() {
   }
   toast(res.message || `Imported ${res.inserted || 0} number(s)`, (res.inserted || 0) > 0 ? 'success' : 'warning');
   renderSmartSheetImportBody();
+}
+
+// Remember last Provider / Currency / Payterm during a Smart Sheet session for ultra-fast multi-range creation
+let _smartQuickRangePrefs = { provider: '', currency: 'USD', payterm: '', cost: '', payout: '' };
+
+function zyInferSmartGroupPrefix(grp) {
+  if (grp && grp.detected_prefix) return String(grp.detected_prefix).replace(/\D/g, '');
+  const nums = (grp && Array.isArray(grp.sample_new) ? grp.sample_new : [])
+    .map(n => String(n || '').replace(/\D/g, ''))
+    .filter(Boolean);
+  if (!nums.length) return '';
+  let lcp = nums[0];
+  for (let i = 1; i < nums.length && lcp.length > 0; i++) {
+    let j = 0;
+    const maxLen = Math.min(lcp.length, nums[i].length, 8);
+    while (j < maxLen && lcp[j] === nums[i][j]) j++;
+    lcp = lcp.slice(0, j);
+  }
+  return lcp.length >= 2 ? lcp.slice(0, 6) : nums[0].slice(0, 5);
+}
+
+function zyInferSmartGroupCountry(grp) {
+  if (grp && grp.detected_country) return String(grp.detected_country).trim();
+  const lbl = String((grp && grp.label) || '').trim();
+  const clean = lbl.replace(/[_-]+/g, ' ').replace(/\d+/g, ' ').trim();
+  return clean.split(/\s+/).slice(0, 2).join(' ') || lbl;
+}
+
+function zySmartQuickSyncPayterm(fromProviderChange = false) {
+  const provVal = String(document.getElementById('sqr-provider')?.value || '').trim().toLowerCase();
+  const nameVal = String(document.getElementById('sqr-name')?.value || '').trim().toLowerCase();
+  const ptSel = document.getElementById('sqr-payterm');
+  const payoutLbl = document.getElementById('sqr-payout-lbl');
+  if (!ptSel) return;
+  if (fromProviderChange) {
+    const looksWn = provVal.includes('whitenoise') || nameVal.includes('whitenoise');
+    ptSel.value = looksWn ? 'Monthly' : 'Weekly';
+  }
+  const isMonthly = ptSel.value === 'Monthly';
+  if (payoutLbl) {
+    payoutLbl.innerHTML = isMonthly
+      ? '<i class="fas fa-coins"></i> Agent Payout — Monthly (30/5) {W} *'
+      : '<i class="fas fa-coins"></i> Agent Payout — Weekly (7/3) *';
+  }
+}
+
+function zyOpenSmartQuickCreateRange(groupKey) {
+  if (!_smartImportState) return;
+  const grp = (_smartImportState.groups || []).find(g => g.group_key === groupKey);
+  if (!grp) return;
+
+  const defaultName = String(grp.label || '').trim();
+  const defaultPrefix = zyInferSmartGroupPrefix(grp);
+  const defaultCountry = zyInferSmartGroupCountry(grp);
+  const isWnGuess = defaultName.toLowerCase().includes('whitenoise') ||
+    String(_smartQuickRangePrefs.provider || '').toLowerCase().includes('whitenoise');
+  const defaultPayterm = _smartQuickRangePrefs.payterm || (isWnGuess ? 'Monthly' : 'Weekly');
+  const defaultCurrency = _smartQuickRangePrefs.currency || 'USD';
+
+  openModal(`Create Range: ${escapeHtml(defaultName)}`, `
+    <form id="smart-quick-range-form" onsubmit="zySubmitSmartQuickCreateRange(event, '${escapeHtml(groupKey)}')">
+      <div class="zy-sqr-banner">
+        <i class="fas fa-wand-magic-sparkles"></i>
+        <span>Range name &amp; prefix auto-filled from sheet. Set <strong>Provider, Rates &amp; Payterm</strong> to create immediately.</span>
+      </div>
+
+      <div class="zy-sqr-grid">
+        <div class="form-group">
+          <label class="form-label">Range Name *</label>
+          <input id="sqr-name" class="form-control" value="${escapeHtml(defaultName)}" required oninput="zySmartQuickSyncPayterm(false)">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Provider (API / Manual) *</label>
+          <select id="sqr-provider-select" class="form-control" style="margin-bottom:6px;" onchange="zyOwnerOnProviderSelectChange('sqr-provider-select','sqr-provider');zySmartQuickSyncPayterm(true);">
+            <option value="__custom__">Loading API providers…</option>
+          </select>
+          <input id="sqr-provider" class="form-control" value="${escapeHtml(_smartQuickRangePrefs.provider || '')}" placeholder="Select above or type provider (e.g. Whitenoise, MTN)" required oninput="zySmartQuickSyncPayterm(true)">
+        </div>
+      </div>
+
+      <div class="zy-sqr-grid">
+        <div class="form-group">
+          <label class="form-label">Country *</label>
+          <input id="sqr-country" class="form-control" value="${escapeHtml(defaultCountry)}" placeholder="e.g. Ghana" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Range Prefix *</label>
+          <input id="sqr-prefix" class="form-control monospace" value="${escapeHtml(defaultPrefix)}" placeholder="e.g. 23355" required>
+        </div>
+      </div>
+
+      <div class="zy-sqr-grid">
+        <div class="form-group">
+          <label class="form-label" style="color:#0f766e;"><i class="fas fa-lock"></i> Provider / Buy Rate *</label>
+          <input type="number" id="sqr-cost" class="form-control monospace" step="0.0001" min="0" value="${escapeHtml(_smartQuickRangePrefs.cost || '')}" placeholder="e.g. 0.0200" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Currency</label>
+          <select id="sqr-currency" class="form-control">
+            <option value="USD"${defaultCurrency === 'USD' ? ' selected' : ''}>USD ($)</option>
+            <option value="EUR"${defaultCurrency === 'EUR' ? ' selected' : ''}>EUR (€)</option>
+            <option value="GBP"${defaultCurrency === 'GBP' ? ' selected' : ''}>GBP (£)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="zy-sqr-grid">
+        <div class="form-group">
+          <label class="form-label"><i class="fas fa-calendar-check"></i> Payterm *</label>
+          <select id="sqr-payterm" class="form-control" onchange="zySmartQuickSyncPayterm(false)">
+            <option value="Weekly"${defaultPayterm === 'Weekly' ? ' selected' : ''}>Weekly (7/3) — Standard Routes</option>
+            <option value="Monthly"${defaultPayterm === 'Monthly' ? ' selected' : ''}>Monthly (30/5) {W} — Whitenoise</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="sqr-payout-lbl"><i class="fas fa-coins"></i> Agent Payout Rate *</label>
+          <input type="number" id="sqr-payout" class="form-control monospace" step="0.0001" min="0" value="${escapeHtml(_smartQuickRangePrefs.payout || '')}" placeholder="e.g. 0.0120" required>
+        </div>
+      </div>
+
+      <label class="zy-sqr-auto-import">
+        <input type="checkbox" id="sqr-auto-import" checked>
+        <span>Create Range &amp; immediately import all <strong>${Number(grp.new_count || 0)}</strong> verified new number(s) into it</span>
+      </label>
+
+      <div class="form-actions" style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn btn-outline btn-sm" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary btn-sm" id="sqr-submit-btn">
+          <i class="fas fa-plus-circle"></i> Create Range &amp; Save
+        </button>
+      </div>
+    </form>
+  `);
+
+  zySmartQuickSyncPayterm(false);
+  zyOwnerLoadProviderChoices('sqr-provider-select', 'sqr-provider', _smartQuickRangePrefs.provider || '', !_smartQuickRangePrefs.provider).then(() => {
+    if (!_smartQuickRangePrefs.payterm) zySmartQuickSyncPayterm(true);
+  });
+  setTimeout(() => {
+    const costEl = document.getElementById('sqr-cost');
+    if (costEl) costEl.focus();
+  }, 60);
+}
+
+async function zySubmitSmartQuickCreateRange(event, groupKey) {
+  event.preventDefault();
+  if (!_smartImportState) return;
+  const grp = (_smartImportState.groups || []).find(g => g.group_key === groupKey);
+  if (!grp) return;
+
+  const range_name = String(document.getElementById('sqr-name')?.value || '').trim();
+  const provider = String(document.getElementById('sqr-provider')?.value || '').trim() || 'Manual';
+  const country = String(document.getElementById('sqr-country')?.value || '').trim();
+  const prefix = String(document.getElementById('sqr-prefix')?.value || '').trim().replace(/^\++/, '');
+  const currency = document.getElementById('sqr-currency')?.value || 'USD';
+  const paytermChoice = document.getElementById('sqr-payterm')?.value || 'Weekly';
+  const rawCost = String(document.getElementById('sqr-cost')?.value ?? '').trim();
+  const rawPayout = String(document.getElementById('sqr-payout')?.value ?? '').trim();
+  const autoImport = Boolean(document.getElementById('sqr-auto-import')?.checked);
+
+  const companyCost = rawCost !== '' && !isNaN(parseFloat(rawCost)) ? parseFloat(rawCost) : null;
+  const payoutVal = rawPayout !== '' && !isNaN(parseFloat(rawPayout)) ? parseFloat(rawPayout) : null;
+
+  if (!range_name || !country || !prefix) {
+    toast('Please fill Range Name, Country, and Prefix.', 'error');
+    return;
+  }
+  if (companyCost === null || companyCost < 0) {
+    toast('Please enter a valid Provider / Buy Rate.', 'error');
+    return;
+  }
+  if (payoutVal === null || payoutVal < 0) {
+    toast('Please enter a valid Agent Payout Rate.', 'error');
+    return;
+  }
+
+  const isWn = Boolean(
+    paytermChoice === 'Monthly' ||
+    provider.toLowerCase().includes('whitenoise') ||
+    range_name.toLowerCase().includes('whitenoise')
+  );
+  const primaryPayterm = isWn ? 'Monthly' : 'Weekly';
+  const payterms = { [primaryPayterm]: payoutVal };
+
+  const btn = document.getElementById('sqr-submit-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner"></div> Creating…';
+  }
+
+  try {
+    const payload = {
+      range_name,
+      name: range_name,
+      country,
+      provider,
+      prefix,
+      currency,
+      memo: '',
+      company_cost: companyCost,
+      cost: companyCost,
+      payout: payoutVal,
+      payterm: primaryPayterm,
+      payout_schedule: isWn ? 'monthly30_5' : 'weekly7_3',
+      cycle_days: isWn ? 30 : 7,
+      hold_days: isWn ? 5 : 3,
+      is_whitenoise: isWn,
+      payterms,
+      active_payterms: [primaryPayterm],
+      otp_limit: 0,
+      inactivity_days: 0,
+      range_status: 'active',
+      active: true
+    };
+
+    const created = await apiFetch('/api/numbers/sms-ranges', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+
+    if (!created || !created.id) {
+      toast(created?.error || 'Failed to create range.', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Range &amp; Save'; }
+      return;
+    }
+
+    // Remember preferences for next range on this sheet
+    _smartQuickRangePrefs = {
+      provider,
+      currency,
+      payterm: primaryPayterm,
+      cost: rawCost,
+      payout: rawPayout
+    };
+
+    // Add newly created range into the live Smart Sheet state so all dropdowns see it immediately
+    const newOption = {
+      id: Number(created.id),
+      range_name: created.range_name || created.name || range_name,
+      country: created.country || country,
+      prefix: created.prefix || prefix,
+      provider: created.provider || provider,
+      is_whitenoise: Boolean(created.is_whitenoise || isWn),
+      payterm: created.payterm || primaryPayterm
+    };
+    _smartImportState.owner_ranges = (_smartImportState.owner_ranges || []).filter(r => Number(r.id) !== newOption.id);
+    _smartImportState.owner_ranges.unshift(newOption);
+
+    // Automatically select this newly created range on the current sheet group
+    grp.selected_range_id = newOption.id;
+    grp.suggested_range_id = newOption.id;
+    grp.suggested_range_name = newOption.range_name;
+    grp.match_confidence = 'high';
+    grp.match_reason = 'Created from sheet';
+
+    closeModal();
+    toast(`Range "${newOption.range_name}" created!`, 'success');
+    renderSmartSheetImportBody();
+
+    if (autoImport && Number(grp.new_count || 0) > 0) {
+      await zyCommitSmartGroup(groupKey);
+    }
+  } catch (err) {
+    toast(err.message || 'Failed to create range.', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Range &amp; Save'; }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════

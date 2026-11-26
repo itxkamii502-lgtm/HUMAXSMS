@@ -2869,6 +2869,7 @@ async function renderSmsRanges() {
           h: `<div style="display:inline-flex;gap:4px;align-items:center;justify-content:center;">
                 <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyOwnerViewRangeById(${r.id})" title="View Range Details" data-apx-tooltip="View"><i class="fas fa-eye"></i></button>
                 <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="zyOwnerEditRangeById(${r.id})" title="Edit Rates" data-apx-tooltip="Edit"><i class="fas fa-pen"></i></button>
+                <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#d97706;" onclick="adminDeleteRangeNumbersOnly(${r.id},'${safeDelName}',${qty})" title="Delete Numbers Only" data-apx-tooltip="Delete Numbers Only"><i class="fas fa-eraser"></i></button>
                 <button type="button" class="apx-btn apx-btn-icon apx-btn-small" onclick="adminDeleteRange(${r.id},'${safeDelName}')" title="Delete Range" data-apx-tooltip="Delete"><i class="fas fa-trash"></i></button>
               </div>`
         }
@@ -3016,6 +3017,115 @@ async function doAdminDeleteRange(ev, rangeId) {
     if (btn) {
       btn.disabled = false;
       btn.innerHTML = '<i class="fas fa-trash"></i> Verify PIN & Delete Range';
+    }
+  }
+}
+
+function adminDeleteRangeNumbersOnly(rangeId, rangeName, numCount) {
+  const safeName = escapeHtml(rangeName || ('#' + rangeId));
+  const cnt = Number(numCount || 0);
+  openModal('Delete Numbers Only — Security Verification', `
+    <form id="del-range-nums-pin-form" onsubmit="doAdminDeleteRangeNumbersOnly(event, ${Number(rangeId)})" autocomplete="off" style="padding:6px 0;">
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+        <div style="font-size:13.5px;font-weight:700;color:#92400e;margin-bottom:4px;">
+          <i class="fas fa-eraser" style="margin-right:6px;"></i>Delete numbers only for "${safeName}"?
+        </div>
+        <div style="font-size:12.5px;color:#78350f;line-height:1.45;">
+          This will permanently delete <strong>${cnt > 0 ? cnt.toLocaleString() + ' number(s)' : 'all numbers'}</strong> belonging to this range across the entire system (Owner, Agent &amp; Client pools).<br>
+          <strong>The range itself, its rates, and existing SMS/CDR logs will stay untouched.</strong>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:12px;">
+        <label for="del-range-nums-pin-input" class="form-label" style="display:block;font-size:12.5px;font-weight:700;color:#1e293b;margin-bottom:6px;">
+          <i class="fas fa-shield-halved" style="color:#d97706;margin-right:5px;"></i>Enter Security PIN to Confirm
+        </label>
+        <input
+          type="password"
+          id="del-range-nums-pin-input"
+          inputmode="numeric"
+          autocomplete="new-password"
+          maxlength="16"
+          placeholder="••••••"
+          required
+          style="width:100%;height:42px;padding:0 14px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:18px;letter-spacing:6px;text-align:center;font-weight:700;color:#0f172a;background:#fff;outline:none;"
+        />
+        <div id="del-range-nums-pin-err" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;background:#fee2e2;color:#b91c1c;font-size:12.5px;font-weight:600;"></div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button type="submit" id="del-range-nums-pin-submit" class="btn btn-warning" style="background:#d97706;border-color:#d97706;color:#fff;">
+          <i class="fas fa-eraser"></i> Verify PIN &amp; Delete Numbers Only
+        </button>
+      </div>
+    </form>
+  `);
+  setTimeout(() => {
+    const inp = document.getElementById('del-range-nums-pin-input');
+    if (inp) inp.focus();
+  }, 60);
+}
+
+async function doAdminDeleteRangeNumbersOnly(ev, rangeId) {
+  if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+  const inp = document.getElementById('del-range-nums-pin-input');
+  const errEl = document.getElementById('del-range-nums-pin-err');
+  const btn = document.getElementById('del-range-nums-pin-submit');
+  const pin = String(inp ? inp.value : '').trim();
+
+  const showErr = (msg) => {
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+    }
+    if (inp) {
+      inp.value = '';
+      inp.style.borderColor = '#dc2626';
+      inp.focus();
+    }
+  };
+
+  if (!pin) {
+    showErr('Please enter your Security PIN.');
+    return;
+  }
+
+  if (errEl) errEl.style.display = 'none';
+  if (inp) inp.style.borderColor = '#cbd5e1';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying…';
+  }
+
+  try {
+    const response = await fetch(`${API}/api/numbers/sms-ranges/${encodeURIComponent(rangeId)}/numbers`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Delete-Pin': pin
+      },
+      body: JSON.stringify({ pin })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.success) {
+      showErr(result?.error || 'Invalid Security PIN. Numbers were not deleted.');
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-eraser"></i> Verify PIN &amp; Delete Numbers Only';
+      }
+      return;
+    }
+    closeModal();
+    toast(`${result.deleted_numbers ?? 0} number(s) deleted from "${result.range_name || ('#' + rangeId)}" (range kept intact)`, 'warning');
+    renderSmsRanges();
+  } catch (err) {
+    console.error('Delete range numbers only error:', err);
+    showErr('Connection error while verifying PIN. Please try again.');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-eraser"></i> Verify PIN &amp; Delete Numbers Only';
     }
   }
 }

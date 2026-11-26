@@ -10038,6 +10038,77 @@ app.delete('/api/numbers/sms-ranges/:id', requireAuth, (req, res) => {
   res.json({ success: true, deleted_numbers: deletedNumbers, deleted_rates: deletedRates, range_name: displayRngName });
 });
 
+// Delete Numbers Only for a specific SMS Range (keeps range, rates & SMS logs intact; PIN-protected Owner-only)
+app.delete('/api/numbers/sms-ranges/:id/numbers', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser?.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Only Owner can delete range numbers.' });
+  }
+
+  const attemptKey = `${sessionUser.id || 'owner'}:${req.ip || 'local'}`;
+  const nowMs = Date.now();
+  const rec = RANGE_DELETE_PIN_ATTEMPTS.get(attemptKey);
+  if (rec && nowMs - rec.firstAt < RANGE_DELETE_PIN_WINDOW_MS && rec.count >= RANGE_DELETE_PIN_MAX_TRIES) {
+    const waitSec = Math.ceil((RANGE_DELETE_PIN_WINDOW_MS - (nowMs - rec.firstAt)) / 1000);
+    return res.status(429).json({ error: `Too many invalid PIN attempts. Please wait ${waitSec}s and try again.` });
+  }
+
+  const submittedPin = req.body?.pin ?? req.headers['x-delete-pin'] ?? '';
+  if (!String(submittedPin).trim()) {
+    return res.status(400).json({ error: 'Security PIN is required to delete range numbers.' });
+  }
+  if (!verifyRangeDeletePin(submittedPin)) {
+    const nextRec = (!rec || nowMs - rec.firstAt >= RANGE_DELETE_PIN_WINDOW_MS)
+      ? { count: 1, firstAt: nowMs }
+      : { count: rec.count + 1, firstAt: rec.firstAt };
+    RANGE_DELETE_PIN_ATTEMPTS.set(attemptKey, nextRec);
+    logAudit(sessionUser.username || 'Owner', 'Delete Range Numbers Blocked', `Invalid security PIN entered for range #${req.params.id}`, 'Ranges');
+    return res.status(403).json({ error: 'Invalid Security PIN. Numbers were not deleted.' });
+  }
+  RANGE_DELETE_PIN_ATTEMPTS.delete(attemptKey);
+
+  const ranges = readDb('sms_ranges') || [];
+  const id = Number(req.params.id);
+  const targetRange = ranges.find(r => Number(r.id) === id);
+  if (!targetRange) {
+    return res.status(404).json({ error: 'Range not found.' });
+  }
+
+  const otherRanges = ranges.filter(r => Number(r.id) !== id);
+  const targetCountry = (targetRange.country || '').trim().toLowerCase();
+  const targetProvider = (targetRange.provider || 'Manual').trim().toLowerCase();
+  const targetName = (targetRange.range_name || targetRange.name || '').trim().toLowerCase();
+  const otherUsesCountryProvider = otherRanges.some(r =>
+    String(r.country || '').trim().toLowerCase() === targetCountry &&
+    String(r.provider || 'Manual').trim().toLowerCase() === targetProvider
+  );
+
+  let numbers = readDb('numbers') || [];
+  const initLen = numbers.length;
+  numbers = numbers.filter(n => {
+    if (!n) return false;
+    // 1. Direct range_id match
+    if (n.range_id && Number(n.range_id) === id) return false;
+    // 2. Direct range_name match
+    if (targetName && String(n.range_name || n.range || '').trim().toLowerCase() === targetName) return false;
+    // 3. If range_id is not set, match country and provider only if no other active range uses them
+    if (!n.range_id && targetCountry && targetProvider && !otherUsesCountryProvider) {
+      const c = (n.country || '').trim().toLowerCase();
+      const p = (n.provider || '').trim().toLowerCase();
+      if (c === targetCountry && p === targetProvider) return false;
+    }
+    return true;
+  });
+  const deletedNumbers = initLen - numbers.length;
+  if (deletedNumbers > 0) {
+    writeDb('numbers', numbers);
+  }
+
+  const displayRngName = targetRange.range_name || targetRange.name || `#${id}`;
+  logAudit(sessionUser.username || 'Owner', 'Delete Range Numbers Only', `PIN-verified removal of ${deletedNumbers} number(s) from range "${displayRngName}" (#${id}) — range kept intact`, 'Ranges');
+  res.json({ success: true, deleted_numbers: deletedNumbers, range_name: displayRngName });
+});
+
 // Import to existing or new range
 app.post('/api/numbers/import-to-range', (req, res) => {
   try {

@@ -52,6 +52,8 @@
     createModalAvatar: '',     // base64 data URI preview during creation
     createModalSearch: '',
     reactionPickerMsgId: null,
+    reactionPickerBelow: false,
+    ignoreOutsideClickUntil: 0,
     seenModal: null,           // { loading, convId, msgId, data, error }
     uploadingGroupAvatar: false,
     confirmDeleteGroup: false,
@@ -2397,12 +2399,17 @@
         : '';
 
       const reactPickerHtml = isReactOpen && !m.deleted && !m._optimistic
-        ? `<div class="zy-chat-react-picker ${isCh ? 'is-left' : (isMine ? 'is-right' : 'is-left')}" data-react-picker="${m.id}">
+        ? `<div class="zy-chat-react-picker ${isCh ? 'is-left' : (isMine ? 'is-right' : 'is-left')} ${state.reactionPickerBelow ? 'is-below' : ''}" data-react-picker="${m.id}">
              ${QUICK_REACTIONS.map(em => {
                const mineActive = Array.isArray(m.reactions_summary) && m.reactions_summary.some(r => r.emoji === em && r.me);
                return `<button type="button" class="zy-chat-react-opt ${mineActive ? 'is-mine' : ''}" data-pick-react="${m.id}" data-emoji="${em}">${em}</button>`;
              }).join('')}
            </div>`
+        : '';
+
+      const canSwipeReply = Boolean(conv.can_send && !m.deleted && !m._optimistic && !state.selectMode);
+      const swipeReplyIcoHtml = canSwipeReply
+        ? `<span class="zy-chat-swipe-ico" aria-hidden="true"><i class="fas fa-reply"></i></span>`
         : '';
 
       const reactionsSummary = !m.deleted && Array.isArray(m.reactions_summary) ? m.reactions_summary : [];
@@ -2486,6 +2493,7 @@
         return `
           ${divider}
           <div class="zy-chat-msg-row is-channel-post ${state.selectMode ? 'is-selectable' : ''} ${isSelected ? 'is-selected' : ''} ${reactionsSummary.length ? 'has-reactions' : ''} ${isReactOpen ? 'has-react-open' : ''}" data-msg-id="${m.id}">
+            ${swipeReplyIcoHtml}
             ${selectCheckboxHtml}
             <div class="zy-ch-post-wrap">
               ${reactPickerHtml}
@@ -2519,6 +2527,7 @@
       return `
         ${divider}
         <div class="zy-chat-msg-row ${isMine ? 'is-out' : 'is-in'} ${samePrevSender ? 'is-grouped' : ''} ${state.selectMode ? 'is-selectable' : ''} ${isSelected ? 'is-selected' : ''} ${reactionsSummary.length ? 'has-reactions' : ''} ${isReactOpen ? 'has-react-open' : ''}" data-msg-id="${m.id}">
+          ${swipeReplyIcoHtml}
           ${selectCheckboxHtml}
           <div class="zy-chat-bubble-col ${isMine ? 'is-out' : 'is-in'}">
             ${reactPickerHtml}
@@ -2597,7 +2606,7 @@
     // Bind photo lightbox zoom
     feed.querySelectorAll('[data-open-img]').forEach(wrap => {
       wrap.addEventListener('click', (e) => {
-        if (state.selectMode || wrap.classList.contains('is-uploading')) return;
+        if (state.selectMode || wrap.classList.contains('is-uploading') || Date.now() < state.ignoreOutsideClickUntil) return;
         e.stopPropagation();
         const mid = Number(wrap.dataset.imgMid);
         const target = msgs.find(x => Number(x.id) === mid);
@@ -2613,7 +2622,7 @@
     // Bind quote jump
     feed.querySelectorAll('[data-jump-msg]').forEach(el => {
       el.addEventListener('click', () => {
-        if (state.selectMode) return;
+        if (state.selectMode || Date.now() < state.ignoreOutsideClickUntil) return;
         jumpToMessage(Number(el.dataset.jumpMsg));
       });
     });
@@ -2649,20 +2658,20 @@
         const act = btn.dataset.act;
         const target = msgs.find(x => Number(x.id) === mid);
         if (act === 'react') {
-          state.reactionPickerMsgId = Number(state.reactionPickerMsgId) === mid ? null : mid;
-          const prevScroll = feed.scrollTop;
-          renderMessagesPane(false);
-          feed.scrollTop = prevScroll;
+          if (Number(state.reactionPickerMsgId) === mid) {
+            state.reactionPickerMsgId = null;
+            state.reactionPickerBelow = false;
+            const prevScroll = feed.scrollTop;
+            renderMessagesPane(false);
+            feed.scrollTop = prevScroll;
+          } else {
+            const anchorEl = btn.closest('.zy-chat-bubble, .zy-ch-post-card') || btn;
+            openReactionPickerForMessage(mid, anchorEl, false);
+          }
         } else if (act === 'seen') {
           openMessageSeenModal(conv.id, mid);
         } else if (act === 'reply' && target) {
-          const replyBody = target.image
-            ? (target.body ? `📷 ${target.body}` : '📷 Photo')
-            : target.body;
-          state.replyTo = { id: target.id, sender_name: target.sender_name, body: replyBody };
-          renderReplyStrip();
-          const inp = document.getElementById('zy-chat-input');
-          if (inp) inp.focus();
+          activateReplyToMessage(target);
         } else if (act === 'pin') {
           const isAlreadyPinned = Number(conv.pinned_message_id) === mid;
           pinMessage(conv.id, isAlreadyPinned ? null : mid);
@@ -2672,11 +2681,357 @@
       });
     });
 
+    // Bind WhatsApp-style Long-Press Emoji Bar & Swipe-to-Reply Gestures
+    if (!state.selectMode) {
+      bindMessageGestures(feed, conv, msgs);
+    }
+
     if (scrollBottom) {
       requestAnimationFrame(() => {
         feed.scrollTop = feed.scrollHeight;
       });
     }
+  }
+
+  function triggerSubtleHaptic(ms) {
+    try {
+      if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms || 14);
+    } catch (_) {}
+  }
+
+  function activateReplyToMessage(target) {
+    if (!target || target.deleted || target._optimistic) return;
+    const conv = getActiveConv();
+    if (!conv || !conv.can_send) return;
+    const replyBody = target.image
+      ? (target.body ? `📷 ${target.body}` : '📷 Photo')
+      : target.body;
+    state.replyTo = { id: target.id, sender_name: target.sender_name, body: replyBody };
+    if (state.reactionPickerMsgId != null) {
+      state.reactionPickerMsgId = null;
+      state.reactionPickerBelow = false;
+      const feed = document.getElementById('zy-chat-feed');
+      const prevScroll = feed ? feed.scrollTop : null;
+      renderMessagesPane(false);
+      if (feed && prevScroll != null) feed.scrollTop = prevScroll;
+    }
+    renderReplyStrip();
+    const strip = document.getElementById('zy-chat-reply-strip');
+    if (strip) {
+      strip.classList.remove('is-pop');
+      void strip.offsetWidth;
+      strip.classList.add('is-pop');
+    }
+    const inp = document.getElementById('zy-chat-input');
+    if (inp) inp.focus();
+  }
+
+  function openReactionPickerForMessage(mid, anchorEl, fromLongPress) {
+    const feed = document.getElementById('zy-chat-feed');
+    if (!feed) return;
+    let placeBelow = false;
+    try {
+      if (anchorEl) {
+        const aRect = anchorEl.getBoundingClientRect();
+        const fRect = feed.getBoundingClientRect();
+        if ((aRect.top - fRect.top) < 76) placeBelow = true;
+      }
+    } catch (_) {}
+    state.reactionPickerMsgId = Number(mid);
+    state.reactionPickerBelow = placeBelow;
+    if (fromLongPress) {
+      state.ignoreOutsideClickUntil = Date.now() + 500;
+      const extendOnRelease = () => {
+        state.ignoreOutsideClickUntil = Date.now() + 420;
+      };
+      window.addEventListener('touchend', extendOnRelease, { once: true, capture: true, passive: true });
+      window.addEventListener('mouseup', extendOnRelease, { once: true, capture: true });
+      triggerSubtleHaptic(14);
+      try {
+        const sel = window.getSelection && window.getSelection();
+        if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      } catch (_) {}
+    }
+    const prevScroll = feed.scrollTop;
+    renderMessagesPane(false);
+    feed.scrollTop = prevScroll;
+  }
+
+  function bindMessageGestures(feed, conv, msgs) {
+    const LONG_PRESS_TOUCH_MS = 360;
+    const LONG_PRESS_MOUSE_MS = 400;
+    const MOVE_CANCEL_PX = 9;
+    const SWIPE_LOCK_PX = 11;
+    const SWIPE_TRIGGER_PX = 48;
+    const SWIPE_MAX_PX = 72;
+
+    const msgById = new Map();
+    msgs.forEach(m => { if (m && m.id != null) msgById.set(Number(m.id), m); });
+
+    const isInteractiveControl = (el) => Boolean(
+      el && el.closest('button, a, input, textarea, select, label, .zy-chat-react-picker, .zy-chat-react-chip, .zy-chat-msg-actions, .zy-chat-seen-pill, .zy-chat-del-toggle')
+    );
+
+    const calcDampedOffset = (rawDx) => {
+      const abs = Math.abs(rawDx);
+      const damped = abs <= 52 ? abs : 52 + (abs - 52) * 0.25;
+      return Math.min(SWIPE_MAX_PX, damped) * (rawDx >= 0 ? 1 : -1);
+    };
+
+    feed.querySelectorAll('.zy-chat-msg-row[data-msg-id]').forEach(row => {
+      const mid = Number(row.dataset.msgId);
+      const target = msgById.get(mid);
+      if (!target || target.deleted || target._optimistic) return;
+
+      const bubbleEl = row.querySelector('.zy-chat-bubble, .zy-ch-post-card');
+      const slideEl = row.querySelector('.zy-chat-bubble-col, .zy-ch-post-wrap');
+      const swipeIco = row.querySelector('.zy-chat-swipe-ico');
+      const isOut = row.classList.contains('is-out');
+      const canReply = Boolean(conv && conv.can_send && slideEl && swipeIco);
+      if (!bubbleEl) return;
+
+      let pressTimer = null;
+      let holdVisualTimer = null;
+      let longPressFired = false;
+
+      let swipeActive = false;
+      let swipeLockedDir = null; // 'h' | 'v' | null
+      let swipeArmed = false;
+      let swipeRawDx = 0;
+      let startX = 0;
+      let startY = 0;
+
+      const clearPressTimers = () => {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        if (holdVisualTimer) { clearTimeout(holdVisualTimer); holdVisualTimer = null; }
+        bubbleEl.classList.remove('is-longpress-holding');
+      };
+
+      const resetSwipeVisual = (animate) => {
+        if (slideEl) {
+          if (animate) {
+            slideEl.classList.add('is-swipe-returning');
+            setTimeout(() => { slideEl.classList.remove('is-swipe-returning'); }, 240);
+          } else {
+            slideEl.classList.remove('is-swipe-returning');
+          }
+          slideEl.style.transform = '';
+        }
+        row.classList.remove('is-swiping');
+        if (swipeIco) {
+          swipeIco.style.opacity = '';
+          swipeIco.style.transform = '';
+          swipeIco.classList.remove('is-armed', 'is-right');
+        }
+      };
+
+      const updateSwipeVisual = (rawDx) => {
+        if (!slideEl || !swipeIco) return;
+        const clamped = calcDampedOffset(rawDx);
+        const absRaw = Math.abs(rawDx);
+        const progress = Math.min(1, absRaw / SWIPE_TRIGGER_PX);
+        const armedNow = absRaw >= SWIPE_TRIGGER_PX;
+
+        slideEl.classList.remove('is-swipe-returning');
+        slideEl.style.transform = `translate3d(${clamped.toFixed(1)}px, 0, 0)`;
+
+        swipeIco.classList.toggle('is-right', clamped < 0);
+        swipeIco.classList.toggle('is-armed', armedNow);
+        const scale = armedNow ? 1.1 : (0.5 + progress * 0.5);
+        swipeIco.style.opacity = String(Math.min(1, progress * 1.15).toFixed(2));
+        swipeIco.style.transform = `translateY(-50%) scale(${scale.toFixed(2)})`;
+
+        if (armedNow && !swipeArmed) {
+          swipeArmed = true;
+          triggerSubtleHaptic(16);
+        } else if (!armedNow && swipeArmed) {
+          swipeArmed = false;
+        }
+      };
+
+      const isAllowedSwipeDx = (dx) => {
+        // Incoming & Channel: slide right; Outgoing: slide right (WhatsApp) OR slide left (inward)
+        if (isOut) return dx !== 0;
+        return dx > 0;
+      };
+
+      // Suppress mobile native long-press menu when our emoji reaction bar triggered
+      row.addEventListener('contextmenu', (e) => {
+        if (longPressFired || Date.now() < state.ignoreOutsideClickUntil + 160) {
+          e.preventDefault();
+        }
+      });
+
+      // ── Touch Gestures (Mobile / Tablet): Long-Press Emoji Bar + Swipe-to-Reply ──
+      row.addEventListener('touchstart', (e) => {
+        if (state.selectMode || !e.touches || e.touches.length !== 1) return;
+        if (isInteractiveControl(e.target)) return;
+
+        const t = e.touches[0];
+        startX = t.clientX;
+        startY = t.clientY;
+        longPressFired = false;
+        swipeActive = false;
+        swipeLockedDir = null;
+        swipeArmed = false;
+        swipeRawDx = 0;
+
+        const startedInsideBubble = Boolean(e.target && e.target.closest('.zy-chat-bubble, .zy-ch-post-card'));
+        if (startedInsideBubble) {
+          holdVisualTimer = setTimeout(() => {
+            if (!swipeActive) bubbleEl.classList.add('is-longpress-holding');
+          }, 90);
+          pressTimer = setTimeout(() => {
+            longPressFired = true;
+            clearPressTimers();
+            openReactionPickerForMessage(mid, bubbleEl, true);
+          }, LONG_PRESS_TOUCH_MS);
+        }
+      }, { passive: true });
+
+      row.addEventListener('touchmove', (e) => {
+        if (!e.touches || e.touches.length !== 1) {
+          clearPressTimers();
+          return;
+        }
+        const t = e.touches[0];
+        const dx = t.clientX - startX;
+        const dy = t.clientY - startY;
+
+        if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) {
+          clearPressTimers();
+        }
+        if (longPressFired || !canReply) return;
+
+        if (!swipeLockedDir) {
+          if (Math.abs(dy) > SWIPE_LOCK_PX && Math.abs(dy) >= Math.abs(dx) * 1.1) {
+            swipeLockedDir = 'v';
+            return;
+          }
+          if (Math.abs(dx) > SWIPE_LOCK_PX && Math.abs(dx) > Math.abs(dy) * 1.25 && isAllowedSwipeDx(dx)) {
+            swipeLockedDir = 'h';
+            swipeActive = true;
+            row.classList.add('is-swiping');
+          }
+        }
+
+        if (swipeLockedDir === 'h' && swipeActive) {
+          if (e.cancelable) e.preventDefault();
+          const effectiveDx = isOut ? dx : Math.max(0, dx);
+          swipeRawDx = effectiveDx;
+          updateSwipeVisual(effectiveDx);
+        }
+      }, { passive: false });
+
+      const finishTouch = () => {
+        clearPressTimers();
+        if (swipeActive) {
+          const shouldReply = swipeArmed && Math.abs(swipeRawDx) >= SWIPE_TRIGGER_PX;
+          swipeActive = false;
+          swipeLockedDir = null;
+          swipeArmed = false;
+          swipeRawDx = 0;
+          resetSwipeVisual(true);
+          state.ignoreOutsideClickUntil = Date.now() + 360;
+          if (shouldReply) {
+            activateReplyToMessage(target);
+          }
+        } else {
+          swipeLockedDir = null;
+        }
+      };
+
+      row.addEventListener('touchend', finishTouch, { passive: true });
+      row.addEventListener('touchcancel', () => {
+        clearPressTimers();
+        if (swipeActive) {
+          swipeActive = false;
+          swipeLockedDir = null;
+          swipeArmed = false;
+          swipeRawDx = 0;
+          resetSwipeVisual(true);
+        }
+      }, { passive: true });
+
+      // ── Mouse Gestures (Desktop): Hold-to-React + Non-Text Horizontal Slide-to-Reply ──
+      row.addEventListener('mousedown', (e) => {
+        if (state.selectMode || e.button !== 0) return;
+        if (isInteractiveControl(e.target)) return;
+
+        startX = e.clientX;
+        startY = e.clientY;
+        longPressFired = false;
+        swipeActive = false;
+        swipeLockedDir = null;
+        swipeArmed = false;
+        swipeRawDx = 0;
+
+        const startedInsideBubble = Boolean(e.target && e.target.closest('.zy-chat-bubble, .zy-ch-post-card'));
+        const startedOnSelectableText = Boolean(e.target && e.target.closest('.zy-chat-text, .zy-ch-post-body, .zy-chat-del-preview-txt'));
+
+        if (startedInsideBubble) {
+          holdVisualTimer = setTimeout(() => {
+            if (!swipeActive) bubbleEl.classList.add('is-longpress-holding');
+          }, 110);
+          pressTimer = setTimeout(() => {
+            longPressFired = true;
+            clearPressTimers();
+            openReactionPickerForMessage(mid, bubbleEl, true);
+          }, LONG_PRESS_MOUSE_MS);
+        }
+
+        const onMouseMove = (me) => {
+          const dx = me.clientX - startX;
+          const dy = me.clientY - startY;
+          if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) {
+            clearPressTimers();
+          }
+          if (longPressFired || !canReply || startedOnSelectableText) return;
+
+          if (!swipeLockedDir) {
+            if (Math.abs(dy) > SWIPE_LOCK_PX && Math.abs(dy) >= Math.abs(dx) * 1.1) {
+              swipeLockedDir = 'v';
+              return;
+            }
+            if (Math.abs(dx) > SWIPE_LOCK_PX && Math.abs(dx) > Math.abs(dy) * 1.35 && isAllowedSwipeDx(dx)) {
+              swipeLockedDir = 'h';
+              swipeActive = true;
+              row.classList.add('is-swiping');
+            }
+          }
+
+          if (swipeLockedDir === 'h' && swipeActive) {
+            me.preventDefault();
+            const effectiveDx = isOut ? dx : Math.max(0, dx);
+            swipeRawDx = effectiveDx;
+            updateSwipeVisual(effectiveDx);
+          }
+        };
+
+        const onMouseUp = () => {
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+          clearPressTimers();
+          if (swipeActive) {
+            const shouldReply = swipeArmed && Math.abs(swipeRawDx) >= SWIPE_TRIGGER_PX;
+            swipeActive = false;
+            swipeLockedDir = null;
+            swipeArmed = false;
+            swipeRawDx = 0;
+            resetSwipeVisual(true);
+            state.ignoreOutsideClickUntil = Date.now() + 360;
+            if (shouldReply) {
+              activateReplyToMessage(target);
+            }
+          } else {
+            swipeLockedDir = null;
+          }
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+    });
   }
 
   function jumpToMessage(msgId) {
@@ -3832,8 +4187,10 @@
       }
     }
     if (state.reactionPickerMsgId != null) {
+      if (Date.now() < state.ignoreOutsideClickUntil) return;
       if (!e.target.closest('.zy-chat-react-picker') && !e.target.closest('[data-act="react"]')) {
         state.reactionPickerMsgId = null;
+        state.reactionPickerBelow = false;
         const feed = document.getElementById('zy-chat-feed');
         const prevScroll = feed ? feed.scrollTop : null;
         renderMessagesPane(false);

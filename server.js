@@ -2465,14 +2465,29 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   const maxHoldLimit = Math.max(batchSize, Number(lim.max_hold_limit || CLIENT_RANGE_DEFAULT_MAX_HOLD));
   const dailyNumbersLimit = Math.max(batchSize, Number(lim.daily_numbers_limit || (batchSize * dailyAddsLimit)));
 
+  const allRangesList = (preloaded && preloaded.ranges) || readDb('sms_ranges') || [];
+  const matchedRangeRec = allRangesList.find(rng => matchesRangeRef(rng, rangeId, rangeName));
+  const resetCutoffMs = (matchedRangeRec && matchedRangeRec.numbers_reset_at)
+    ? (Date.parse(matchedRangeRec.numbers_reset_at) || 0)
+    : 0;
+  const isBeforeReset = (tsVal) => {
+    if (!resetCutoffMs) return false;
+    const t = Date.parse(tsVal || '');
+    return Number.isFinite(t) && t <= resetCutoffMs;
+  };
+
   const heldCount = numbers.filter(n =>
     n && Number(n.client_id) === cid && matchesRangeRef(n, rangeId, rangeName)
   ).length;
 
   const clientRangeReqs = requests.filter(r => {
     if (!r || Number(r.client_id) !== cid) return false;
-    if (String(r.status || '').toLowerCase() === 'rejected') return false;
-    return matchesRangeRef(r, rangeId, rangeName);
+    const st = String(r.status || '').toLowerCase();
+    if (st === 'rejected' || st === 'cancelled') return false;
+    if (r.quota_reset) return false;
+    if (!matchesRangeRef(r, rangeId, rangeName)) return false;
+    if (isBeforeReset(r.created || r.timestamp)) return false;
+    return true;
   });
 
   const pendingReqs = clientRangeReqs
@@ -2489,19 +2504,22 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
 
   // Direct allocations (self-allocate or manual agent assign) not originating from a number request
   const directTodayHistory = history.filter(h => {
-    if (!h) return false;
+    if (!h || h.quota_reset) return false;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) return false;
     if (h.request_id || /^(Allocated via Request #|Request #\d+)/i.test(String(h.notes || '').trim())) return false;
     if (!matchesRangeRef(h, rangeId, rangeName)) return false;
+    if (isBeforeReset(h.timestamp || h.created)) return false;
     return String(h.timestamp || h.created || '').slice(0, 10) === todayIso;
   });
 
   const directTodayNums = numbers.filter(n => {
     if (!n || Number(n.client_id) !== cid) return false;
     if (!matchesRangeRef(n, rangeId, rangeName)) return false;
-    const assignedDay = String(n.client_assigned_at || n.assigned_at || n.assigned_date || '').slice(0, 10);
+    const assignedTs = n.client_assigned_at || n.assigned_at || n.assigned_date || '';
+    if (isBeforeReset(assignedTs)) return false;
+    const assignedDay = String(assignedTs).slice(0, 10);
     if (assignedDay !== todayIso) return false;
     if (String(n.notes || '').startsWith('Allocated via Request #')) return false;
     return true;
@@ -2517,12 +2535,13 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     if (Number.isFinite(ts) && ts >= weekCutoffMs) weeklyEventsMs.push(ts);
   }
   for (const h of history) {
-    if (!h) continue;
+    if (!h || h.quota_reset) continue;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) continue;
     if (h.request_id || /^(Allocated via Request #|Request #\d+)/i.test(String(h.notes || '').trim())) continue;
     if (!matchesRangeRef(h, rangeId, rangeName)) continue;
+    if (isBeforeReset(h.timestamp || h.created)) continue;
     const ts = Date.parse(h.timestamp || h.created || '');
     if (Number.isFinite(ts) && ts >= weekCutoffMs) weeklyEventsMs.push(ts);
   }
@@ -9020,7 +9039,7 @@ app.get('/api/sms/period-stats', (req, res) => {
   res.json(result);
 });
 
-// ── Providers List Endpoint (/api/providers) ──────────────────
+// ── Providers List Endpoint (/api/providers) — Owner Only ─────
 app.get('/api/providers', requireAuth, requireApiRole(['owner', 'admin']), (req, res) => {
   try {
     const ranges = readDb('sms_ranges') || [];
@@ -9028,44 +9047,64 @@ app.get('/api/providers', requireAuth, requireApiRole(['owner', 'admin']), (req,
     const crConns = readDb('cr_api_connections') || [];
     const wnConns = readDb('whitenoise_connections') || [];
     const loginPanels = readDb('login_panels') || [];
-    const provSet = new Set();
 
-    // Dynamically add providers from connected CR API panels (panel_name is the provider)
-    crConns.forEach(c => {
-      const name = (c.panel_name || '').trim();
-      if (name && name !== 'CR API Panel' && name !== 'Manual' && name !== '—') {
-        provSet.add(name);
-      } else if (name) {
-        provSet.add(name);
+    const apiMap = new Map(); // lowerName -> { name, source, enabled, is_api: true }
+    const addApiProv = (rawName, source, enabled = true) => {
+      const name = String(rawName || '').trim();
+      if (!name || name === '—') return;
+      const key = name.toLowerCase();
+      if (!apiMap.has(key)) {
+        apiMap.set(key, { name, provider_name: name, source, enabled: Boolean(enabled), is_api: true });
+      } else if (enabled && !apiMap.get(key).enabled) {
+        apiMap.get(key).enabled = true;
       }
+    };
+
+    // 1. Connected CR API panels (panel_name is the provider)
+    crConns.forEach(c => {
+      const name = (c.panel_name || c.name || '').trim();
+      if (name) addApiProv(name, 'CR API', c.enabled !== false);
     });
 
-    // Dynamically add providers from Web Scraping Login Panels
+    // 2. Web Scraping Login Panels
     loginPanels.forEach(lp => {
       const name = (lp.panel_name || lp.name || '').trim();
-      if (name && name !== 'Manual' && name !== '—') provSet.add(name);
+      if (name && name !== 'Manual') addApiProv(name, 'Login Panel', lp.enabled !== false);
     });
 
-    // Dynamically add providers from Whitenoise connections
+    // 3. Whitenoise connections
     wnConns.forEach(w => {
       const name = (w.provider_tag || w.name || 'Whitenoise').trim();
-      if (name) provSet.add(name);
+      if (name) addApiProv(name, 'Whitenoise', w.enabled !== false);
     });
 
-    // Dynamically add providers from active SMS ranges
-    ranges.forEach(r => {
-      const p = (r.provider || '').trim();
-      if (p && p !== 'Manual' && p !== '—') provSet.add(p);
-    });
+    const apiProviders = Array.from(apiMap.values());
+    const defaultApi = (apiProviders.find(p => p.enabled) || apiProviders[0] || null);
 
-    // Dynamically add providers from existing numbers
-    numbers.forEach(n => {
-      const p = (n.provider || '').trim();
-      if (p && p !== 'Manual' && p !== '—') provSet.add(p);
-    });
+    const otherMap = new Map();
+    const addOtherProv = (rawName) => {
+      const name = String(rawName || '').trim();
+      if (!name || name === 'Manual' || name === '—') return;
+      const key = name.toLowerCase();
+      if (!apiMap.has(key) && !otherMap.has(key)) {
+        otherMap.set(key, { name, provider_name: name, source: 'Range', enabled: true, is_api: false });
+      }
+    };
 
-    const list = Array.from(provSet).sort().map((name, idx) => ({ id: idx + 1, name, provider_name: name }));
-    res.json({ data: list, total: list.length });
+    ranges.forEach(r => addOtherProv(r && r.provider));
+    numbers.forEach(n => addOtherProv(n && n.provider));
+
+    const combined = [
+      ...apiProviders.sort((a, b) => a.name.localeCompare(b.name)),
+      ...Array.from(otherMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+    ].map((item, idx) => ({ id: idx + 1, ...item }));
+
+    res.json({
+      data: combined,
+      api_providers: apiProviders,
+      default_api_provider: defaultApi ? defaultApi.name : '',
+      total: combined.length
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -9897,14 +9936,23 @@ app.patch('/api/numbers/sms-ranges/:id', (req, res) => {
   };
   writeDb('sms_ranges', ranges);
 
-  // Synchronize range_name & payterm metadata into numbers database when range is updated
+  // Synchronize range_name, provider & payterm metadata into numbers database when range is updated
   {
+    const nextProvider = String(ranges[idx].provider || '').trim();
+    const prevNameLc = String(ranges[idx].range_name || ranges[idx].name || '').trim().toLowerCase();
     let numbers = readDb('numbers') || [];
     let changed = false;
     numbers.forEach(n => {
-      if (n.range_id && Number(n.range_id) === id) {
+      if (!n) return;
+      const matchesById = n.range_id && Number(n.range_id) === id;
+      const matchesByName = !n.range_id && prevNameLc && String(n.range_name || n.range || '').trim().toLowerCase() === prevNameLc;
+      if (matchesById || matchesByName) {
         if (rangeName && n.range_name !== rangeName) {
           n.range_name = rangeName;
+          changed = true;
+        }
+        if (nextProvider && n.provider !== nextProvider) {
+          n.provider = nextProvider;
           changed = true;
         }
         if (n.payterm !== ptMeta.key || n.payout_schedule !== ptMeta.schedule || Boolean(n.is_whitenoise) !== Boolean(isWnRng)) {
@@ -10033,12 +10081,83 @@ app.delete('/api/numbers/sms-ranges/:id', requireAuth, (req, res) => {
     if (deletedRates > 0) writeDb('agent_client_rates', keptRates);
   } catch (_) {}
 
+  // Automatically reset client/agent range quotas, daily/weekly usage & pending requests for this range
+  const resetInfo = resetRangeQuotasForRange(targetRange, 'Range deleted by Owner');
+
   const displayRngName = targetRange.range_name || targetRange.name || `#${id}`;
-  logAudit(sessionUser.username || 'Owner', 'Delete SMS Range', `PIN-verified deletion of range "${displayRngName}" (#${id}) and ${deletedNumbers} system number(s)`, 'Ranges');
-  res.json({ success: true, deleted_numbers: deletedNumbers, deleted_rates: deletedRates, range_name: displayRngName });
+  logAudit(sessionUser.username || 'Owner', 'Delete SMS Range', `PIN-verified deletion of range "${displayRngName}" (#${id}), ${deletedNumbers} system number(s), quotas reset (${resetInfo.clearedRequests} pending request(s) cleared)`, 'Ranges');
+  res.json({ success: true, deleted_numbers: deletedNumbers, deleted_rates: deletedRates, cleared_pending_requests: resetInfo.clearedRequests, range_name: displayRngName });
 });
 
-// Delete Numbers Only for a specific SMS Range (keeps range, rates & SMS logs intact; PIN-protected Owner-only)
+function resetRangeQuotasForRange(targetRange, reason = 'Range numbers reset by Owner') {
+  if (!targetRange) return { clearedRequests: 0, resetHistory: 0, clearedReturns: 0, resetAt: new Date().toISOString() };
+  const nowIso = new Date().toISOString();
+  const rid = Number(targetRange.id || 0);
+  const rNameLc = String(targetRange.range_name || targetRange.name || '').trim().toLowerCase();
+
+  const matchesTarget = (item) => {
+    if (!item) return false;
+    if (rid && item.range_id != null && Number(item.range_id) === rid) return true;
+    const iName = String(item.range_name || item.range || item.name || '').trim().toLowerCase();
+    if (rNameLc && iName && iName === rNameLc) return true;
+    return false;
+  };
+
+  // 1. Mark past number_requests for this range as quota_reset & cancel any pending requests (preserves history)
+  let clearedRequests = 0;
+  const requests = readDb('number_requests') || [];
+  let reqDirty = false;
+  for (const r of requests) {
+    if (!matchesTarget(r)) continue;
+    if (!r.quota_reset) {
+      r.quota_reset = true;
+      r.quota_reset_at = nowIso;
+      reqDirty = true;
+    }
+    if (String(r.status || '').toLowerCase() === 'pending') {
+      r.status = 'cancelled';
+      r.resolved_at = nowIso;
+      r.cancelled_reason = reason;
+      clearedRequests++;
+      reqDirty = true;
+    }
+  }
+  if (reqDirty) writeDb('number_requests', requests);
+
+  // 2. Mark past allocation_history entries for this range as quota_reset (keeps full audit trail intact)
+  let resetHistory = 0;
+  const history = readDb('allocation_history') || [];
+  let histDirty = false;
+  for (const h of history) {
+    if (!matchesTarget(h)) continue;
+    if (!h.quota_reset) {
+      h.quota_reset = true;
+      h.quota_reset_at = nowIso;
+      resetHistory++;
+      histDirty = true;
+    }
+  }
+  if (histDirty) writeDb('allocation_history', history);
+
+  // 3. Cancel any stale pending return_requests belonging to this range
+  let clearedReturns = 0;
+  const retReqs = readDb('return_requests') || [];
+  let retDirty = false;
+  for (const rr of retReqs) {
+    if (!rr || String(rr.status || '').toLowerCase() !== 'pending') continue;
+    if (!matchesTarget(rr)) continue;
+    rr.status = 'cancelled';
+    rr.resolved_at = nowIso;
+    rr.resolution_note = reason;
+    clearedReturns++;
+    retDirty = true;
+  }
+  if (retDirty) writeDb('return_requests', retReqs);
+
+  return { clearedRequests, resetHistory, clearedReturns, resetAt: nowIso };
+}
+
+// Delete Numbers Only for a specific SMS Range (keeps range, rates & SMS logs intact; auto-resets client holds/quotas/limits; PIN-protected Owner-only)
 app.delete('/api/numbers/sms-ranges/:id/numbers', requireAuth, (req, res) => {
   const sessionUser = req.sessionUser;
   if (normRole(sessionUser?.role) !== 'owner') {
@@ -10104,9 +10223,20 @@ app.delete('/api/numbers/sms-ranges/:id/numbers', requireAuth, (req, res) => {
     writeDb('numbers', numbers);
   }
 
+  // Automatically reset all client/agent hold counts, daily/weekly request limits & stale pending requests for this range
+  const resetInfo = resetRangeQuotasForRange(targetRange, 'Range numbers reset by Owner');
+  targetRange.numbers_reset_at = resetInfo.resetAt;
+  writeDb('sms_ranges', ranges);
+
   const displayRngName = targetRange.range_name || targetRange.name || `#${id}`;
-  logAudit(sessionUser.username || 'Owner', 'Delete Range Numbers Only', `PIN-verified removal of ${deletedNumbers} number(s) from range "${displayRngName}" (#${id}) — range kept intact`, 'Ranges');
-  res.json({ success: true, deleted_numbers: deletedNumbers, range_name: displayRngName });
+  logAudit(sessionUser.username || 'Owner', 'Delete Range Numbers Only', `PIN-verified removal of ${deletedNumbers} number(s) from range "${displayRngName}" (#${id}) — range kept intact, client limits & quotas reset (${resetInfo.clearedRequests} pending request(s) cleared)`, 'Ranges');
+  res.json({
+    success: true,
+    deleted_numbers: deletedNumbers,
+    cleared_pending_requests: resetInfo.clearedRequests,
+    quotas_reset: true,
+    range_name: displayRngName
+  });
 });
 
 // Import to existing or new range
@@ -13862,7 +13992,7 @@ function registerPaginatedCrud(routePath, tableName) {
     if (tableName === 'numbers') {
       const allClients = (agent_id || req.query.client_id || search) ? (readDb('clients') || []) : [];
       const allAgents = search ? (readDb('agents') || []) : [];
-      const allRanges = (req.query.range || search) ? (readDb('sms_ranges') || []) : [];
+      const allRanges = (req.query.range || (isOwner && req.query.provider) || search) ? (readDb('sms_ranges') || []) : [];
 
       if (agent_id && (isOwner || (isAgent && String(sessionUser.id) === String(agent_id)))) {
         const agClientIds = new Set(
@@ -13936,6 +14066,20 @@ function registerPaginatedCrud(routePath, tableName) {
           data = data.filter(d =>
             String(d.range_name || d.range_label || d.country || '').toLowerCase().includes(rLower)
           );
+        }
+      }
+
+      // Owner-only Provider filter on /api/numbers
+      if (isOwner && req.query.provider) {
+        const provLower = String(req.query.provider).trim().toLowerCase();
+        if (provLower) {
+          const rangeById = new Map();
+          allRanges.forEach(r => { if (r && r.id != null) rangeById.set(Number(r.id), r); });
+          data = data.filter(d => {
+            const rng = d.range_id != null ? rangeById.get(Number(d.range_id)) : null;
+            const effProv = String((rng && rng.provider) || d.provider || 'Manual').trim().toLowerCase();
+            return effProv === provLower;
+          });
         }
       }
 
@@ -16877,12 +17021,16 @@ function resolveAllocationPolicy(sessionUser) {
   let used_today = 0;
   if (mode === 'request') {
     used_today = myRequests
-      .filter(r => String(r.status || '').toLowerCase() !== 'rejected' && String(r.created || r.timestamp || '').slice(0, 10) === todayIso)
+      .filter(r => {
+        const st = String(r.status || '').toLowerCase();
+        if (st === 'rejected' || st === 'cancelled' || r.quota_reset) return false;
+        return String(r.created || r.timestamp || '').slice(0, 10) === todayIso;
+      })
       .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
   } else {
     const history = readDb('allocation_history') || [];
     used_today = Array.isArray(history) ? history.filter(h => {
-      if (!h) return false;
+      if (!h || h.quota_reset) return false;
       const d = String(h.timestamp || h.created || '').slice(0, 10);
       if (d !== todayIso) return false;
       if (h.to_user_id != null && Number(h.to_user_id) === Number(sessionUser.id) && String(h.to_role || '').toLowerCase() === sRole) return true;

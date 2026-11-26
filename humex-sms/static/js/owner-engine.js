@@ -1607,7 +1607,13 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
           </div>
         </div>
         <div class="apx-card-body" style="padding:14px;">
-          <div class="apx-filter-fields-row" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:12px;align-items:flex-end;">
+          <div class="apx-filter-fields-row" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(165px, 1fr));gap:12px;align-items:flex-end;">
+            <div>
+              <label class="zy-filter-label" for="num-provider-filter" style="font-size:11.5px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:5px;">Provider</label>
+              <select id="num-provider-filter" class="apx-select" style="width:100%;height:38px;max-height:38px;border:1.5px solid #cbd5e1;border-radius:6px;background:#ffffff;padding:0 10px;font-size:13px;color:#1e293b;box-sizing:border-box;" onchange="zyOwnerNumFilter()">
+                <option value="">All Providers</option>
+              </select>
+            </div>
             <div>
               <label class="zy-filter-label" for="num-range-filter" style="font-size:11.5px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:5px;">Range</label>
               <select id="num-range-filter" class="apx-select" style="width:100%;height:38px;max-height:38px;border:1.5px solid #cbd5e1;border-radius:6px;background:#ffffff;padding:0 10px;font-size:13px;color:#1e293b;box-sizing:border-box;" onchange="zyOwnerNumFilter()">
@@ -1663,10 +1669,11 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
       ${typeof zyRenderFab === 'function' ? zyRenderFab('Need numbers? Tap here', 'zyOwnerAllocateAll()') : ''}
     `;
 
-    const [rangesData, rateCardData, agentsData] = await Promise.all([
+    const [rangesData, rateCardData, agentsData, providersData] = await Promise.all([
       apiFetch('/api/numbers/sms-ranges'),
       apiFetch('/api/numbers/rate-card'),
-      apiFetch('/api/agents?limit=5000')
+      apiFetch('/api/agents?limit=5000'),
+      apiFetch('/api/providers').catch(() => ({ data: [] }))
     ]);
 
     const ranges = ((rangesData && rangesData.data) || (Array.isArray(rangesData) ? rangesData : []))
@@ -1674,6 +1681,7 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
     const rateCard = (rateCardData && rateCardData.data) || (Array.isArray(rateCardData) ? rateCardData : []);
     const agents = ((agentsData && agentsData.data) || (Array.isArray(agentsData) ? agentsData : []))
       .slice().sort((a, b) => String(a.username || a.name || '').localeCompare(String(b.username || b.name || ''), undefined, { sensitivity: 'base' }));
+    const providers = (providersData && Array.isArray(providersData.data)) ? providersData.data : [];
 
     ZY_OWNER_RANGES = ranges;
     ZY_OWNER_AGENTS = agents;
@@ -1684,6 +1692,18 @@ async function renderMyNumbers(page = 1, search = '', status = '') {
     ZY_OWNER_RATE_LOOKUP = {}; rateCard.forEach(r => { ZY_OWNER_RATE_LOOKUP[`${r.country}|${r.provider}`] = r; });
     ZY_OWNER_AG_BY_ID = {}; agents.forEach(a => { ZY_OWNER_AG_BY_ID[a.id] = a.username; });
     ZY_OWNER_CL_BY_ID = {};
+
+    // Populate Provider Filter (Owner-only)
+    const provSel = document.getElementById('num-provider-filter');
+    if (provSel) {
+      const provNames = new Set();
+      providers.forEach(p => { const nm = String(p.name || p.provider_name || '').trim(); if (nm) provNames.add(nm); });
+      ranges.forEach(r => { const nm = String(r.provider || '').trim(); if (nm) provNames.add(nm); });
+      const sortedProvs = Array.from(provNames).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      provSel.innerHTML = '<option value="">All Providers</option>' + sortedProvs.map(nm =>
+        `<option value="${escapeHtml(nm)}">${escapeHtml(nm)}</option>`
+      ).join('');
+    }
 
     // Populate Range Filter (A-Z)
     const rangeSel = document.getElementById('num-range-filter');
@@ -1727,6 +1747,7 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
   window._zyOwnerNumAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const reqSignal = window._zyOwnerNumAbort ? window._zyOwnerNumAbort.signal : undefined;
 
+  const provVal = document.getElementById('num-provider-filter')?.value || '';
   const rangeVal = document.getElementById('num-range-filter')?.value || '';
   const agVal = document.getElementById('num-agent-filter')?.value || '';
   const statusVal = document.getElementById('num-status')?.value || '';
@@ -1736,6 +1757,7 @@ async function zyOwnerLoadNumbers(targetPage = 1) {
   const params = new URLSearchParams();
   params.set('page', String(Math.max(1, parseInt(targetPage, 10) || 1)));
   params.set('limit', String(perPage));
+  if (provVal) params.set('provider', provVal);
   if (rangeVal) params.set('range', rangeVal);
   if (agVal) params.set('agent_id', agVal);
   if (statusVal) params.set('status', statusVal);
@@ -1834,8 +1856,11 @@ function zyOwnerRenderNumbersTable() {
     const rangeCellHtml = isBlockedNum
       ? `<span style="color:#dc2626;font-weight:700;">${escapeHtml(rangeDisplayName)}</span>`
       : (isWnNum ? `<span class="zy-wn-range-name">${escapeHtml(rangeDisplayName)}</span>` : escapeHtml(rangeDisplayName));
+    const providerName = String((rInfo && rInfo.provider) || n.provider || 'Manual').trim() || 'Manual';
+    const providerCellHtml = `<span style="display:inline-flex;align-items:center;gap:4px;font-weight:700;font-size:11.5px;color:#1e3a8a;background:#eff6ff;border:1px solid #bfdbfe;padding:2px 8px;border-radius:6px;white-space:nowrap;">${escapeHtml(providerName)}</span>`;
     const r = [
       dateCell,
+      { v: providerName, h: providerCellHtml },
       { v: rangeDisplayName, h: rangeCellHtml },
       escapeHtml(prefixDisplay),
       { v: displayNumber, h: numBox },
@@ -1859,7 +1884,7 @@ function zyOwnerRenderNumbersTable() {
   ZY_OWNER_NUMROWS = rows;
   if (typeof zyDT2 === 'function') {
     bodyEl.innerHTML = zyDT2('dt-numbers', {
-      cols: ['Date', 'Range', 'Prefix', 'Number', 'Agents', 'Cost', 'Payout', 'Limits', 'Status', 'Action'],
+      cols: ['Date', 'Provider', 'Range', 'Prefix', 'Number', 'Agents', 'Cost', 'Payout', 'Limits', 'Status', 'Action'],
       rows,
       check: true,
       perPage,
@@ -1893,6 +1918,7 @@ function zyOwnerNumFilter() {
 
 function zyOwnerResetNumFilter() {
   if (window._zyOwnerNumSearchTimer) clearTimeout(window._zyOwnerNumSearchTimer);
+  const p = document.getElementById('num-provider-filter'); if (p) p.value = '';
   const r = document.getElementById('num-range-filter'); if (r) r.value = '';
   const a = document.getElementById('num-agent-filter'); if (a) a.value = '';
   const c = document.getElementById('num-client-filter'); if (c) c.value = '';
@@ -3031,7 +3057,7 @@ function adminDeleteRangeNumbersOnly(rangeId, rangeName, numCount) {
           <i class="fas fa-eraser" style="margin-right:6px;"></i>Delete numbers only for "${safeName}"?
         </div>
         <div style="font-size:12.5px;color:#78350f;line-height:1.45;">
-          This will permanently delete <strong>${cnt > 0 ? cnt.toLocaleString() + ' number(s)' : 'all numbers'}</strong> belonging to this range across the entire system (Owner, Agent &amp; Client pools).<br>
+          This will permanently delete <strong>${cnt > 0 ? cnt.toLocaleString() + ' number(s)' : 'all numbers'}</strong> belonging to this range across the entire system (Owner, Agent &amp; Client pools) and <strong>automatically reset all client hold counts, daily/weekly quotas &amp; pending requests</strong> for this range.<br>
           <strong>The range itself, its rates, and existing SMS/CDR logs will stay untouched.</strong>
         </div>
       </div>
@@ -3118,7 +3144,7 @@ async function doAdminDeleteRangeNumbersOnly(ev, rangeId) {
       return;
     }
     closeModal();
-    toast(`${result.deleted_numbers ?? 0} number(s) deleted from "${result.range_name || ('#' + rangeId)}" (range kept intact)`, 'warning');
+    toast(`${result.deleted_numbers ?? 0} number(s) deleted from "${result.range_name || ('#' + rangeId)}" — range kept intact & client limits reset`, 'warning');
     renderSmsRanges();
   } catch (err) {
     console.error('Delete range numbers only error:', err);
@@ -3127,6 +3153,72 @@ async function doAdminDeleteRangeNumbersOnly(ev, rangeId) {
       btn.disabled = false;
       btn.innerHTML = '<i class="fas fa-eraser"></i> Verify PIN &amp; Delete Numbers Only';
     }
+  }
+}
+
+async function zyOwnerLoadProviderChoices(selectId, inputId, currentVal = '', autoFillFirstApi = false) {
+  const sel = document.getElementById(selectId);
+  const inp = document.getElementById(inputId);
+  if (!sel || !inp) return;
+  try {
+    const res = await apiFetch('/api/providers', { silent: true });
+    const list = (res && Array.isArray(res.data)) ? res.data : [];
+    const apiList = list.filter(p => p && p.is_api);
+    const otherList = list.filter(p => p && !p.is_api);
+    const defaultApi = String((res && res.default_api_provider) || (apiList[0] && apiList[0].name) || '').trim();
+
+    let html = '';
+    if (apiList.length) {
+      html += '<optgroup label="Connected API Providers">';
+      apiList.forEach(p => {
+        const nm = String(p.name || p.provider_name || '').trim();
+        const src = p.source ? ` (${p.source})` : '';
+        html += `<option value="${escapeHtml(nm)}">${escapeHtml(nm + src)}</option>`;
+      });
+      html += '</optgroup>';
+    }
+    if (otherList.length) {
+      html += '<optgroup label="Saved Range Providers">';
+      otherList.forEach(p => {
+        const nm = String(p.name || p.provider_name || '').trim();
+        html += `<option value="${escapeHtml(nm)}">${escapeHtml(nm)}</option>`;
+      });
+      html += '</optgroup>';
+    }
+    html += '<option value="__custom__">✏️ Manual / Custom Provider...</option>';
+    sel.innerHTML = html;
+
+    const cleanCur = String(currentVal || '').trim();
+    const matchExact = (val) => Array.from(sel.options).find(o => o.value !== '__custom__' && o.value.toLowerCase() === val.toLowerCase());
+
+    if (cleanCur) {
+      const m = matchExact(cleanCur);
+      if (m) {
+        sel.value = m.value;
+        inp.value = m.value;
+      } else {
+        sel.value = '__custom__';
+        inp.value = cleanCur;
+      }
+    } else if (autoFillFirstApi && defaultApi) {
+      const m = matchExact(defaultApi);
+      if (m) sel.value = m.value;
+      inp.value = defaultApi;
+    } else {
+      sel.value = '__custom__';
+    }
+  } catch (_) {}
+}
+
+function zyOwnerOnProviderSelectChange(selectId, inputId) {
+  const sel = document.getElementById(selectId);
+  const inp = document.getElementById(inputId);
+  if (!sel || !inp) return;
+  if (sel.value && sel.value !== '__custom__') {
+    inp.value = sel.value;
+  } else {
+    inp.focus();
+    inp.select();
   }
 }
 
@@ -3140,8 +3232,11 @@ function openAddRangeModal() {
             <i class="fas fa-tower-broadcast"></i> General Info
           </h5>
           <div class="form-group" style="margin-bottom:8px;">
-            <label class="form-label" style="font-size:11px;font-weight:700;">Select Provider *</label>
-            <input id="range-provider" class="form-control" placeholder="e.g. MTN, Whale, Zidi" required style="width:100%;height:30px;font-size:12px;">
+            <label class="form-label" style="font-size:11px;font-weight:700;">Select Provider (API / Manual) *</label>
+            <select id="range-provider-select" class="form-control" onchange="zyOwnerOnProviderSelectChange('range-provider-select','range-provider')" style="width:100%;height:30px;font-size:12px;margin-bottom:5px;">
+              <option value="__custom__">Loading API providers…</option>
+            </select>
+            <input id="range-provider" class="form-control" placeholder="Auto-filled from API or type manually (e.g. MTN, Whale)" required style="width:100%;height:30px;font-size:12px;">
           </div>
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Range Name *</label>
@@ -3222,6 +3317,7 @@ function openAddRangeModal() {
       </div>
     </form>
   `);
+  zyOwnerLoadProviderChoices('range-provider-select', 'range-provider', '', true);
 }
 
 async function submitAddRange(event) {
@@ -3406,8 +3502,11 @@ function openEditRangeModal(r) {
             <input id="er-country" class="form-control" value="${escapeHtml(r.country || '')}" required style="width:100%;height:30px;font-size:12px;">
           </div>
           <div class="form-group" style="margin-bottom:8px;">
-            <label class="form-label" style="font-size:11px;font-weight:700;">Provider</label>
-            <input id="er-provider" class="form-control" value="${escapeHtml(r.provider || '')}" style="width:100%;height:30px;font-size:12px;">
+            <label class="form-label" style="font-size:11px;font-weight:700;">Provider (API / Manual)</label>
+            <select id="er-provider-select" class="form-control" onchange="zyOwnerOnProviderSelectChange('er-provider-select','er-provider')" style="width:100%;height:30px;font-size:12px;margin-bottom:5px;">
+              <option value="__custom__">Loading API providers…</option>
+            </select>
+            <input id="er-provider" class="form-control" value="${escapeHtml(r.provider || '')}" placeholder="Select API provider or type manually" style="width:100%;height:30px;font-size:12px;">
           </div>
           <div class="form-group" style="margin-bottom:8px;">
             <label class="form-label" style="font-size:11px;font-weight:700;">Prefix *</label>
@@ -3467,6 +3566,7 @@ function openEditRangeModal(r) {
       </div>
     </form>
   `);
+  zyOwnerLoadProviderChoices('er-provider-select', 'er-provider', r.provider || '', false);
 }
 
 async function submitEditRange(event, rangeId) {

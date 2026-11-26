@@ -27997,8 +27997,8 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
     res.json({
       success: true,
       upload_id: uploadId,
-      chunk_size: 2 * 1024 * 1024,
-      max_chunk_size: 4 * 1024 * 1024,
+      chunk_size: 768 * 1024,
+      max_chunk_size: 768 * 1024,
       concurrency: 3,
       mode: 'raw-parallel'
     });
@@ -28033,7 +28033,7 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   const isMultipart = contentType.startsWith('multipart/form-data');
 
-  // FAST PATH: Raw binary chunk collected cleanly and written in a single atomic positional pwrite (zero pause/resume deadlock risk)
+  // FAST PATH: Raw binary chunk collected cleanly and written in a single atomic positional pwrite
   if (!isMultipart) {
     const uploadId = String(req.headers['x-upload-id'] || req.query.upload_id || '').trim();
     const rawOffset = req.headers['x-chunk-offset'] !== undefined ? req.headers['x-chunk-offset'] : req.query.offset;
@@ -28113,12 +28113,14 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
       });
     });
 
-    req.on('aborted', () => {
-      if (!finished) {
+    const onDisconnect = () => {
+      if (!finished && !req.complete) {
         finished = true;
         sess.activeWrites = Math.max(0, sess.activeWrites - 1);
       }
-    });
+    };
+    req.on('aborted', onDisconnect);
+    req.on('close', onDisconnect);
 
     req.on('error', (streamErr) => {
       console.error('[METHOD-VAULT] raw chunk stream error:', streamErr && streamErr.message ? streamErr.message : streamErr);

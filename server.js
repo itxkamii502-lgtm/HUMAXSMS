@@ -54,6 +54,9 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 const app = express();
 app.disable('x-powered-by');
 const server = http.createServer(app);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+server.requestTimeout = 0;
 const wss = new WebSocketServer({ server });
 
 // ── Rate Limiting Helper (Bounded & Self-Pruning) ─────────────
@@ -27868,21 +27871,66 @@ app.post('/api/method-vault/agent/items', requireAuth, (req, res) => {
   });
 });
 
-// ── AGENT: Chunked Video Upload (768KB chunks — bypasses strict Nginx 1M/50M limits & survives slow internet) ─
+// ── AGENT: High-Speed Parallel Raw-Binary Video Upload (Direct positional disk streaming, zero-copy) ─
 const MEDIA_VAULT_TMP_DIR = path.join(MEDIA_VAULT_ROOT, 'tmp');
 const methodVaultChunkSessions = new Map();
-const METHOD_VAULT_CHUNK_LIMIT = 4 * 1024 * 1024;
+const METHOD_VAULT_CHUNK_LIMIT = 16 * 1024 * 1024; // Allow up to 16 MB per parallel chunk for maximum line-rate speed
 const methodVaultChunkUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: METHOD_VAULT_CHUNK_LIMIT, files: 1 }
 });
 
+function mergeVaultIntervals(intervals) {
+  if (!Array.isArray(intervals) || intervals.length === 0) return { merged: [], totalBytes: 0 };
+  const sorted = intervals
+    .filter(iv => Array.isArray(iv) && iv.length === 2 && iv[1] > iv[0])
+    .sort((a, b) => a[0] - b[0]);
+  if (!sorted.length) return { merged: [], totalBytes: 0 };
+  const merged = [[sorted[0][0], sorted[0][1]]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur[0] <= prev[1]) {
+      if (cur[1] > prev[1]) prev[1] = cur[1];
+    } else {
+      merged.push([cur[0], cur[1]]);
+    }
+  }
+  let totalBytes = 0;
+  for (const iv of merged) totalBytes += (iv[1] - iv[0]);
+  return { merged, totalBytes };
+}
+
+function recordVaultSegment(sess, start, end) {
+  if (!sess || end <= start) return 0;
+  sess.intervals.push([start, end]);
+  const { merged, totalBytes } = mergeVaultIntervals(sess.intervals);
+  sess.intervals = merged;
+  sess.receivedBytes = totalBytes;
+  sess.updatedAt = Date.now();
+  return totalBytes;
+}
+
+function closeChunkSession(uploadId, removeTmp = false) {
+  const sess = methodVaultChunkSessions.get(uploadId);
+  if (!sess) return;
+  sess.aborted = true;
+  methodVaultChunkSessions.delete(uploadId);
+  if (sess.fd !== null && sess.fd !== undefined) {
+    const fdToClose = sess.fd;
+    sess.fd = null;
+    try { fs.closeSync(fdToClose); } catch (_) {}
+  }
+  if (removeTmp && sess.tmpPath) {
+    try { if (fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
+  }
+}
+
 function cleanupStaleChunkSessions() {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   for (const [uid, sess] of methodVaultChunkSessions.entries()) {
-    if (!sess || sess.updatedAt < cutoff) {
-      try { if (sess && sess.tmpPath && fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
-      methodVaultChunkSessions.delete(uid);
+    if (!sess || (sess.updatedAt < cutoff && !sess.activeWrites)) {
+      closeChunkSession(uid, true);
     }
   }
 }
@@ -27920,12 +27968,16 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
     return res.status(507).json({ error: 'This video exceeds the remaining 25 GB Method Vault storage cap. Delete older videos first.' });
   }
 
+  let fd = null;
+  let tmpPath = '';
   try {
     ensureMethodVaultDir();
     if (!fs.existsSync(MEDIA_VAULT_TMP_DIR)) fs.mkdirSync(MEDIA_VAULT_TMP_DIR, { recursive: true });
     const uploadId = `mvup_${Number(sessionUser.id)}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-    const tmpPath = path.join(MEDIA_VAULT_TMP_DIR, `${uploadId}.part`);
-    fs.writeFileSync(tmpPath, Buffer.alloc(0));
+    tmpPath = path.join(MEDIA_VAULT_TMP_DIR, `${uploadId}.part`);
+    // Open persistent file descriptor & pre-size target file for parallel positional writes (zero file re-open overhead)
+    fd = fs.openSync(tmpPath, 'w+');
+    fs.ftruncateSync(fd, fileSize);
     methodVaultChunkSessions.set(uploadId, {
       uploadId,
       agentId: Number(sessionUser.id),
@@ -27933,13 +27985,26 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
       ext,
       mime: resolveMethodMimeFromExt(ext, fileMime),
       expectedSize: fileSize,
+      intervals: [],
       receivedBytes: 0,
       nextChunkIndex: 0,
+      fd,
       tmpPath,
+      activeWrites: 0,
+      aborted: false,
       updatedAt: Date.now()
     });
-    res.json({ success: true, upload_id: uploadId, chunk_size: 768 * 1024 });
+    res.json({
+      success: true,
+      upload_id: uploadId,
+      chunk_size: 4 * 1024 * 1024,
+      max_chunk_size: 8 * 1024 * 1024,
+      concurrency: 4,
+      mode: 'raw-parallel'
+    });
   } catch (err) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} }
+    if (tmpPath) { try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {} }
     console.error('[METHOD-VAULT] upload-init error:', err);
     res.status(500).json({ error: 'Could not initialize video upload.' });
   }
@@ -27950,47 +28015,191 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
   if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
     return res.status(403).json({ error: 'Forbidden.' });
   }
+
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  const isMultipart = contentType.startsWith('multipart/form-data');
+
+  // FAST PATH: Zero-copy raw binary stream directly into open file descriptor at exact byte offset
+  if (!isMultipart) {
+    const uploadId = String(req.headers['x-upload-id'] || req.query.upload_id || '').trim();
+    const rawOffset = req.headers['x-chunk-offset'] !== undefined ? req.headers['x-chunk-offset'] : req.query.offset;
+    const offset = Number(rawOffset);
+    const expectedLenHeader = req.headers['x-chunk-length'] !== undefined ? Number(req.headers['x-chunk-length']) : null;
+    const contentLenHeader = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
+
+    const sess = methodVaultChunkSessions.get(uploadId);
+    if (!sess || sess.aborted || sess.fd === null || Number(sess.agentId) !== Number(sessionUser.id)) {
+      return res.status(404).json({ error: 'Upload session expired or not found. Please retry.' });
+    }
+    if (!Number.isInteger(offset) || offset < 0 || offset >= sess.expectedSize) {
+      return res.status(400).json({ error: 'Invalid chunk byte offset.' });
+    }
+    if (contentLenHeader !== null && Number.isFinite(contentLenHeader)) {
+      if (contentLenHeader <= 0) return res.status(400).json({ error: 'Empty upload chunk.' });
+      if (contentLenHeader > METHOD_VAULT_CHUNK_LIMIT) {
+        return res.status(413).json({ error: 'Chunk size exceeds server limit.' });
+      }
+      if (offset + contentLenHeader > sess.expectedSize) {
+        return res.status(413).json({ error: 'Chunk exceeds expected file size.' });
+      }
+    }
+
+    let writePos = offset;
+    let totalWritten = 0;
+    let streamEnded = false;
+    let pendingDiskWrites = 0;
+    let finished = false;
+    let slotReleased = false;
+    sess.activeWrites += 1;
+    sess.updatedAt = Date.now();
+
+    const releaseWriteSlotIfDone = () => {
+      if (!slotReleased && finished && pendingDiskWrites === 0) {
+        slotReleased = true;
+        sess.activeWrites = Math.max(0, sess.activeWrites - 1);
+      }
+    };
+
+    const finishOnce = (statusCode, payload) => {
+      if (finished) return;
+      finished = true;
+      releaseWriteSlotIfDone();
+      if (!res.headersSent) {
+        res.setHeader('X-No-Compression', '1');
+        res.status(statusCode).json(payload);
+      }
+    };
+
+    const tryComplete = () => {
+      if (finished || !streamEnded || pendingDiskWrites > 0) return;
+      if (totalWritten <= 0) {
+        return finishOnce(400, { error: 'Empty upload chunk.' });
+      }
+      if (expectedLenHeader !== null && Number.isFinite(expectedLenHeader) && totalWritten !== expectedLenHeader) {
+        return finishOnce(400, { error: 'Incomplete chunk received; please retry.' });
+      }
+      const receivedBytes = recordVaultSegment(sess, offset, offset + totalWritten);
+      finishOnce(200, { success: true, offset, written: totalWritten, received_bytes: receivedBytes });
+    };
+
+    req.on('data', (buf) => {
+      if (finished) return;
+      if (!buf || !buf.length) return;
+      if (sess.aborted || sess.fd === null) {
+        req.pause();
+        return finishOnce(409, { error: 'Upload was cancelled.' });
+      }
+      if (totalWritten + buf.length > METHOD_VAULT_CHUNK_LIMIT || (writePos + buf.length) > sess.expectedSize) {
+        req.pause();
+        return finishOnce(413, { error: 'Chunk exceeded allowed size.' });
+      }
+
+      const posForWrite = writePos;
+      writePos += buf.length;
+      totalWritten += buf.length;
+      pendingDiskWrites += 1;
+      // Only apply backpressure if disk queue backs up (>=16 buffers in flight); keeps full NIC line-rate!
+      if (pendingDiskWrites >= 16) req.pause();
+
+      fs.write(sess.fd, buf, 0, buf.length, posForWrite, (ioErr, writtenNow) => {
+        pendingDiskWrites -= 1;
+        if (finished) {
+          releaseWriteSlotIfDone();
+          return;
+        }
+        if (ioErr || writtenNow !== buf.length) {
+          console.error('[METHOD-VAULT] raw chunk write error:', ioErr);
+          return finishOnce(500, { error: 'Failed writing video chunk to storage.' });
+        }
+        sess.updatedAt = Date.now();
+        if (streamEnded) {
+          tryComplete();
+        } else if (pendingDiskWrites <= 4 && req.isPaused()) {
+          req.resume();
+        }
+      });
+    });
+
+    req.on('end', () => {
+      streamEnded = true;
+      tryComplete();
+    });
+
+    req.on('aborted', () => {
+      if (!finished) {
+        finished = true;
+        releaseWriteSlotIfDone();
+      }
+    });
+
+    req.on('error', (streamErr) => {
+      console.error('[METHOD-VAULT] raw chunk stream error:', streamErr && streamErr.message ? streamErr.message : streamErr);
+      finishOnce(400, { error: 'Network error receiving video chunk.' });
+    });
+    return;
+  }
+
+  // BACKWARD-COMPATIBLE MULTIPART FALLBACK (for any cached legacy client tab)
   methodVaultChunkUpload.single('chunk')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message || 'Chunk upload failed.' });
     const uploadId = String(req.body?.upload_id || '').trim();
     const chunkIndex = parseInt(req.body?.chunk_index, 10);
     const sess = methodVaultChunkSessions.get(uploadId);
-    if (!sess || Number(sess.agentId) !== Number(sessionUser.id)) {
+    if (!sess || sess.aborted || sess.fd === null || Number(sess.agentId) !== Number(sessionUser.id)) {
       return res.status(404).json({ error: 'Upload session expired or not found. Please retry.' });
     }
     if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
       return res.status(400).json({ error: 'Empty upload chunk.' });
     }
-    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
-      return res.status(400).json({ error: 'Invalid chunk index.' });
+    const explicitOffset = req.body?.chunk_offset !== undefined ? Number(req.body.chunk_offset) : NaN;
+    let writeOffset = 0;
+    if (Number.isInteger(explicitOffset) && explicitOffset >= 0) {
+      writeOffset = explicitOffset;
+    } else {
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+        return res.status(400).json({ error: 'Invalid chunk index.' });
+      }
+      if (chunkIndex < sess.nextChunkIndex) {
+        sess.updatedAt = Date.now();
+        return res.json({ success: true, received_bytes: sess.receivedBytes, duplicate: true });
+      }
+      if (chunkIndex !== sess.nextChunkIndex) {
+        return res.status(409).json({ error: 'Chunk out of order. Please retry upload.' });
+      }
+      writeOffset = sess.receivedBytes;
     }
-    // Idempotent retry support: if client retries an already-written chunk, accept cleanly
-    if (chunkIndex < sess.nextChunkIndex) {
-      sess.updatedAt = Date.now();
-      return res.json({ success: true, received_bytes: sess.receivedBytes, duplicate: true });
-    }
-    if (chunkIndex !== sess.nextChunkIndex) {
-      return res.status(409).json({ error: 'Chunk out of order. Please retry upload.' });
-    }
-    if ((sess.receivedBytes + req.file.buffer.length) > Math.min(METHOD_VAULT_MAX_FILE_BYTES, sess.expectedSize + 1024)) {
-      try { if (fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
-      methodVaultChunkSessions.delete(uploadId);
+    if ((writeOffset + req.file.buffer.length) > Math.min(METHOD_VAULT_MAX_FILE_BYTES, sess.expectedSize + 1024)) {
+      closeChunkSession(uploadId, true);
       return res.status(413).json({ error: 'Uploaded video exceeded expected size limit.' });
     }
-    try {
-      fs.appendFileSync(sess.tmpPath, req.file.buffer);
-      sess.receivedBytes += req.file.buffer.length;
-      sess.nextChunkIndex += 1;
-      sess.updatedAt = Date.now();
-      res.json({ success: true, received_bytes: sess.receivedBytes });
-    } catch (ioErr) {
-      console.error('[METHOD-VAULT] upload-chunk write error:', ioErr);
-      res.status(500).json({ error: 'Failed writing video chunk to storage.' });
-    }
+    sess.activeWrites += 1;
+    fs.write(sess.fd, req.file.buffer, 0, req.file.buffer.length, writeOffset, (ioErr) => {
+      sess.activeWrites = Math.max(0, sess.activeWrites - 1);
+      if (ioErr) {
+        console.error('[METHOD-VAULT] upload-chunk write error:', ioErr);
+        return res.status(500).json({ error: 'Failed writing video chunk to storage.' });
+      }
+      const receivedBytes = recordVaultSegment(sess, writeOffset, writeOffset + req.file.buffer.length);
+      if (!Number.isInteger(explicitOffset)) sess.nextChunkIndex += 1;
+      res.json({ success: true, received_bytes: receivedBytes });
+    });
   });
 });
 
-app.post('/api/method-vault/agent/upload-complete', requireAuth, (req, res) => {
+app.post('/api/method-vault/agent/upload-abort', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const uploadId = String(req.body?.upload_id || '').trim();
+  const sess = methodVaultChunkSessions.get(uploadId);
+  if (sess && Number(sess.agentId) === Number(sessionUser.id)) {
+    closeChunkSession(uploadId, true);
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/method-vault/agent/upload-complete', requireAuth, async (req, res) => {
   const sessionUser = req.sessionUser;
   if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
     return res.status(403).json({ error: 'Forbidden.' });
@@ -28003,12 +28212,18 @@ app.post('/api/method-vault/agent/upload-complete', requireAuth, (req, res) => {
 
   let finalFilename = '';
   const cleanupAll = () => {
-    methodVaultChunkSessions.delete(uploadId);
-    try { if (sess.tmpPath && fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
+    closeChunkSession(uploadId, true);
     if (finalFilename) unlinkVaultVideoSafe(finalFilename);
   };
 
   try {
+    // Wait briefly if a parallel chunk write callback is still finishing
+    let waitTicks = 0;
+    while (sess.activeWrites > 0 && waitTicks < 40) {
+      await new Promise(r => setTimeout(r, 50));
+      waitTicks += 1;
+    }
+
     const appName = String(req.body?.app_name || '').trim().slice(0, 100);
     if (!appName) {
       cleanupAll();
@@ -28020,9 +28235,24 @@ app.post('/api/method-vault/agent/upload-complete', requireAuth, (req, res) => {
     const defaultHours = (Number.isFinite(rawHours) && rawHours >= 0.25 && rawHours <= 168) ? Math.round(rawHours * 100) / 100 : 3;
     const active = String(req.body?.active ?? 'true') !== 'false';
 
+    // Verify full contiguous byte coverage [0, expectedSize]
+    const { merged, totalBytes } = mergeVaultIntervals(sess.intervals);
+    const isComplete = merged.length === 1 && merged[0][0] === 0 && merged[0][1] === sess.expectedSize;
+    if (!isComplete || totalBytes < sess.expectedSize) {
+      cleanupAll();
+      return res.status(400).json({ error: 'Video upload was incomplete (missing data parts). Please retry.' });
+    }
+
     if (!fs.existsSync(sess.tmpPath)) {
       cleanupAll();
       return res.status(400).json({ error: 'Uploaded file is missing. Please retry.' });
+    }
+
+    // Close open file descriptor before atomic rename
+    if (sess.fd !== null && sess.fd !== undefined) {
+      const fdToClose = sess.fd;
+      sess.fd = null;
+      try { fs.closeSync(fdToClose); } catch (_) {}
     }
 
     ensureMethodVaultDir();

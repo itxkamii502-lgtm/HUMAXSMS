@@ -6031,24 +6031,252 @@ window.zyMvOpenUploadModal = function() {
           <input type="checkbox" id="mv-up-active" checked> Active in Client "Apps Method"
         </label>
       </div>
-      <div id="mv-up-prog-wrap" style="display:none;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;">
-        <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700;color:#5b21b6;margin-bottom:6px;">
-          <span id="mv-up-prog-lbl">Uploading video…</span>
-          <span id="mv-up-prog-pct">0%</span>
-        </div>
-        <div class="zy-mv-progress-track">
-          <div id="mv-up-prog-bar" class="zy-mv-progress-fill" style="width:0%;background:#7c3aed;"></div>
-        </div>
+      <div style="font-size:11.5px;color:#5b21b6;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-bolt"></i>
+        <span>Uploads run at max speed in the <b>background</b> — once started, you can freely switch to any other tab.</span>
       </div>
     </div>
   `, `
     <button type="button" class="zy-btn-grey" id="mv-up-cancel" onclick="closeModal()">Cancel</button>
-    <button type="button" class="zy-btn-blue" id="mv-up-submit" onclick="zyMvSubmitUpload()"><i class="fas fa-cloud-arrow-up"></i> Save to Vault</button>
+    <button type="button" class="zy-btn-blue" id="mv-up-submit" onclick="zyMvSubmitUpload()"><i class="fas fa-cloud-arrow-up"></i> Upload in Background</button>
   `);
   zyMvRenderLinkRows('mv-up-links-host', []);
 };
 
-window.zyMvSubmitUpload = async function() {
+/* ── Persistent Background Upload Manager (survives tab/page switches across entire panel) ─ */
+(function initZyMvBackgroundUploadManager() {
+  if (window._zyMvBgMgr) return;
+
+  const jobs = new Map();
+  let nextJobId = 1;
+  let minimized = false;
+  let beforeUnloadBound = false;
+
+  const beforeUnloadHandler = (e) => {
+    let hasActive = false;
+    for (const j of jobs.values()) {
+      if (j.state === 'uploading') { hasActive = true; break; }
+    }
+    if (!hasActive) return;
+    e.preventDefault();
+    e.returnValue = 'A video is still uploading in the background. Leaving now will cancel the upload.';
+    return e.returnValue;
+  };
+
+  function syncUnloadGuard() {
+    let hasActive = false;
+    for (const j of jobs.values()) {
+      if (j.state === 'uploading') { hasActive = true; break; }
+    }
+    if (hasActive && !beforeUnloadBound) {
+      window.addEventListener('beforeunload', beforeUnloadHandler);
+      beforeUnloadBound = true;
+    } else if (!hasActive && beforeUnloadBound) {
+      window.removeEventListener('beforeunload', beforeUnloadHandler);
+      beforeUnloadBound = false;
+    }
+  }
+
+  function escHtml(s) {
+    return typeof zyEsc === 'function' ? zyEsc(s) : String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function ensureDock() {
+    let dock = document.getElementById('zy-mv-bg-dock');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.id = 'zy-mv-bg-dock';
+      dock.className = 'zy-mv-bg-dock';
+      document.body.appendChild(dock);
+    }
+    return dock;
+  }
+
+  function renderDock() {
+    syncUnloadGuard();
+    const existing = document.getElementById('zy-mv-bg-dock');
+    if (jobs.size === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+    const dock = ensureDock();
+    dock.classList.toggle('is-minimized', minimized);
+
+    const list = Array.from(jobs.values());
+    const activeJobs = list.filter(j => j.state === 'uploading');
+    const avgPct = activeJobs.length
+      ? Math.round(activeJobs.reduce((acc, j) => acc + (j.pct || 0), 0) / activeJobs.length)
+      : 100;
+
+    const headTitle = activeJobs.length
+      ? `Uploading ${activeJobs.length} video${activeJobs.length > 1 ? 's' : ''} (${avgPct}%)`
+      : (list.some(j => j.state === 'error') ? 'Upload Status' : 'Upload Complete');
+    const headIcon = activeJobs.length
+      ? '<i class="fas fa-circle-notch fa-spin"></i>'
+      : (list.some(j => j.state === 'error') ? '<i class="fas fa-triangle-exclamation"></i>' : '<i class="fas fa-check-circle"></i>');
+
+    dock.innerHTML = `
+      <div class="zy-mv-bg-head" onclick="window._zyMvBgMgr.toggleMin()">
+        <div class="zy-mv-bg-head-left">
+          <span class="zy-mv-bg-head-ic">${headIcon}</span>
+          <span class="zy-mv-bg-head-title">${escHtml(headTitle)}</span>
+        </div>
+        <div class="zy-mv-bg-head-btns" onclick="event.stopPropagation()">
+          <button type="button" class="zy-mv-bg-icon-btn" title="${minimized ? 'Expand' : 'Minimize'}" onclick="window._zyMvBgMgr.toggleMin()">
+            <i class="fas fa-${minimized ? 'chevron-up' : 'chevron-down'}"></i>
+          </button>
+          ${activeJobs.length === 0 ? `<button type="button" class="zy-mv-bg-icon-btn" title="Close" onclick="window._zyMvBgMgr.clearFinished()"><i class="fas fa-times"></i></button>` : ''}
+        </div>
+      </div>
+      <div class="zy-mv-bg-body">
+        ${list.map(j => {
+          const barClass = j.state === 'done' ? 'is-done' : (j.state === 'error' ? 'is-err' : '');
+          const onVaultPage = Boolean(document.getElementById('mv-grid'));
+          return `
+            <div class="zy-mv-bg-job" data-job-id="${j.id}">
+              <div class="zy-mv-bg-job-top">
+                <div class="zy-mv-bg-job-name" title="${escHtml(j.appName)}">${escHtml(j.appName)}</div>
+                <div class="zy-mv-bg-job-right">
+                  <span class="zy-mv-bg-job-pct">${j.state === 'done' ? '100%' : (j.state === 'error' ? 'Failed' : `${j.pct}%`)}</span>
+                  ${j.state === 'uploading'
+                    ? `<button type="button" class="zy-mv-bg-act-btn is-cancel" title="Cancel upload" onclick="window._zyMvBgMgr.cancel(${j.id})"><i class="fas fa-times"></i></button>`
+                    : `<button type="button" class="zy-mv-bg-act-btn" title="Dismiss" onclick="window._zyMvBgMgr.dismiss(${j.id})"><i class="fas fa-times"></i></button>`}
+                </div>
+              </div>
+              <div class="zy-mv-progress-track zy-mv-bg-track">
+                <div class="zy-mv-progress-fill zy-mv-bg-fill ${barClass}" style="width:${j.state === 'done' ? 100 : j.pct}%;"></div>
+              </div>
+              <div class="zy-mv-bg-job-sub">
+                <span class="zy-mv-bg-job-meta">${escHtml(j.statusText)}</span>
+                ${j.state === 'done' && !onVaultPage
+                  ? `<button type="button" class="zy-mv-bg-open-btn" onclick="window._zyMvBgMgr.openVault(${j.id})">Open Vault</button>`
+                  : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  let renderRaf = 0;
+  function updateProgressDomInPlace() {
+    const dock = document.getElementById('zy-mv-bg-dock');
+    if (!dock) { renderDock(); return; }
+    const list = Array.from(jobs.values());
+    const activeJobs = list.filter(j => j.state === 'uploading');
+    const titleEl = dock.querySelector('.zy-mv-bg-head-title');
+    if (titleEl && activeJobs.length) {
+      const avgPct = Math.round(activeJobs.reduce((acc, j) => acc + (j.pct || 0), 0) / activeJobs.length);
+      titleEl.textContent = `Uploading ${activeJobs.length} video${activeJobs.length > 1 ? 's' : ''} (${avgPct}%)`;
+    }
+    for (const j of list) {
+      const row = dock.querySelector(`.zy-mv-bg-job[data-job-id="${j.id}"]`);
+      if (!row) { renderDock(); return; }
+      const fill = row.querySelector('.zy-mv-bg-fill');
+      const pctEl = row.querySelector('.zy-mv-bg-job-pct');
+      const metaEl = row.querySelector('.zy-mv-bg-job-meta');
+      if (fill) fill.style.width = `${j.state === 'done' ? 100 : j.pct}%`;
+      if (pctEl && j.state === 'uploading') pctEl.textContent = `${j.pct}%`;
+      if (metaEl) metaEl.textContent = j.statusText;
+    }
+  }
+  function scheduleProgressPatch() {
+    if (renderRaf) return;
+    renderRaf = requestAnimationFrame(() => {
+      renderRaf = 0;
+      updateProgressDomInPlace();
+    });
+  }
+
+  function createJob(appName, file) {
+    const id = nextJobId++;
+    const job = {
+      id,
+      appName,
+      fileName: file ? (file.name || 'video.mp4') : '',
+      totalBytes: file ? file.size : 0,
+      loadedBytes: 0,
+      pct: 0,
+      statusText: file ? 'Starting high-speed upload…' : 'Saving method…',
+      state: 'uploading',
+      abortFn: null,
+      autoDismissTimer: null
+    };
+    jobs.set(id, job);
+    minimized = false;
+    renderDock();
+    return job;
+  }
+
+  function updateJob(id, patch) {
+    const j = jobs.get(id);
+    if (!j) return;
+    Object.assign(j, patch);
+    scheduleProgressPatch();
+  }
+
+  function completeJob(id, success, message) {
+    const j = jobs.get(id);
+    if (!j) return;
+    j.abortFn = null;
+    j.state = success ? 'done' : 'error';
+    j.pct = success ? 100 : j.pct;
+    j.statusText = message || (success ? 'Saved to Method Vault' : 'Upload failed');
+    renderDock();
+    if (success) {
+      if (j.autoDismissTimer) clearTimeout(j.autoDismissTimer);
+      j.autoDismissTimer = setTimeout(() => {
+        jobs.delete(id);
+        renderDock();
+      }, 7500);
+    }
+  }
+
+  window._zyMvBgMgr = {
+    createJob,
+    updateJob,
+    completeJob,
+    toggleMin() {
+      minimized = !minimized;
+      renderDock();
+    },
+    cancel(id) {
+      const j = jobs.get(id);
+      if (!j) return;
+      if (typeof j.abortFn === 'function') {
+        const fn = j.abortFn;
+        j.abortFn = null;
+        try { fn(); } catch (_) {}
+      }
+      if (j.autoDismissTimer) clearTimeout(j.autoDismissTimer);
+      jobs.delete(id);
+      renderDock();
+      toast(`Cancelled upload for "${j.appName}"`, 'info');
+    },
+    dismiss(id) {
+      const j = jobs.get(id);
+      if (j && j.autoDismissTimer) clearTimeout(j.autoDismissTimer);
+      jobs.delete(id);
+      renderDock();
+    },
+    clearFinished() {
+      for (const [id, j] of jobs.entries()) {
+        if (j.state !== 'uploading') {
+          if (j.autoDismissTimer) clearTimeout(j.autoDismissTimer);
+          jobs.delete(id);
+        }
+      }
+      renderDock();
+    },
+    openVault(id) {
+      this.dismiss(id);
+      if (typeof loadPage === 'function') loadPage('method-vault');
+    }
+  };
+})();
+
+window.zyMvSubmitUpload = function() {
   const appName = (document.getElementById('mv-up-name')?.value || '').trim();
   const desc = (document.getElementById('mv-up-desc')?.value || '').trim();
   const fileEl = document.getElementById('mv-up-file');
@@ -6063,43 +6291,98 @@ window.zyMvSubmitUpload = async function() {
     return;
   }
 
-  const btn = document.getElementById('mv-up-submit');
-  const cancelBtn = document.getElementById('mv-up-cancel');
-  const progWrap = document.getElementById('mv-up-prog-wrap');
-  const progBar = document.getElementById('mv-up-prog-bar');
-  const progPct = document.getElementById('mv-up-prog-pct');
-  const progLbl = document.getElementById('mv-up-prog-lbl');
+  // Close the modal IMMEDIATELY so admin can freely switch to any other tab while uploading!
+  closeModal();
+  if (file) {
+    toast(`"${appName}" uploading in background — you can use any tab freely.`, 'info');
+  }
 
-  const resetBtn = () => {
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-arrow-up"></i> Save to Vault'; }
-    if (cancelBtn) cancelBtn.disabled = false;
+  const mgr = window._zyMvBgMgr;
+  const job = mgr.createJob(appName, file);
+
+  const uploadStartTs = performance.now();
+  let lastSpeedSampleTs = uploadStartTs;
+  let lastSpeedSampleBytes = 0;
+  let smoothedBps = 0;
+
+  const formatSpeedEta = (loaded, total) => {
+    const now = performance.now();
+    const dt = (now - lastSpeedSampleTs) / 1000;
+    if (dt >= 0.35) {
+      const instBps = Math.max(0, (loaded - lastSpeedSampleBytes) / dt);
+      smoothedBps = smoothedBps > 0 ? (smoothedBps * 0.65 + instBps * 0.35) : instBps;
+      lastSpeedSampleTs = now;
+      lastSpeedSampleBytes = loaded;
+    } else if (smoothedBps === 0 && loaded > 0) {
+      const totalDt = Math.max(0.15, (now - uploadStartTs) / 1000);
+      smoothedBps = loaded / totalDt;
+    }
+    const loadedMb = (loaded / (1024 * 1024)).toFixed(1);
+    const totalMb = (total / (1024 * 1024)).toFixed(1);
+    if (smoothedBps > 1024) {
+      const speedTxt = smoothedBps >= 1024 * 1024
+        ? `${(smoothedBps / (1024 * 1024)).toFixed(1)} MB/s`
+        : `${Math.round(smoothedBps / 1024)} KB/s`;
+      const remainSec = Math.max(1, Math.ceil(Math.max(0, total - loaded) / smoothedBps));
+      const etaTxt = remainSec >= 60
+        ? `~${Math.floor(remainSec / 60)}m ${remainSec % 60}s`
+        : `~${remainSec}s`;
+      return `${loadedMb}/${totalMb} MB • ${speedTxt} • ${etaTxt}`;
+    }
+    return `${loadedMb}/${totalMb} MB…`;
   };
+
   const setProgress = (loaded, total, labelOverride) => {
     const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
-    if (progBar) progBar.style.width = pct + '%';
-    if (progPct) progPct.textContent = pct + '%';
-    if (progLbl) {
-      if (labelOverride) {
-        progLbl.textContent = labelOverride;
-      } else {
-        const loadedMb = (loaded / (1024 * 1024)).toFixed(1);
-        const totalMb = (total / (1024 * 1024)).toFixed(1);
-        progLbl.textContent = `Uploading ${loadedMb} MB / ${totalMb} MB…`;
-      }
+    mgr.updateJob(job.id, {
+      loadedBytes: loaded,
+      pct,
+      statusText: labelOverride || formatSpeedEta(loaded, total)
+    });
+  };
+
+  const onUploadSuccess = async () => {
+    mgr.completeJob(job.id, true, 'Saved to Method Vault ✓');
+    toast(`"${appName}" saved to Method Vault!`, 'success');
+    // Only auto-refresh Vault page if admin is currently viewing it (don't disturb other tabs!)
+    if (document.getElementById('mv-grid') && typeof zyMvLoadOverview === 'function') {
+      try { await zyMvLoadOverview(); } catch (_) {}
     }
   };
 
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading…'; }
-  if (cancelBtn) cancelBtn.disabled = true;
-  if (progWrap) progWrap.style.display = 'block';
+  const onUploadError = (msg) => {
+    const errTxt = msg || 'Video upload failed';
+    mgr.completeJob(job.id, false, errTxt);
+    toast(`Upload failed (${appName}): ${errTxt}`, 'error');
+  };
 
   const tok = sessionStorage.getItem('admin_token') || localStorage.getItem('admin_token') || '';
   const authHeaders = tok ? { Authorization: 'Bearer ' + tok } : {};
 
-  // Use resilient 768KB chunked upload for any video > 700KB (bypasses strict Nginx 1M/50M limits & survives slow internet)
-  if (file && file.size > 700 * 1024) {
+  // Maximum-speed adaptive parallel raw-binary uploader running detached in the background
+  const runParallelUpload = async () => {
+    let aborted = false;
+    let uploadId = '';
+    const activeXhrs = new Set();
+
+    job.abortFn = () => {
+      aborted = true;
+      for (const x of activeXhrs) {
+        try { x.abort(); } catch (_) {}
+      }
+      activeXhrs.clear();
+      if (uploadId) {
+        fetch('/api/method-vault/agent/upload-abort', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders),
+          body: JSON.stringify({ upload_id: uploadId })
+        }).catch(() => {});
+      }
+    };
+
     try {
-      setProgress(0, file.size, 'Preparing video upload…');
+      setProgress(0, file.size, 'Starting high-speed parallel upload…');
       const initRes = await apiFetch('/api/method-vault/agent/upload-init', {
         method: 'POST',
         body: JSON.stringify({
@@ -6108,75 +6391,182 @@ window.zyMvSubmitUpload = async function() {
           file_mime: file.type || 'video/mp4'
         })
       });
+      if (aborted) return;
       if (!initRes || !initRes.success || !initRes.upload_id) {
-        toast((initRes && initRes.error) || 'Could not start video upload', 'error');
-        resetBtn();
+        onUploadError((initRes && initRes.error) || 'Could not start video upload');
         return;
       }
-      const uploadId = initRes.upload_id;
-      const chunkSize = Number(initRes.chunk_size) || (768 * 1024);
-      const totalChunks = Math.ceil(file.size / chunkSize);
 
-      const uploadSingleChunk = (blob, idx, offsetBytes) => new Promise((resolve, reject) => {
-        const fdChunk = new FormData();
-        fdChunk.append('upload_id', uploadId);
-        fdChunk.append('chunk_index', String(idx));
-        fdChunk.append('chunk', blob, `chunk_${idx}.part`);
+      uploadId = initRes.upload_id;
+      const serverChunk = Number(initRes.chunk_size) || (4 * 1024 * 1024);
+      const serverMaxChunk = Number(initRes.max_chunk_size) || (8 * 1024 * 1024);
+      let maxAllowedChunk = serverMaxChunk;
+      let currentChunkSize = file.size < 12 * 1024 * 1024
+        ? Math.min(2 * 1024 * 1024, serverChunk)
+        : serverChunk;
+      let targetConcurrency = Math.max(2, Math.min(6, Number(initRes.concurrency) || 4));
+      let hitProxyLimit = false;
 
+      let nextCursor = 0;
+      const retryQueue = [];
+      let completedBytes = 0;
+      const inFlightBytes = new Map();
+      let fatalError = null;
+      let nextWorkerToken = 1;
+
+      const refreshProgress = (override) => {
+        let inflight = 0;
+        for (const v of inFlightBytes.values()) inflight += v;
+        setProgress(Math.min(file.size, completedBytes + inflight), file.size, override);
+      };
+
+      const sendRawChunk = (start, end, wid) => new Promise((resolve, reject) => {
+        if (aborted) {
+          const e = new Error('Upload cancelled');
+          e.aborted = true;
+          return reject(e);
+        }
+        const slice = file.slice(start, end);
+        const len = end - start;
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/method-vault/agent/upload-chunk', true);
+        const url = `/api/method-vault/agent/upload-chunk?upload_id=${encodeURIComponent(uploadId)}&offset=${start}`;
+        xhr.open('POST', url, true);
         xhr.withCredentials = true;
-        xhr.timeout = 90000;
+        xhr.timeout = 120000;
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.setRequestHeader('X-Upload-Id', uploadId);
+        xhr.setRequestHeader('X-Chunk-Offset', String(start));
+        xhr.setRequestHeader('X-Chunk-Length', String(len));
         if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
+
+        activeXhrs.add(xhr);
+        const t0 = performance.now();
+
         xhr.upload.onprogress = (ev) => {
-          if (ev.lengthComputable) {
-            setProgress(Math.min(file.size, offsetBytes + ev.loaded), file.size);
-          }
+          if (aborted) return;
+          const loadedNow = ev.lengthComputable ? Math.min(len, ev.loaded) : 0;
+          inFlightBytes.set(wid, loadedNow);
+          refreshProgress();
         };
         xhr.onload = () => {
+          activeXhrs.delete(xhr);
+          inFlightBytes.delete(wid);
           let data = null;
           try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
           if (xhr.status >= 200 && xhr.status < 300 && data && data.success) {
-            resolve(data);
+            const elapsedSec = Math.max(0.02, (performance.now() - t0) / 1000);
+            resolve({ data, bps: len / elapsedSec });
           } else {
             const err = new Error((data && data.error) || `Chunk upload failed (HTTP ${xhr.status})`);
             err.httpStatus = xhr.status;
             reject(err);
           }
         };
-        xhr.onerror = () => reject(new Error('Network error during chunk upload'));
-        xhr.ontimeout = () => reject(new Error('Upload timed out on slow connection'));
-        xhr.send(fdChunk);
+        xhr.onerror = () => {
+          activeXhrs.delete(xhr);
+          inFlightBytes.delete(wid);
+          reject(new Error('Network error during parallel upload'));
+        };
+        xhr.ontimeout = () => {
+          activeXhrs.delete(xhr);
+          inFlightBytes.delete(wid);
+          reject(new Error('Chunk upload timed out'));
+        };
+        xhr.onabort = () => {
+          activeXhrs.delete(xhr);
+          inFlightBytes.delete(wid);
+          const e = new Error('Upload cancelled');
+          e.aborted = true;
+          reject(e);
+        };
+        xhr.send(slice);
       });
 
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * chunkSize;
-        const end = Math.min(file.size, start + chunkSize);
-        const blob = file.slice(start, end);
-        let uploaded = false;
-        let lastErr = null;
-        for (let attempt = 1; attempt <= 4; attempt++) {
+      const takeNextTask = () => {
+        if (retryQueue.length > 0) return retryQueue.shift();
+        if (nextCursor >= file.size) return null;
+        const start = nextCursor;
+        const size = Math.min(currentChunkSize, maxAllowedChunk);
+        const end = Math.min(file.size, start + size);
+        nextCursor = end;
+        return { start, end, attempts: 0 };
+      };
+
+      const workerPromises = [];
+      let spawnedWorkers = 0;
+      const ensureWorkers = () => {
+        while (spawnedWorkers < targetConcurrency && !aborted && !fatalError) {
+          spawnedWorkers += 1;
+          workerPromises.push(runWorker());
+        }
+      };
+
+      const runWorker = async () => {
+        while (!aborted && !fatalError) {
+          const task = takeNextTask();
+          if (!task) break;
+          const wid = nextWorkerToken++;
           try {
-            await uploadSingleChunk(blob, i, start);
-            uploaded = true;
-            break;
-          } catch (chunkErr) {
-            lastErr = chunkErr;
-            // Don't retry hard 4xx validation/cap rejections
-            if (chunkErr.httpStatus && chunkErr.httpStatus >= 400 && chunkErr.httpStatus < 500 && chunkErr.httpStatus !== 408) {
-              break;
+            const res = await sendRawChunk(task.start, task.end, wid);
+            completedBytes += (task.end - task.start);
+            refreshProgress();
+
+            const totalBps = smoothedBps || res.bps;
+            if (!hitProxyLimit && totalBps > 4 * 1024 * 1024 && currentChunkSize < maxAllowedChunk) {
+              currentChunkSize = Math.min(maxAllowedChunk, 8 * 1024 * 1024);
+            } else if (totalBps > 0 && totalBps < 350 * 1024 && currentChunkSize > 1024 * 1024) {
+              currentChunkSize = 1024 * 1024;
             }
-            setProgress(start, file.size, `Slow connection — retrying part ${i + 1}/${totalChunks} (${attempt}/4)…`);
-            await new Promise(r => setTimeout(r, 900 * attempt));
+          } catch (chunkErr) {
+            if (aborted || chunkErr.aborted) return;
+
+            if (chunkErr.httpStatus === 413 && (task.end - task.start) > 512 * 1024) {
+              hitProxyLimit = true;
+              const prevLen = task.end - task.start;
+              const nextLimit = prevLen > 2 * 1024 * 1024
+                ? 1536 * 1024
+                : (prevLen > 800 * 1024 ? 768 * 1024 : 512 * 1024);
+              maxAllowedChunk = Math.min(maxAllowedChunk, nextLimit);
+              currentChunkSize = Math.min(currentChunkSize, maxAllowedChunk);
+              targetConcurrency = 6;
+              const pieces = [];
+              for (let p = task.start; p < task.end; p += maxAllowedChunk) {
+                pieces.push({ start: p, end: Math.min(task.end, p + maxAllowedChunk), attempts: 0 });
+              }
+              for (let idx = pieces.length - 1; idx >= 0; idx--) retryQueue.unshift(pieces[idx]);
+              ensureWorkers();
+              continue;
+            }
+
+            if (chunkErr.httpStatus && chunkErr.httpStatus >= 400 && chunkErr.httpStatus < 500 && chunkErr.httpStatus !== 408 && chunkErr.httpStatus !== 429) {
+              fatalError = chunkErr;
+              return;
+            }
+
+            task.attempts += 1;
+            if (task.attempts > 5) {
+              fatalError = chunkErr;
+              return;
+            }
+            refreshProgress(`Connection dip — retrying (${task.attempts}/5)…`);
+            await new Promise(r => setTimeout(r, 600 * task.attempts));
+            if (!aborted && !fatalError) retryQueue.push(task);
           }
         }
-        if (!uploaded) {
-          throw lastErr || new Error('Upload interrupted on slow internet. Please try again.');
-        }
-        setProgress(end, file.size);
+      };
+
+      ensureWorkers();
+      let awaitedCount = 0;
+      while (awaitedCount < workerPromises.length) {
+        const batch = workerPromises.slice(awaitedCount);
+        awaitedCount = workerPromises.length;
+        await Promise.all(batch);
       }
 
-      setProgress(file.size, file.size, 'Finalizing and saving to Vault…');
+      if (aborted) return;
+      if (fatalError) throw fatalError;
+
+      setProgress(file.size, file.size, 'Finalizing video…');
       const compRes = await apiFetch('/api/method-vault/agent/upload-complete', {
         method: 'POST',
         headers: authHeaders,
@@ -6189,24 +6579,26 @@ window.zyMvSubmitUpload = async function() {
           active
         })
       });
+      if (aborted) return;
       if (compRes && compRes.success) {
-        if (progBar) progBar.style.width = '100%';
-        if (progPct) progPct.textContent = '100%';
-        closeModal();
-        toast('App Method saved to Vault!', 'success');
-        await zyMvLoadOverview();
+        await onUploadSuccess();
       } else {
-        toast((compRes && compRes.error) || 'Could not finalize video', 'error');
-        resetBtn();
+        onUploadError((compRes && compRes.error) || 'Could not finalize video');
       }
     } catch (err) {
-      toast(err.message || 'Video upload failed', 'error');
-      resetBtn();
+      if (aborted) return;
+      onUploadError(err.message || 'Video upload failed');
     }
+  };
+
+  // Run detached in background: parallel raw-binary streaming for videos > 2 MB
+  if (file && file.size > 2 * 1024 * 1024) {
+    runParallelUpload();
     return;
   }
 
-  // Fast single-request path for text/links-only or tiny videos (<= 700KB)
+  // Instant 1-request background path for text/links-only or small videos (<= 2 MB); auto-switches to parallel on HTTP 413
+  let singleAborted = false;
   const fd = new FormData();
   fd.append('app_name', appName);
   fd.append('description', desc);
@@ -6220,28 +6612,33 @@ window.zyMvSubmitUpload = async function() {
   xhr.withCredentials = true;
   if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
 
+  job.abortFn = () => {
+    singleAborted = true;
+    try { xhr.abort(); } catch (_) {}
+  };
+
   xhr.upload.onprogress = (ev) => {
-    if (!ev.lengthComputable) return;
+    if (singleAborted || !ev.lengthComputable) return;
     setProgress(ev.loaded, ev.total);
   };
 
   xhr.onload = async () => {
+    if (singleAborted) return;
+    if (xhr.status === 413 && file) {
+      runParallelUpload();
+      return;
+    }
     let data = null;
     try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
     if (xhr.status >= 200 && xhr.status < 300 && data && data.success) {
-      if (progBar) progBar.style.width = '100%';
-      if (progPct) progPct.textContent = '100%';
-      closeModal();
-      toast('App Method saved to Vault!', 'success');
-      await zyMvLoadOverview();
+      await onUploadSuccess();
     } else {
-      toast((data && data.error) || `Upload failed (HTTP ${xhr.status})`, 'error');
-      resetBtn();
+      onUploadError((data && data.error) || `Upload failed (HTTP ${xhr.status})`);
     }
   };
   xhr.onerror = () => {
-    toast('Network error while uploading video', 'error');
-    resetBtn();
+    if (singleAborted) return;
+    onUploadError('Network error while uploading video');
   };
   xhr.send(fd);
 };

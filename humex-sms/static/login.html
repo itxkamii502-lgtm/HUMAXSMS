@@ -208,30 +208,9 @@ body {
   -webkit-text-fill-color: #1f2937;
   transition: background-color 5000s ease-in-out 0s;
 }
-.eye-toggle {
-  background: transparent;
-  border: none;
-  color: #71717a;
-  font-size: 17px;
-  cursor: pointer;
-  width: 36px;
-  height: 36px;
-  margin-right: -6px;
-  margin-left: 6px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: color 0.15s ease, background-color 0.15s ease;
-}
-.eye-toggle:hover {
-  color: #27272a;
-  background: rgba(15, 23, 42, 0.06);
-}
-.eye-toggle:focus-visible {
-  outline: 2px solid #46bd36;
-  outline-offset: 2px;
+.pill-input-wrap input[type="password"]::-ms-reveal,
+.pill-input-wrap input[type="password"]::-ms-clear {
+  display: none !important;
 }
 
 /* ── 2FA Hint ── */
@@ -365,9 +344,6 @@ body {
     <div class="pill-input-wrap">
       <i class="fas fa-lock pill-icon" aria-hidden="true"></i>
       <input type="password" id="password" name="password" placeholder="Password" autocomplete="current-password" required>
-      <button type="button" class="eye-toggle" id="togglePassword" aria-label="Toggle password visibility">
-        <i class="far fa-eye" id="eyeIcon"></i>
-      </button>
     </div>
 
     <!-- 2FA Code Input (Revealed if account has 2FA enabled) -->
@@ -447,16 +423,6 @@ const password = document.getElementById('password');
 const errorMsg = document.getElementById('errorMsg');
 const submitBtn = document.getElementById('submitBtn');
 const defaultBtnHtml = '<span>LOGIN</span>';
-const togglePassword = document.getElementById('togglePassword');
-const eyeIcon = document.getElementById('eyeIcon');
-
-togglePassword.addEventListener('click', () => {
-  const hidden = password.type === 'password';
-  password.type = hidden ? 'text' : 'password';
-  if (eyeIcon) {
-    eyeIcon.className = hidden ? 'far fa-eye-slash' : 'far fa-eye';
-  }
-});
 
 function showError(msg) {
   errorMsg.textContent = msg;

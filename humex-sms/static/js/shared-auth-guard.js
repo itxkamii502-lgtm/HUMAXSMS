@@ -196,6 +196,55 @@
     window.location.replace('/ints/login');
   }
 
+  let _sessionWatcherBound = false;
+  let _verifyInFlight = false;
+  let _hiddenSince = 0;
+
+  function verifySessionAlive() {
+    if (_verifyInFlight || window.__AUTH_BLOCKED__) return Promise.resolve(true);
+    const p = String(window.location.pathname || '').toLowerCase();
+    if (p === '/login' || p === '/ints/login' || p.endsWith('/login.html') || p === '/') {
+      return Promise.resolve(true);
+    }
+    _verifyInFlight = true;
+    return fetch('/api/auth/me?peek=1', {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store'
+    }).then(function (res) {
+      if (res && res.status === 401) {
+        window.__AUTH_BLOCKED__ = true;
+        clearSession();
+        return false;
+      }
+      return true;
+    }).catch(function () {
+      return true;
+    }).finally(function () {
+      _verifyInFlight = false;
+    });
+  }
+
+  function bindSessionExpiryWatcher() {
+    if (_sessionWatcherBound) return;
+    _sessionWatcherBound = true;
+
+    // Check immediately if tab was hidden for >30s and user returns to it
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        _hiddenSince = Date.now();
+      } else if (_hiddenSince && (Date.now() - _hiddenSince) > 30000) {
+        _hiddenSince = 0;
+        verifySessionAlive();
+      }
+    });
+
+    // Periodic non-touching peek every 5 minutes so untouched open panels auto-logout on expiry
+    setInterval(function () {
+      verifySessionAlive();
+    }, 5 * 60 * 1000);
+  }
+
   let _pageshowGuardBound = false;
   function bindBfcacheGuard() {
     if (_pageshowGuardBound) return;
@@ -209,6 +258,8 @@
           }
         } catch (_) {}
         window.location.replace('/ints/login');
+      } else if (e && e.persisted) {
+        verifySessionAlive();
       }
     });
   }
@@ -243,6 +294,7 @@
       return false;
     }
 
+    bindSessionExpiryWatcher();
     return true;
   }
 
@@ -269,6 +321,7 @@
     syncSession: syncSession,
     setSession: setSession,
     clearSession: clearSession,
+    verifySessionAlive: verifySessionAlive,
     enforce: enforce,
     switchRole: switchRole,
     initCrossTabWatcher: initCrossTabWatcher

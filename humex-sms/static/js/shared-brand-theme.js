@@ -1211,9 +1211,12 @@
             if (ws === sock) ws = null;
             notifyStatus(false, false);
             if (stopped || window.__AUTH_BLOCKED__ || isLoginPage()) return;
-            // Stop reconnect storm if session is unauthorized (1008)
+            // Stop reconnect storm if session is unauthorized/expired (1008) and auto-logout immediately
             if (ev && ev.code === 1008) {
               stopped = true;
+              if (window.HumexAuth && typeof window.HumexAuth.verifySessionAlive === 'function') {
+                window.HumexAuth.verifySessionAlive();
+              }
               return;
             }
             const delay = Math.min(5000, 600 * Math.pow(1.6, Math.min(attempts++, 5)));

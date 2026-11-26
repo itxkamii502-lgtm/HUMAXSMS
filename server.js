@@ -7428,7 +7428,8 @@ function getSessionToken(req) {
   return cookies['humex_session_token'] || cookies['alpha_session_token'] || cookies['session_token'] || null;
 }
 
-function getSessionUser(req) {
+function getSessionUser(req, opts = {}) {
+  const touch = opts.touch !== false;
   const rawToken = getSessionToken(req);
   if (!rawToken) return null;
   const hashedToken = hashSessionToken(rawToken);
@@ -7450,7 +7451,7 @@ function getSessionUser(req) {
     }
 
     session.id = dbUser.id;
-    session.lastActive = now;
+    if (touch) session.lastActive = now;
     return session;
   }
   return null;
@@ -8497,9 +8498,13 @@ app.post('/api/auth/logout', handleSessionLogout);
 app.post('/api/logout', handleSessionLogout);
 
 app.get('/api/auth/me', (req, res) => {
-  const sessionUser = getSessionUser(req);
+  const isPeek = String(req.query.peek || '') === '1';
+  const sessionUser = getSessionUser(req, { touch: !isPeek });
   if (!sessionUser) {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+  if (isPeek) {
+    return res.json({ success: true, active: true, id: sessionUser.id, role: sessionUser.role });
   }
   const wnAccess = hasWhitenoiseAccess(sessionUser);
   const appLinksAccess = hasAppLinksAccess(sessionUser);
@@ -27173,11 +27178,27 @@ server.prependListener('upgrade', (req, socket) => {
 });
 
 const wsConnPerIp = new Map();
-// Clean up half-open/zombie WebSockets every 25s so mobile network switches never exhaust wsConnPerIp
+// Clean up half-open/zombie WebSockets & enforce session timeout every 25s
 const wsLivenessSweep = setInterval(() => {
   try {
+    const now = Date.now();
+    let pruned = false;
     wss.clients.forEach((sock) => {
       if (sock.readyState !== 1) return;
+      if (sock._sessionHash) {
+        const sess = activeSessions.get(sock._sessionHash);
+        const expired = !sess
+          || (now - (sess.created || now) > SESSION_MAX_AGE_MS)
+          || (now - (sess.lastActive || now) > SESSION_IDLE_TIMEOUT_MS);
+        if (expired) {
+          if (sess) {
+            activeSessions.delete(sock._sessionHash);
+            pruned = true;
+          }
+          try { sock.close(1008, 'session expired'); } catch (_) {}
+          return;
+        }
+      }
       if (sock.isAlive === false) {
         sock._missedPongs = (sock._missedPongs || 0) + 1;
         if (sock._missedPongs >= 2) {
@@ -27188,6 +27209,7 @@ const wsLivenessSweep = setInterval(() => {
       sock.isAlive = false;
       try { sock.ping(); } catch (_) {}
     });
+    if (pruned) savePersistedSessions();
   } catch (_) {}
 }, 25000);
 if (wsLivenessSweep && typeof wsLivenessSweep.unref === 'function') wsLivenessSweep.unref();
@@ -27215,6 +27237,8 @@ wss.on('connection', (ws, req) => {
   wsConnPerIp.set(ip, open + 1);
   ws.isAlive = true;
   ws._missedPongs = 0;
+  const rawWsTok = getSessionToken(req);
+  ws._sessionHash = rawWsTok ? hashSessionToken(rawWsTok) : '';
   ws.on('pong', () => {
     ws.isAlive = true;
     ws._missedPongs = 0;

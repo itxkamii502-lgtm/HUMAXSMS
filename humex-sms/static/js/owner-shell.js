@@ -1914,18 +1914,17 @@ window.renderOwnerCdr2Load = renderOwnerCdr2Load;
 window.openWhitenoiseExcelUploadModal = function () {
   window._wnPreviewState = null;
   const html = `
-    <div id="wn-excel-modal-root" style="min-width:min(820px,88vw);">
-      <div id="wn-dropzone"
+    <div id="wn-excel-modal-root" class="zy-wn-excel-root">
+      <div id="wn-dropzone" class="zy-wn-dropzone"
         onclick="document.getElementById('wn-excel-file-input')?.click()"
-        ondragover="event.preventDefault();this.style.borderColor='#2563eb';this.style.background='#eff6ff';"
-        ondragleave="this.style.borderColor='#cbd5e1';this.style.background='#f8fafc';"
-        ondrop="event.preventDefault();this.style.borderColor='#cbd5e1';this.style.background='#f8fafc';if(event.dataTransfer?.files?.[0])zyWnHandleFileUpload(event.dataTransfer.files[0]);"
-        style="border:1.5px dashed #cbd5e1;border-radius:8px;padding:22px 16px;text-align:center;background:#f8fafc;cursor:pointer;transition:all 0.15s;">
+        ondragover="event.preventDefault();this.classList.add('is-drag');"
+        ondragleave="this.classList.remove('is-drag');"
+        ondrop="event.preventDefault();this.classList.remove('is-drag');if(event.dataTransfer?.files?.[0])zyWnHandleFileUpload(event.dataTransfer.files[0]);">
         <input type="file" id="wn-excel-file-input" accept=".xlsx,.xls,.csv" style="display:none;"
           onchange="if(this.files && this.files[0]) zyWnHandleFileUpload(this.files[0]);">
-        <i class="fas fa-file-excel" style="font-size:26px;color:#2563eb;margin-bottom:6px;"></i>
-        <div style="font-size:14px;font-weight:700;color:#0f172a;">Drop company Excel file here or click to browse</div>
-        <div style="font-size:12px;color:#64748b;margin-top:3px;">Supports cumulative .xlsx, .xls, .csv (e.g. sms_stats_15-19.11.2026.xlsx) · Date-wise upsert · Zero duplicates</div>
+        <i class="fas fa-file-excel zy-wn-dropzone-ico"></i>
+        <div class="zy-wn-dropzone-title">Drop company Excel file here or click to browse</div>
+        <div class="zy-wn-dropzone-sub">Supports cumulative .xlsx, .xls, .csv (e.g. sms_stats_15-19.11.2026.xlsx) · Date-wise upsert · Zero duplicates</div>
       </div>
 
       <div id="wn-preview-status" style="margin-top:10px;"></div>
@@ -1934,16 +1933,19 @@ window.openWhitenoiseExcelUploadModal = function () {
   `;
   if (typeof openModal === 'function') {
     openModal('Upload Whitenoise Daily Excel Stats', html);
+    const modalEl = document.getElementById('modal');
+    if (modalEl) modalEl.classList.add('modal-xl', 'wn-excel-modal');
   }
 };
 
 window.zyWnHandleFileUpload = async function (file) {
   const statusEl = document.getElementById('wn-preview-status');
   const contEl = document.getElementById('wn-preview-container');
+  const dzEl = document.getElementById('wn-dropzone');
   if (!file) return;
   if (statusEl) {
-    statusEl.innerHTML = `<div style="padding:10px 12px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:6px;font-size:12.5px;color:#1d4ed8;">
-      <i class="fas fa-spinner fa-spin"></i> Parsing <b>${zyEsc(file.name)}</b> and resolving historical date-based ownership…
+    statusEl.innerHTML = `<div class="zy-wn-status-box is-loading">
+      <i class="fas fa-spinner fa-spin"></i> <span>Parsing <b>${zyEsc(file.name)}</b> and resolving historical date-based ownership…</span>
     </div>`;
   }
   if (contEl) contEl.style.display = 'none';
@@ -1956,11 +1958,13 @@ window.zyWnHandleFileUpload = async function (file) {
     if (!resp.ok || !data.success) throw new Error(data.error || 'Preview failed');
     window._wnPreviewState = { ...data, filterTab: 'all' };
     if (statusEl) statusEl.innerHTML = '';
+    if (dzEl) dzEl.classList.add('is-compact');
     zyRenderWhitenoisePreview();
   } catch (err) {
+    if (dzEl) dzEl.classList.remove('is-compact');
     if (statusEl) {
-      statusEl.innerHTML = `<div style="padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:12.5px;color:#b91c1c;">
-        <i class="fas fa-triangle-exclamation"></i> ${zyEsc(err.message || 'Could not parse Excel workbook.')}
+      statusEl.innerHTML = `<div class="zy-wn-status-box is-error">
+        <i class="fas fa-triangle-exclamation"></i> <span>${zyEsc(err.message || 'Could not parse Excel workbook.')}</span>
       </div>`;
     }
   }
@@ -1981,14 +1985,14 @@ window.zyWnReevaluatePreview = async function (sheetChanged = false) {
     };
   }
   const statusEl = document.getElementById('wn-preview-status');
-  if (statusEl) statusEl.innerHTML = `<div style="font-size:12px;color:#2563eb;"><i class="fas fa-spinner fa-spin"></i> Re-evaluating sheet mapping…</div>`;
+  if (statusEl) statusEl.innerHTML = `<div class="zy-wn-status-box is-loading"><i class="fas fa-spinner fa-spin"></i> <span>Re-evaluating sheet mapping…</span></div>`;
   try {
     const res = await apiFetch('/api/whitenoise-excel/preview', { method: 'POST', body: JSON.stringify(payload) });
     window._wnPreviewState = { ...res, filterTab: st.filterTab || 'all' };
     if (statusEl) statusEl.innerHTML = '';
     zyRenderWhitenoisePreview();
   } catch (err) {
-    if (statusEl) statusEl.innerHTML = `<div style="font-size:12px;color:#dc2626;">${zyEsc(err.message || 'Mapping failed')}</div>`;
+    if (statusEl) statusEl.innerHTML = `<div class="zy-wn-status-box is-error"><i class="fas fa-triangle-exclamation"></i> <span>${zyEsc(err.message || 'Mapping failed')}</span></div>`;
   }
 };
 
@@ -2054,9 +2058,9 @@ function zyRenderWhitenoisePreview() {
     ? `<div class="zy-wn-day-matrix-wrap">
         <div class="zy-wn-day-matrix-head">
           <span><i class="fas fa-table"></i> Day-by-Day Verification Matrix (${perDate.length} day${perDate.length === 1 ? '' : 's'} detected)</span>
-          <span style="font-size:11px;color:#64748b;">Cumulative reconciliation across 1–15 &amp; 16–End cycles</span>
+          <span style="font-size:11px;color:#64748b;font-weight:500;">Cumulative reconciliation across 1–15 &amp; 16–End cycles</span>
         </div>
-        <div style="max-height:155px;overflow:auto;">
+        <div class="zy-wn-table-scroll is-matrix">
           <table class="zy-wn-day-matrix-tbl">
             <thead>
               <tr>
@@ -2076,12 +2080,12 @@ function zyRenderWhitenoisePreview() {
                 else if (d.status === 'updated') stBadge = '<span class="zy-wn-st-upd">Updated Delta</span>';
                 const deltaStr = `${d.delta_sms >= 0 ? '+' : ''}${Number(d.delta_sms || 0).toLocaleString()}`;
                 return `<tr>
-                  <td class="monospace" style="font-weight:700;">${zyEsc(d.date_ymd)}</td>
-                  <td><span class="zy-wn-cycle-tag">${zyEsc(d.half_period || '—')}</span></td>
-                  <td class="monospace" style="text-align:right;">${Number(d.existing_sms || 0).toLocaleString()}</td>
-                  <td class="monospace" style="text-align:right;font-weight:700;">${Number(d.file_sms || 0).toLocaleString()}</td>
-                  <td class="monospace" style="text-align:right;font-weight:700;color:${d.delta_sms > 0 ? '#059669' : (d.delta_sms < 0 ? '#dc2626' : '#64748b')};">${deltaStr}</td>
-                  <td>${stBadge}</td>
+                  <td class="monospace" style="font-weight:700;white-space:nowrap;">${zyEsc(d.date_ymd)}</td>
+                  <td style="white-space:nowrap;"><span class="zy-wn-cycle-tag">${zyEsc(d.half_period || '—')}</span></td>
+                  <td class="monospace" style="text-align:right;white-space:nowrap;">${Number(d.existing_sms || 0).toLocaleString()}</td>
+                  <td class="monospace" style="text-align:right;font-weight:700;white-space:nowrap;">${Number(d.file_sms || 0).toLocaleString()}</td>
+                  <td class="monospace" style="text-align:right;font-weight:700;white-space:nowrap;color:${d.delta_sms > 0 ? '#059669' : (d.delta_sms < 0 ? '#dc2626' : '#64748b')};">${deltaStr}</td>
+                  <td style="white-space:nowrap;">${stBadge}</td>
                 </tr>`;
               }).join('')}
             </tbody>
@@ -2091,7 +2095,7 @@ function zyRenderWhitenoisePreview() {
     : '';
 
   const warningsHtml = (st.warnings || []).length
-    ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid #fde68a;background:#fffbeb;border-radius:6px;font-size:12px;color:#92400e;">
+    ? `<div class="zy-wn-warn-box">
         ${(st.warnings || []).map(w => `<div><i class="fas fa-circle-info"></i> ${zyEsc(w)}</div>`).join('')}
       </div>`
     : '';
@@ -2100,129 +2104,131 @@ function zyRenderWhitenoisePreview() {
   const layoutLabel = st.layout === 'date_pivot' ? 'Date Matrix' : (st.layout === 'multi_sheet_dates' ? 'Multi-Sheet Daily' : 'Tabular');
 
   cont.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;font-size:12.5px;color:#334155;">
-      <div>
-        <b>${zyEsc(st.filename)}</b> · Dates: <span class="monospace">${zyEsc(st.date_min || '—')} → ${zyEsc(st.date_max || '—')}</span>
-        <span class="zy-wn-cycle-tag" style="margin-left:4px;">${distinctDates.length || perDate.length} day(s)</span>
-        · Layout: <b>${layoutLabel}</b>
+    <div class="zy-wn-meta-bar">
+      <div class="zy-wn-meta-main">
+        <b class="zy-wn-meta-file">${zyEsc(st.filename)}</b>
+        <span class="zy-wn-meta-sep">·</span>
+        <span>Dates: <span class="monospace">${zyEsc(st.date_min || '—')} → ${zyEsc(st.date_max || '—')}</span></span>
+        <span class="zy-wn-cycle-tag">${distinctDates.length || perDate.length} day(s)</span>
+        <span class="zy-wn-meta-sep">·</span>
+        <span>Layout: <b>${layoutLabel}</b></span>
       </div>
-      <div style="color:#64748b;">Parsed ${Number(s.total_rows || 0).toLocaleString()} row(s) · ${Number(s.total_sms_in_file || 0).toLocaleString()} total SMS</div>
+      <div class="zy-wn-meta-sub">Parsed ${Number(s.total_rows || 0).toLocaleString()} row(s) · ${Number(s.total_sms_in_file || 0).toLocaleString()} total SMS</div>
     </div>
 
     ${gapBannerHtml}
     ${warningsHtml}
     ${perDateMatrixHtml}
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin:10px 0;padding:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">Sheet (${(st.sheets || []).length})</label>
-        <select id="wn-map-sheet" onchange="zyWnReevaluatePreview(true)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">
+    <div class="zy-wn-map-grid">
+      <div class="zy-wn-map-item">
+        <label>Sheet (${(st.sheets || []).length})</label>
+        <select id="wn-map-sheet" onchange="zyWnReevaluatePreview(true)">
           ${(st.sheets || []).map(sh => `<option value="${zyEsc(sh.name)}" ${sh.name === st.selected_sheet ? 'selected' : ''}>${zyEsc(sh.name)} (${sh.row_count})</option>`).join('')}
         </select>
       </div>
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">Date Column</label>
-        <select id="wn-map-date" onchange="zyWnReevaluatePreview(false)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">${optsHtml(colMap.date, true)}</select>
+      <div class="zy-wn-map-item">
+        <label>Date Column</label>
+        <select id="wn-map-date" onchange="zyWnReevaluatePreview(false)">${optsHtml(colMap.date, true)}</select>
       </div>
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">Number Column *</label>
-        <select id="wn-map-number" onchange="zyWnReevaluatePreview(false)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">${optsHtml(colMap.number)}</select>
+      <div class="zy-wn-map-item">
+        <label>Number Column *</label>
+        <select id="wn-map-number" onchange="zyWnReevaluatePreview(false)">${optsHtml(colMap.number)}</select>
       </div>
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">Service / CLI</label>
-        <select id="wn-map-service" onchange="zyWnReevaluatePreview(false)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">${optsHtml(colMap.service)}</select>
+      <div class="zy-wn-map-item">
+        <label>Service / CLI</label>
+        <select id="wn-map-service" onchange="zyWnReevaluatePreview(false)">${optsHtml(colMap.service)}</select>
       </div>
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">SMS Count</label>
-        <select id="wn-map-count" onchange="zyWnReevaluatePreview(false)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">${optsHtml(colMap.sms_count)}</select>
+      <div class="zy-wn-map-item">
+        <label>SMS Count</label>
+        <select id="wn-map-count" onchange="zyWnReevaluatePreview(false)">${optsHtml(colMap.sms_count)}</select>
       </div>
-      <div>
-        <label style="display:block;font-size:11px;font-weight:600;color:#475569;margin-bottom:3px;">Range (Optional)</label>
-        <select id="wn-map-range" onchange="zyWnReevaluatePreview(false)" style="width:100%;height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;">${optsHtml(colMap.range)}</select>
+      <div class="zy-wn-map-item">
+        <label>Range (Optional)</label>
+        <select id="wn-map-range" onchange="zyWnReevaluatePreview(false)">${optsHtml(colMap.range)}</select>
       </div>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px;">
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">New / Updated / Same</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;">
+    <div class="zy-wn-kpi-grid">
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">New / Updated / Same</div>
+        <div class="monospace zy-wn-kpi-val">
           <span style="color:#059669;">+${s.new_rows || 0}</span> / <span style="color:#d97706;">${s.updated_rows || 0}</span> / <span style="color:#94a3b8;">${s.unchanged_rows || 0}</span>
         </div>
       </div>
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Net SMS Delta</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#0f172a;">${(s.net_sms_delta || 0) >= 0 ? '+' : ''}${Number(s.net_sms_delta || 0).toLocaleString()}</div>
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">Net SMS Delta</div>
+        <div class="monospace zy-wn-kpi-val">${(s.net_sms_delta || 0) >= 0 ? '+' : ''}${Number(s.net_sms_delta || 0).toLocaleString()}</div>
       </div>
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Allocated / Pool</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;">${s.matched_client || 0} / ${s.agent_pool || 0}</div>
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">Allocated / Pool</div>
+        <div class="monospace zy-wn-kpi-val">${s.matched_client || 0} / ${s.agent_pool || 0}</div>
       </div>
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Unassigned / Unknown</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:${(s.unassigned || 0) > 0 ? '#dc2626' : '#059669'};">${s.unassigned || 0}</div>
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">Unassigned / Unknown</div>
+        <div class="monospace zy-wn-kpi-val" style="color:${(s.unassigned || 0) > 0 ? '#dc2626' : '#059669'};">${s.unassigned || 0}</div>
       </div>
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Owner Profit Delta</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#059669;">$${zyFmtMoney(Number(s.net_owner_profit_delta_usd || 0), 4)}</div>
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">Owner Profit Delta</div>
+        <div class="monospace zy-wn-kpi-val" style="color:#059669;">$${zyFmtMoney(Number(s.net_owner_profit_delta_usd || 0), 4)}</div>
       </div>
-      <div style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;">
-        <div style="font-size:11px;color:#64748b;">Agent Payout Delta</div>
-        <div class="monospace" style="font-size:14px;font-weight:700;margin-top:2px;color:#2563eb;">$${zyFmtMoney(Number(s.net_agent_payout_delta_usd || 0), 4)}</div>
+      <div class="zy-wn-kpi-card">
+        <div class="zy-wn-kpi-lbl">Agent Payout Delta</div>
+        <div class="monospace zy-wn-kpi-val" style="color:#2563eb;">$${zyFmtMoney(Number(s.net_agent_payout_delta_usd || 0), 4)}</div>
       </div>
     </div>
 
-    <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+    <div class="zy-wn-tabs">
       ${[
         ['all', `All (${allRows.length})`],
         ['new', `New (${s.new_rows || 0})`],
         ['updated', `Updated (${s.updated_rows || 0})`],
         ['unassigned', `Unassigned (${s.unassigned || 0})`]
       ].map(([k, lbl]) => `
-        <button type="button" onclick="zyWnSetPreviewTab('${k}')"
-          style="padding:4px 10px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;border:1px solid ${tab === k ? '#2563eb' : '#cbd5e1'};background:${tab === k ? '#eff6ff' : '#fff'};color:${tab === k ? '#1d4ed8' : '#475569'};">
+        <button type="button" class="zy-wn-tab-btn ${tab === k ? 'is-active' : ''}" onclick="zyWnSetPreviewTab('${k}')">
           ${lbl}
         </button>
       `).join('')}
     </div>
 
-    <div style="max-height:240px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;">
-      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+    <div class="zy-wn-table-scroll is-preview">
+      <table class="zy-wn-preview-tbl">
         <thead>
-          <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;text-align:left;">
-            <th style="padding:6px 8px;">Sync</th>
-            <th style="padding:6px 8px;">Date</th>
-            <th style="padding:6px 8px;">Number</th>
-            <th style="padding:6px 8px;">Service</th>
-            <th style="padding:6px 8px;">Date-Locked Agent</th>
-            <th style="padding:6px 8px;text-align:right;">SMS</th>
-            <th style="padding:6px 8px;text-align:right;">Owner Rev</th>
-            <th style="padding:6px 8px;text-align:right;">Agent Pay</th>
+          <tr>
+            <th>Sync</th>
+            <th>Date</th>
+            <th>Number</th>
+            <th>Service</th>
+            <th>Date-Locked Agent</th>
+            <th style="text-align:right;">SMS</th>
+            <th style="text-align:right;">Owner Rev</th>
+            <th style="text-align:right;">Agent Pay</th>
           </tr>
         </thead>
         <tbody>
           ${filteredRows.length ? filteredRows.slice(0, 150).map(r => `
-            <tr style="border-bottom:1px solid #f1f5f9;">
-              <td style="padding:5px 8px;">${actionTag(r.action)}</td>
-              <td class="monospace" style="padding:5px 8px;">${zyEsc(r.date_ymd)}</td>
-              <td class="monospace" style="padding:5px 8px;font-weight:600;">${zyEsc(r.number)}</td>
-              <td style="padding:5px 8px;">${zyEsc(r.service)}</td>
-              <td style="padding:5px 8px;">${ownerCell(r)}</td>
-              <td class="monospace" style="padding:5px 8px;text-align:right;font-weight:700;">
+            <tr>
+              <td style="white-space:nowrap;">${actionTag(r.action)}</td>
+              <td class="monospace" style="white-space:nowrap;">${zyEsc(r.date_ymd)}</td>
+              <td class="monospace" style="font-weight:600;white-space:nowrap;">${zyEsc(r.number)}</td>
+              <td>${zyEsc(r.service)}</td>
+              <td style="white-space:nowrap;">${ownerCell(r)}</td>
+              <td class="monospace" style="text-align:right;font-weight:700;white-space:nowrap;">
                 ${r.action === 'updated' ? `<span style="color:#94a3b8;text-decoration:line-through;margin-right:4px;">${r.prev_sms_count}</span>` : ''}${r.sms_count}
               </td>
-              <td class="monospace" style="padding:5px 8px;text-align:right;">$${zyFmtMoney(Number(r.owner_revenue_usd || 0), 4)}</td>
-              <td class="monospace" style="padding:5px 8px;text-align:right;">$${zyFmtMoney(Number(r.agent_payout_usd || 0), 4)}</td>
+              <td class="monospace" style="text-align:right;white-space:nowrap;">$${zyFmtMoney(Number(r.owner_revenue_usd || 0), 4)}</td>
+              <td class="monospace" style="text-align:right;white-space:nowrap;">$${zyFmtMoney(Number(r.agent_payout_usd || 0), 4)}</td>
             </tr>
           `).join('') : `<tr><td colspan="8" style="padding:18px;text-align:center;color:#94a3b8;">No rows in this filter tab.</td></tr>`}
         </tbody>
       </table>
     </div>
 
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:10px;flex-wrap:wrap;">
-      <div style="font-size:12px;color:#64748b;">
+    <div class="zy-wn-commit-bar">
+      <div class="zy-wn-commit-note">
         ${canCommit ? 'Existing identical rows are automatically skipped (0 double billing).' : 'All rows already match current database (0 changes to commit).'}
       </div>
-      <div style="display:flex;gap:8px;">
+      <div class="zy-wn-commit-actions">
         <button type="button" class="btn btn-outline btn-sm" onclick="if(typeof closeModal==='function')closeModal()">Cancel</button>
         <button type="button" class="btn btn-primary btn-sm" id="btn-wn-commit-excel" ${canCommit ? '' : 'disabled'} onclick="zyWnCommitExcelUpload()">
           <i class="fas fa-check-circle"></i> Confirm &amp; Sync Stats

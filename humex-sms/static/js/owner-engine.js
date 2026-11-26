@@ -217,7 +217,7 @@ function openModal(title, html) {
 function closeModal() {
   const overlay = document.getElementById('modal-overlay');
   const modalEl = document.getElementById('modal');
-  if (modalEl) modalEl.classList.remove('modal-lg');
+  if (modalEl) modalEl.classList.remove('modal-lg', 'modal-xl', 'wn-excel-modal');
   if (window._logoCropper) {
     try { window._logoCropper.destroy(); } catch(e){}
     window._logoCropper = null;

@@ -772,7 +772,7 @@ function zyModal(title, body, footer) {
     const ov = document.getElementById('modal-overlay');
     if (ov) { ov.classList.remove('active', 'show'); ov.style.display = ''; }
     const m = document.getElementById('modal');
-    if (m) m.classList.remove('zy-modal', 'modal-lg');
+    if (m) m.classList.remove('zy-modal', 'modal-lg', 'modal-xl', 'wn-excel-modal');
     document.body.classList.remove('zy-modal-open');
   };
 })();

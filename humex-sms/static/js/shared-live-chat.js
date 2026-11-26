@@ -969,6 +969,21 @@
       return;
     }
 
+    if (ev.type === 'chat:method_vault_access') {
+      const allowed = Boolean(ev.method_vault_access);
+      if (state.me) {
+        state.me.method_vault_access = allowed;
+        syncMethodVaultAccessFromMe(state.me);
+      } else {
+        window.ZY_METHOD_VAULT_ACCESS = allowed;
+      }
+      if (state.mounted && state.activeConvId) {
+        renderThreadArea(false);
+        loadMessages(state.activeConvId, { silent: true });
+      }
+      return;
+    }
+
     if (ev.type === 'chat:group_removed') {
       const convId = Number(ev.conversation_id);
       state.conversations = state.conversations.filter(c => Number(c.id) !== convId);
@@ -982,6 +997,20 @@
       if (state.mounted) renderWorkspace();
     }
   }
+
+  window.zySyncChatMethodVaultAccess = function(allowed) {
+    const flag = Boolean(allowed);
+    if (state.me) {
+      state.me.method_vault_access = flag;
+      syncMethodVaultAccessFromMe(state.me);
+    } else {
+      window.ZY_METHOD_VAULT_ACCESS = flag;
+    }
+    if (state.mounted && state.activeConvId) {
+      renderThreadArea(false);
+      loadMessages(state.activeConvId, { silent: true });
+    }
+  };
 
   // ── Thread Operations ──
   async function loadMessages(convId, opts = {}) {
@@ -3797,6 +3826,13 @@
     const isGrp = isGroupConv(conv);
     const isMulti = isCh || isGrp;
     const isAdminRole = Boolean(state.me && (state.me.role === 'owner' || state.me.role === 'agent'));
+    const meRoleLower = String(state.me?.role || '').toLowerCase();
+    const hasMvAccess = state.me && typeof state.me.method_vault_access === 'boolean'
+      ? Boolean(state.me.method_vault_access)
+      : Boolean(window.ZY_METHOD_VAULT_ACCESS);
+    const isAgentConv = conv.type === 'agent_client' || conv.type === 'agent_group' || conv.type === 'agent_channel';
+    const showAgentMvBtn = meRoleLower === 'agent' && hasMvAccess && isAgentConv;
+    const showClientMvBtn = meRoleLower === 'client' && hasMvAccess && isAgentConv;
     const hideGroupDrawer = Boolean(isMulti && !conv.can_manage && ((state.me && state.me.role === 'client') || conv.hide_members));
     const isOnline = !isMulti && Boolean(conv.peer && conv.peer.online);
     const peerRole = !isMulti && conv.peer ? conv.peer.role : '';
@@ -3833,6 +3869,12 @@
             <div class="zy-chat-thread-sub" id="zy-chat-thread-sub"></div>
           </div>
           <div class="zy-chat-thread-actions zy-chat-thread-actions-inline">
+            ${showClientMvBtn ? `
+              <button type="button" class="zy-chat-head-btn zy-chat-head-mv-btn" id="zy-chat-head-method-btn" title="Apps Method — Request or Watch Method Video">
+                <i class="fas fa-film"></i>
+                <span>Apps Method</span>
+              </button>
+            ` : ''}
             ${isAdminRole ? `
               <button type="button" class="zy-chat-head-btn ${conv.is_pinned ? 'is-active' : ''}" id="zy-chat-pin-conv-btn" title="${conv.is_pinned ? 'Unpin Chat' : 'Pin Chat to Top'}">
                 <i class="fas fa-thumbtack"></i>
@@ -3861,10 +3903,21 @@
             </button>
           </div>
           <div class="zy-chat-more-wrap">
+            ${showClientMvBtn ? `
+              <button type="button" class="zy-chat-more-btn zy-chat-mob-mv-btn" id="zy-chat-mob-quick-method-btn" aria-label="Apps Method" title="Apps Method">
+                <i class="fas fa-film"></i>
+              </button>
+            ` : ''}
             <button type="button" class="zy-chat-more-btn" id="zy-chat-more-btn" aria-label="Chat options" title="Options">
               <i class="fas fa-ellipsis-vertical"></i>
             </button>
             <div class="zy-chat-more-menu" id="zy-chat-more-menu" style="display:none;">
+              ${showClientMvBtn ? `
+                <button type="button" class="zy-chat-more-item zy-chat-more-mv-item" id="zy-chat-mob-method-btn">
+                  <i class="fas fa-film"></i>
+                  <span>Apps Method</span>
+                </button>
+              ` : ''}
               ${isAdminRole ? `
                 <button type="button" class="zy-chat-more-item ${conv.is_pinned ? 'is-active' : ''}" id="zy-chat-mob-pin-conv">
                   <i class="fas fa-thumbtack"></i>
@@ -3976,9 +4029,11 @@
             <div class="zy-chat-composer">
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-emoji-toggle" title="Emoji" aria-label="Emoji"><i class="far fa-face-smile"></i></button>
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-img-btn" title="Send Photo" aria-label="Send Photo"><i class="far fa-image"></i></button>
-              ${(String(state.me?.role || '').toLowerCase() === 'agent' && (state.me && typeof state.me.method_vault_access === 'boolean' ? state.me.method_vault_access : Boolean(window.ZY_METHOD_VAULT_ACCESS)) && (conv.type === 'agent_client' || conv.type === 'agent_group' || conv.type === 'agent_channel'))
+              ${showAgentMvBtn
                 ? `<button type="button" class="zy-chat-icon-btn zy-chat-mv-btn" id="zy-chat-method-btn" title="Send App Method from Vault" aria-label="Send App Method"><i class="fas fa-film"></i></button>`
-                : ''}
+                : (showClientMvBtn
+                  ? `<button type="button" class="zy-chat-icon-btn zy-chat-mv-btn" id="zy-chat-client-method-btn" title="Apps Method — Request or Watch Method Video" aria-label="Apps Method"><i class="fas fa-film"></i></button>`
+                  : '')}
               <input type="file" id="zy-chat-file-input" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none;">
               <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" enterkeyhint="enter" placeholder="${isCh ? 'Post an announcement to all clients...' : 'Type a message...'}"></textarea>
               <button type="button" class="zy-chat-send-btn" id="zy-chat-send" title="Send" aria-label="Send"><i class="fas fa-paper-plane"></i></button>
@@ -3986,8 +4041,16 @@
           </div>
         ` : (isCh || isNightClosed ? '' : `
           <div class="zy-chat-locked-bar">
-            <i class="fas fa-lock"></i>
-            <span>${lockedBarText}</span>
+            <div class="zy-chat-locked-bar-txt">
+              <i class="fas fa-lock"></i>
+              <span>${lockedBarText}</span>
+            </div>
+            ${showClientMvBtn ? `
+              <button type="button" class="zy-chat-locked-mv-btn" id="zy-chat-locked-method-btn" title="Apps Method — Request or Watch Method Video">
+                <i class="fas fa-film"></i>
+                <span>Apps Method</span>
+              </button>
+            ` : ''}
           </div>
         `)}
       </div>
@@ -4083,6 +4146,27 @@
         moreMenu.style.display = state.moreMenuOpen ? 'flex' : 'none';
       });
     }
+    const openClientAppsMethodFromChat = () => {
+      closeMoreMenu();
+      if (!hasMvAccess) return;
+      window.ZY_METHOD_VAULT_ACCESS = true;
+      if (typeof window.zyOpenClientAppsMethodDrawer === 'function') {
+        window.zyOpenClientAppsMethodDrawer({
+          conversationId: conv.id,
+          conversationType: conv.type,
+          conversationTitle: conv.title
+        });
+      }
+    };
+    const mobMethodBtn = document.getElementById('zy-chat-mob-method-btn');
+    if (mobMethodBtn) mobMethodBtn.addEventListener('click', openClientAppsMethodFromChat);
+    const mobQuickMethodBtn = document.getElementById('zy-chat-mob-quick-method-btn');
+    if (mobQuickMethodBtn) mobQuickMethodBtn.addEventListener('click', openClientAppsMethodFromChat);
+    const headMethodBtn = document.getElementById('zy-chat-head-method-btn');
+    if (headMethodBtn) headMethodBtn.addEventListener('click', openClientAppsMethodFromChat);
+    const lockedMethodBtn = document.getElementById('zy-chat-locked-method-btn');
+    if (lockedMethodBtn) lockedMethodBtn.addEventListener('click', openClientAppsMethodFromChat);
+
     const mobPinConv = document.getElementById('zy-chat-mob-pin-conv');
     if (mobPinConv) mobPinConv.addEventListener('click', () => { closeMoreMenu(); togglePinConversation(conv.id); });
     const mobSel = document.getElementById('zy-chat-mob-select');
@@ -4147,6 +4231,10 @@
     const mvBtn = document.getElementById('zy-chat-method-btn');
     if (mvBtn) {
       mvBtn.addEventListener('click', () => openChatMethodPickerModal(conv));
+    }
+    const clientMvBtn = document.getElementById('zy-chat-client-method-btn');
+    if (clientMvBtn) {
+      clientMvBtn.addEventListener('click', openClientAppsMethodFromChat);
     }
 
     // Drag & Drop photos directly onto thread pane

@@ -1145,6 +1145,28 @@
                   }
                 }
               }
+              if (payload.type === 'method_vault_access_updated') {
+                const p = String(window.location.pathname || '').toLowerCase();
+                const isAgentPanel = p.includes('/agent') || (typeof window.AGENT_ID !== 'undefined' && window.AGENT_ID);
+                const isClientPanel = p.includes('/client') || (!isAgentPanel && typeof window.CLIENT_ID !== 'undefined' && window.CLIENT_ID);
+                if (isAgentPanel || isClientPanel) {
+                  const enabled = Boolean(payload.method_vault_access);
+                  window.ZY_METHOD_VAULT_ACCESS = enabled;
+                  const navEl = document.getElementById(isClientPanel ? 'nav-apps-method' : 'nav-method-vault');
+                  if (navEl) {
+                    navEl.classList.toggle('zy-nav-hidden', !enabled);
+                    navEl.hidden = !enabled;
+                    if (enabled) navEl.style.removeProperty('display');
+                    else navEl.style.setProperty('display', 'none', 'important');
+                  }
+                  if (!enabled && isClientPanel && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
+                    window.zyCloseClientAppsMethodDrawer();
+                  }
+                  if (typeof window.zySyncChatMethodVaultAccess === 'function') {
+                    window.zySyncChatMethodVaultAccess(enabled);
+                  }
+                }
+              }
             } catch (err) {}
           };
           brandWs.onclose = function () { setTimeout(connect, 6000); };

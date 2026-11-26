@@ -15932,6 +15932,9 @@ function registerPaginatedCrud(routePath, tableName) {
 
     data[idx] = { ...data[idx], ...updates };
     writeDb(tableName, data);
+    if (tableName === 'agents' && ('method_vault_access' in updates)) {
+      broadcastMethodVaultAccessForAgent(Number(data[idx].id || id), Boolean(data[idx].method_vault_access));
+    }
     logAudit(sessionUser.username || 'Owner', `Update ${tableName}`, `Updated item #${id}`, tableName);
 
     const safeItem = (tableName === 'clients' && isOwner)
@@ -27681,6 +27684,34 @@ app.get('/api/owner/method-vault/agents', requireAuth, (req, res) => {
   res.json({ storage, agents: list });
 });
 
+function broadcastMethodVaultAccessForAgent(agentId, enabled) {
+  const aid = Number(agentId);
+  if (!Number.isInteger(aid) || aid <= 0) return;
+  const flag = Boolean(enabled);
+  try {
+    const clients = readDb('clients') || [];
+    const agentClients = clients.filter(c => c && Number(c.agent_id) === aid);
+    const targetKeys = [`agent:${aid}`, ...agentClients.map(c => `client:${Number(c.id)}`)];
+    sendChatWsEvent({
+      type: 'chat:method_vault_access',
+      agent_id: aid,
+      method_vault_access: flag
+    }, targetKeys);
+    broadcastWs({
+      type: 'method_vault_access_updated',
+      agent_id: aid,
+      method_vault_access: flag
+    }, (u) => {
+      const r = normRole(u && u.role);
+      if (r === 'agent' && Number(u.id) === aid) return true;
+      if (r === 'client' && Number(u.agent_id) === aid) return true;
+      return false;
+    });
+  } catch (e) {
+    console.error('broadcastMethodVaultAccessForAgent error:', e);
+  }
+}
+
 app.put('/api/owner/method-vault/agents/:id', requireAuth, (req, res) => {
   if (normRole(req.sessionUser.role) !== 'owner') {
     return res.status(403).json({ error: 'Forbidden. Owner access required.' });
@@ -27694,6 +27725,8 @@ app.put('/api/owner/method-vault/agents/:id', requireAuth, (req, res) => {
   const enabled = Boolean('method_vault_access' in body ? body.method_vault_access : body.enabled);
   agents[idx].method_vault_access = enabled;
   writeDb('agents', agents);
+
+  broadcastMethodVaultAccessForAgent(agentId, enabled);
 
   logAudit(req.sessionUser.username || 'Owner', 'Toggle Method Vault Access', `${enabled ? 'Enabled' : 'Disabled'} Apps Method Video Vault for Agent ${agents[idx].username}`, 'agents');
   sendInstantNotification({

@@ -5477,8 +5477,8 @@ window.zyRenderAppLinksPager = function(opts) {
                         <i class="fas fa-play-circle"></i> Watch Method Video
                       </button>
                     ` : ''}
-                    <button type="button" class="zy-mv-chat-btn" onclick="window.zyCloseClientAppsMethodDrawer(); if(typeof loadPage==='function') loadPage('live-chat');">
-                      <i class="fas fa-comments"></i> Open Chat
+                    <button type="button" class="zy-mv-chat-btn" onclick="window.zyCloseClientAppsMethodDrawer(); if(!document.getElementById('zy-chat-shell') && typeof loadPage==='function') loadPage('live-chat');">
+                      <i class="fas fa-comments"></i> ${document.getElementById('zy-chat-shell') ? 'Back to Chat' : 'Open Chat'}
                     </button>
                   </div>
                 </div>
@@ -5609,8 +5609,9 @@ window.zyRenderAppLinksPager = function(opts) {
     }
   }
 
-  window.zyOpenClientAppsMethodDrawer = function() {
+  window.zyOpenClientAppsMethodDrawer = function(chatCtx) {
     if (!window.ZY_METHOD_VAULT_ACCESS) return;
+    drawerState.chatCtx = (chatCtx && typeof chatCtx === 'object') ? chatCtx : null;
     let wrap = document.getElementById('zy-mv-client-drawer-wrap');
     if (!wrap) {
       wrap = document.createElement('div');

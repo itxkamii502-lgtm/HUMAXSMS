@@ -81,8 +81,122 @@
     nightOverlayMinimized: new Set(),
     togglingStealth: false,
     moreMenuOpen: false,
-    viewportCleanup: null
+    viewportCleanup: null,
+    draftsByConv: new Map(),
+    draftsLoadedKey: ''
   };
+
+  function getDraftStorageKey() {
+    const key = (state.me && state.me.key) ? String(state.me.key) : 'anon';
+    return `zy_chat_drafts_v1_${key}`;
+  }
+
+  function loadDraftsFromStorage() {
+    const sKey = getDraftStorageKey();
+    if (state.draftsLoadedKey === sKey) return;
+    state.draftsLoadedKey = sKey;
+    try {
+      const raw = localStorage.getItem(sKey);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object') {
+        Object.keys(obj).forEach(k => {
+          const cid = Number(k);
+          const val = typeof obj[k] === 'string' ? obj[k] : '';
+          if (Number.isInteger(cid) && cid > 0 && val) {
+            state.draftsByConv.set(cid, val);
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
+  function persistDraftsToStorage() {
+    try {
+      const obj = {};
+      state.draftsByConv.forEach((val, cid) => {
+        if (val && String(val).length > 0) obj[String(cid)] = String(val);
+      });
+      localStorage.setItem(getDraftStorageKey(), JSON.stringify(obj));
+    } catch (_) {}
+  }
+
+  function saveDraft(convId, text) {
+    const cid = Number(convId);
+    if (!Number.isInteger(cid) || cid <= 0) return;
+    const val = String(text == null ? '' : text);
+    if (val.length > 0) {
+      state.draftsByConv.set(cid, val);
+    } else {
+      state.draftsByConv.delete(cid);
+    }
+    persistDraftsToStorage();
+  }
+
+  function getDraft(convId) {
+    const cid = Number(convId);
+    if (!Number.isInteger(cid) || cid <= 0) return '';
+    return state.draftsByConv.get(cid) || '';
+  }
+
+  function clearDraft(convId) {
+    const cid = Number(convId);
+    if (!Number.isInteger(cid) || cid <= 0) return;
+    state.draftsByConv.delete(cid);
+    persistDraftsToStorage();
+  }
+
+  function captureActiveComposerState() {
+    const inp = document.getElementById('zy-chat-input');
+    const cid = Number(state.activeConvId || 0);
+    if (!inp || !cid) return null;
+    const val = String(inp.value || '');
+    saveDraft(cid, val);
+    return {
+      convId: cid,
+      value: val,
+      selStart: typeof inp.selectionStart === 'number' ? inp.selectionStart : val.length,
+      selEnd: typeof inp.selectionEnd === 'number' ? inp.selectionEnd : val.length,
+      focused: document.activeElement === inp
+    };
+  }
+
+  function restoreComposerState(convId, snap, allowFocus = true) {
+    const inp = document.getElementById('zy-chat-input');
+    const cid = Number(convId || 0);
+    if (!inp || !cid) return;
+    const draft = (snap && snap.convId === cid && typeof snap.value === 'string') ? snap.value : getDraft(cid);
+    if (draft) {
+      inp.value = draft;
+      inp.style.height = 'auto';
+      inp.style.height = Math.min(120, inp.scrollHeight) + 'px';
+    }
+    if (allowFocus && snap && snap.focused && snap.convId === cid) {
+      try {
+        inp.focus({ preventScroll: true });
+        if (typeof inp.setSelectionRange === 'function') {
+          inp.setSelectionRange(snap.selStart, snap.selEnd);
+        }
+      } catch (_) {}
+    }
+  }
+
+  function syncMethodVaultAccessFromMe(meObj) {
+    if (!meObj || typeof meObj.method_vault_access !== 'boolean') return;
+    const allowed = Boolean(meObj.method_vault_access);
+    window.ZY_METHOD_VAULT_ACCESS = allowed;
+    const role = String(meObj.role || '').toLowerCase();
+    if (role === 'client') {
+      const mvEl = document.getElementById('nav-apps-method');
+      if (mvEl) mvEl.style.display = allowed ? '' : 'none';
+      if (!allowed && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
+        window.zyCloseClientAppsMethodDrawer();
+      }
+    } else if (role === 'agent') {
+      const mvEl = document.getElementById('nav-method-vault');
+      if (mvEl) mvEl.style.display = allowed ? '' : 'none';
+    }
+  }
 
   function isGroupConv(c) {
     return Boolean(c && c.type === 'agent_group');
@@ -482,15 +596,45 @@
   async function fetchBootstrap(silent = true) {
     try {
       const data = await reqJson('/api/chat/bootstrap');
+      const prevMv = state.me ? Boolean(state.me.method_vault_access) : null;
+      const prevActiveConv = getActiveConv();
+      const prevCanSend = prevActiveConv ? Boolean(prevActiveConv.can_send) : null;
+      const prevNightClosed = prevActiveConv ? Boolean(prevActiveConv.schedule_state && prevActiveConv.schedule_state.is_closed) : null;
+
       state.me = data.me || state.me;
+      loadDraftsFromStorage();
+      syncMethodVaultAccessFromMe(state.me);
+
       state.contacts = Array.isArray(data.contacts) ? data.contacts : [];
       state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
+      let activeRemoved = false;
       if (state.activeConvId && !state.conversations.some(c => Number(c.id) === Number(state.activeConvId))) {
         state.activeConvId = null;
         state.drawerOpen = false;
+        activeRemoved = true;
       }
       recomputeUnread();
-      if (state.mounted) renderWorkspace();
+      if (state.mounted) {
+        const shellMounted = Boolean(document.getElementById('zy-chat-shell'));
+        const nextActiveConv = getActiveConv();
+        const nextCanSend = nextActiveConv ? Boolean(nextActiveConv.can_send) : null;
+        const nextNightClosed = nextActiveConv ? Boolean(nextActiveConv.schedule_state && nextActiveConv.schedule_state.is_closed) : null;
+        const nextMv = state.me ? Boolean(state.me.method_vault_access) : null;
+        const threadNeedsRebuild = activeRemoved || prevCanSend !== nextCanSend || prevNightClosed !== nextNightClosed || prevMv !== nextMv;
+
+        // Avoid tearing down the whole workspace & wiping the user's typed message on silent WS reconnects / background syncs
+        if (silent && shellMounted && !state.createModalOpen) {
+          renderInboxList();
+          updateConnectionStatus();
+          if (threadNeedsRebuild) {
+            renderThreadArea(false);
+          } else {
+            updateThreadHeaderSubtitle();
+          }
+        } else {
+          renderWorkspace();
+        }
+      }
     } catch (err) {
       if (!silent && typeof toast === 'function') toast(err.message || 'Failed to load Live Chat', 'error');
     }
@@ -852,30 +996,51 @@
         recomputeUnread();
       }
     } catch (err) {
-      if (typeof toast === 'function') toast(err.message || 'Could not load messages', 'error');
+      if (!opts.silent && typeof toast === 'function') toast(err.message || 'Could not load messages', 'error');
     } finally {
       state.loadingThread = false;
       if (state.mounted) {
         renderInboxList();
-        renderThreadArea(true);
+        const feedAlreadyMounted = Boolean(document.getElementById('zy-chat-feed') && Number(state.activeConvId) === convId);
+        // On silent background refreshes (e.g. reconnect after slow internet), update messages pane in-place without recreating composer
+        if (opts.silent && feedAlreadyMounted) {
+          const feed = document.getElementById('zy-chat-feed');
+          const nearBottom = !feed || (feed.scrollHeight - feed.scrollTop - feed.clientHeight) < 120;
+          renderMessagesPane(nearBottom);
+          updateThreadHeaderSubtitle();
+        } else {
+          renderThreadArea(true);
+        }
       }
     }
   }
 
-  function syncChatUrlId(convId) {
+  function syncChatUrlId(convId, pushEntry = false) {
     try {
       const u = new URL(window.location.href);
+      const prevSearch = u.search;
       const cid = Number(convId);
       if (Number.isInteger(cid) && cid > 0) {
         u.searchParams.set('chat', String(cid));
       } else {
         u.searchParams.delete('chat');
       }
-      history.replaceState(history.state || { page: 'live-chat' }, '', u.pathname + u.search);
+      const nextUrl = u.pathname + u.search;
+      const baseState = Object.assign({}, history.state || {}, {
+        page: 'live-chat',
+        zySpa: true,
+        chatId: (Number.isInteger(cid) && cid > 0) ? cid : null
+      });
+      if (pushEntry && u.search !== prevSearch) {
+        history.pushState(baseState, '', nextUrl);
+      } else {
+        history.replaceState(baseState, '', nextUrl);
+      }
     } catch (_) {}
   }
 
-  function closeProfileChat() {
+  function closeProfileChatInternal(updateUrl = true) {
+    captureActiveComposerState();
     state.activeConvId = null;
     state.mobileShowThread = false;
     state.drawerOpen = false;
@@ -887,19 +1052,33 @@
     state.seenModal = null;
     state.replyTo = null;
     clearPendingImages();
-    syncChatUrlId(null);
+    if (updateUrl) syncChatUrlId(null, false);
     if (state.mounted) renderWorkspace();
   }
 
+  function closeProfileChat() {
+    if (history.state && history.state.page === 'live-chat' && history.state.chatId) {
+      captureActiveComposerState();
+      try {
+        history.back();
+        return;
+      } catch (_) {}
+    }
+    closeProfileChatInternal(true);
+  }
+
   function exitLiveChatToPanel() {
-    syncChatUrlId(null);
+    captureActiveComposerState();
+    syncChatUrlId(null, false);
     try { document.body.classList.remove('zy-is-live-chat'); } catch (_) {}
     if (typeof window.loadPage === 'function') {
       window.loadPage('dashboard');
     }
   }
 
-  async function selectConversation(convId) {
+  async function selectConversation(convId, opts = {}) {
+    captureActiveComposerState();
+    const prevConvId = Number(state.activeConvId || 0);
     state.activeConvId = Number(convId);
     clearPendingImages();
     state.replyTo = null;
@@ -912,7 +1091,8 @@
     state.selectedMsgIds.clear();
     state.expandedDeletedIds.clear();
     state.mobileShowThread = true;
-    syncChatUrlId(state.activeConvId);
+    const shouldPush = !opts.fromHistory && !opts.replaceHistory && prevConvId !== Number(convId);
+    syncChatUrlId(state.activeConvId, shouldPush);
     const conv = state.conversations.find(c => Number(c.id) === Number(convId));
     if (conv && conv.unread_count > 0) {
       conv.unread_count = 0;
@@ -921,7 +1101,7 @@
     renderWorkspace();
     await loadMessages(convId);
     const inp = document.getElementById('zy-chat-input');
-    if (inp) inp.focus();
+    if (inp && !opts.skipFocus) inp.focus();
   }
 
   async function openDirectWithContact(targetKey) {
@@ -1286,6 +1466,15 @@
         if (optIdx !== -1) list.splice(optIdx, 1);
         try { URL.revokeObjectURL(item.previewUrl); } catch (_) {}
         if (Number(state.activeConvId) === convId) renderMessagesPane(false);
+        if (caption && Number(state.activeConvId) === convId) {
+          saveDraft(convId, caption);
+          const liveInp = document.getElementById('zy-chat-input');
+          if (liveInp && !liveInp.value.trim()) {
+            liveInp.value = caption;
+            liveInp.style.height = 'auto';
+            liveInp.style.height = Math.min(120, liveInp.scrollHeight) + 'px';
+          }
+        }
         if (typeof toast === 'function') toast(err.message || 'Failed to upload photo', 'error');
       }
     }));
@@ -1346,6 +1535,7 @@
     if (hasPendingPhotos) {
       input.value = '';
       input.style.height = 'auto';
+      clearDraft(convId);
       state.replyTo = null;
       state.emojiOpen = false;
       stopTypingSignal(convId);
@@ -1357,7 +1547,7 @@
 
     if (state.sending) return;
 
-    // Optimistic insert (text)
+    // Optimistic insert (text) — keep draft persisted until server confirms delivery!
     const tempId = -Date.now();
     const optimistic = {
       id: tempId,
@@ -1378,6 +1568,7 @@
     if (!state.messagesByConv.has(convId)) state.messagesByConv.set(convId, []);
     state.messagesByConv.get(convId).push(optimistic);
 
+    saveDraft(convId, body);
     input.value = '';
     input.style.height = 'auto';
     state.replyTo = null;
@@ -1396,6 +1587,13 @@
           reply_to_id: replySnapshot ? replySnapshot.id : null
         })
       });
+      // Server confirmed delivery -> clear saved draft if user hasn't started typing a newer message
+      const liveInpOk = document.getElementById('zy-chat-input');
+      if (!liveInpOk || !liveInpOk.value) {
+        clearDraft(convId);
+      } else {
+        saveDraft(convId, liveInpOk.value);
+      }
       const arr = state.messagesByConv.get(convId) || [];
       const optIdx = arr.findIndex(m => m.id === tempId);
       if (data.message) {
@@ -1416,13 +1614,27 @@
       renderInboxList();
       renderMessagesPane(true);
     } catch (err) {
-      // Rollback optimistic message
+      // Rollback optimistic bubble & restore text into BOTH persistent draft and the live input DOM element
       const arr = state.messagesByConv.get(convId) || [];
       const optIdx = arr.findIndex(m => m.id === tempId);
       if (optIdx !== -1) arr.splice(optIdx, 1);
-      input.value = body;
-      renderMessagesPane(false);
-      if (typeof toast === 'function') toast(err.message || 'Failed to send message', 'error');
+      saveDraft(convId, body);
+      if (Number(state.activeConvId) === convId) {
+        const liveInp = document.getElementById('zy-chat-input');
+        if (liveInp && !liveInp.value.trim()) {
+          liveInp.value = body;
+          liveInp.style.height = 'auto';
+          liveInp.style.height = Math.min(120, liveInp.scrollHeight) + 'px';
+        }
+        if (replySnapshot && !state.replyTo) {
+          state.replyTo = replySnapshot;
+          renderReplyStrip();
+        }
+        renderMessagesPane(false);
+      }
+      if (typeof toast === 'function') {
+        toast((err.message ? `${err.message} — ` : '') + 'Message kept in box so you can resend.', 'error');
+      }
     } finally {
       state.sending = false;
     }
@@ -2425,8 +2637,67 @@
         : '';
 
       const hasImage = !m.deleted && m.image && m.image.url;
-      const hasCaption = Boolean(!m.deleted && m.body && String(m.body).trim());
-      const imgOverlayMeta = !isCh && hasImage && !hasCaption;
+      const hasMethodCard = Boolean(!m.deleted && m.method_card && typeof m.method_card === 'object');
+      const hasCaption = Boolean(!m.deleted && !hasMethodCard && m.body && String(m.body).trim());
+      if (!m.deleted && !hasImage && !hasMethodCard && !hasCaption) return '';
+      const imgOverlayMeta = !isCh && hasImage && !hasCaption && !hasMethodCard;
+
+      let methodCardHtml = '';
+      if (hasMethodCard) {
+        const mc = m.method_card;
+        const isClientViewer = String(state.me?.role || '').toLowerCase() === 'client';
+        const cd = (typeof window.zyMvFormatCountdown === 'function')
+          ? window.zyMvFormatCountdown(mc.expires_at)
+          : { expired: Boolean(mc.expired), text: mc.expired ? 'Expired' : 'Active' };
+        const isExpiredNow = Boolean(mc.expired) || (isClientViewer && cd.expired);
+        const safeLinks = (Array.isArray(mc.links) ? mc.links : [])
+          .map(l => ({
+            label: String(l?.label || l?.url || 'Open Link').trim(),
+            href: (typeof window.zyMvSafeHref === 'function') ? window.zyMvSafeHref(l?.url || l) : ''
+          }))
+          .filter(l => l.href);
+
+        if (isExpiredNow) {
+          methodCardHtml = `
+            <div class="zy-mv-chat-card is-expired" data-mv-chat-card="${m.id}">
+              <div class="zy-mv-chat-head">
+                <span class="zy-mv-chat-app"><i class="fas fa-film"></i> ${esc(mc.app_name || 'App Method')}</span>
+                <span class="zy-mv-chat-exp is-expired"><i class="fas fa-lock"></i> Expired</span>
+              </div>
+              <div class="zy-mv-chat-expired-msg">
+                <i class="fas fa-eye-slash"></i> Method access timer ended — automatically hidden.
+              </div>
+            </div>
+          `;
+        } else {
+          methodCardHtml = `
+            <div class="zy-mv-chat-card" data-mv-chat-card="${m.id}" data-mv-exp="${esc(mc.expires_at || '')}">
+              <div class="zy-mv-chat-head">
+                <span class="zy-mv-chat-app"><i class="fas fa-film"></i> ${esc(mc.app_name || 'App Method')}</span>
+                <span class="zy-mv-chat-exp ${cd.expired ? 'is-expired' : ''}" data-zy-mv-exp="${esc(mc.expires_at || '')}">
+                  <i class="fas fa-hourglass-half"></i> ${esc(cd.expired ? 'Expired for Client' : (cd.text + ' left'))}
+                </span>
+              </div>
+              ${mc.description ? `<div class="zy-mv-chat-desc">${esc(mc.description).replace(/\n/g, '<br>')}</div>` : ''}
+              ${safeLinks.length ? `
+                <div class="zy-mv-chat-links">
+                  ${safeLinks.map(l => `
+                    <a class="zy-mv-chat-link" href="${esc(l.href)}" target="_blank" rel="noopener noreferrer">
+                      <i class="fas fa-arrow-up-right-from-square"></i> <span>${esc(l.label)}</span>
+                    </a>
+                  `).join('')}
+                </div>
+              ` : ''}
+              ${mc.has_video ? `
+                <button type="button" class="zy-mv-chat-play-btn" data-open-mv-player="${m.id}">
+                  <i class="fas fa-play-circle"></i>
+                  <span>Play Method Video (Protected)</span>
+                </button>
+              ` : ''}
+            </div>
+          `;
+        }
+      }
 
       const mediaHtml = hasImage
         ? `<div class="zy-chat-img-wrap ${isCh ? 'is-channel-img' : ''} ${m._optimistic ? 'is-uploading' : ''}" data-open-img="${esc(m.image.url)}" data-img-mid="${m.id}">
@@ -2515,6 +2786,7 @@
                 </div>
                 ${replyBlock}
                 ${mediaHtml}
+                ${methodCardHtml}
                 ${textHtml}
               </article>
               ${reactionsBarHtml}
@@ -2531,12 +2803,13 @@
           ${selectCheckboxHtml}
           <div class="zy-chat-bubble-col ${isMine ? 'is-out' : 'is-in'}">
             ${reactPickerHtml}
-            <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${samePrevSender ? 'is-grouped' : ''} ${m.deleted ? 'is-deleted' : ''} ${canPreviewDeleted ? 'has-del-preview' : ''} ${hasImage ? 'has-image' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
+            <div class="zy-chat-bubble ${isMine ? 'is-out' : 'is-in'} ${samePrevSender ? 'is-grouped' : ''} ${m.deleted ? 'is-deleted' : ''} ${canPreviewDeleted ? 'has-del-preview' : ''} ${hasImage ? 'has-image' : ''} ${hasMethodCard ? 'has-method-card' : ''} ${imgOverlayMeta ? 'is-img-only' : ''} ${m.is_auto_schedule ? 'is-auto-sched' : ''}">
               ${actionsHtml}
               ${autoBadgeHtml}
               ${senderLabel}
               ${replyBlock}
               ${mediaHtml}
+              ${methodCardHtml}
               ${textHtml}
               <div class="zy-chat-meta ${imgOverlayMeta ? 'is-img-overlay' : ''}">
                 ${isPinned ? '<span class="zy-chat-pin-ico" title="Pinned"><i class="fas fa-thumbtack"></i></span>' : ''}
@@ -2618,6 +2891,30 @@
         );
       });
     });
+
+    // Bind Protected Method Video Card playback
+    feed.querySelectorAll('[data-open-mv-player]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        if (state.selectMode || Date.now() < state.ignoreOutsideClickUntil) return;
+        e.stopPropagation();
+        const mid = Number(btn.dataset.openMvPlayer);
+        const target = msgs.find(x => Number(x.id) === mid);
+        const mc = target && target.method_card;
+        if (!mc || typeof window.zyOpenSecureMethodPlayer !== 'function') return;
+        const isAgentSelf = String(state.me?.role || '').toLowerCase() === 'agent';
+        window.zyOpenSecureMethodPlayer({
+          grantId: mc.grant_id,
+          methodId: mc.method_id,
+          appName: mc.app_name,
+          description: mc.description,
+          links: mc.links,
+          expiresAt: mc.expires_at,
+          isAgentPreview: isAgentSelf,
+          onExpired: () => renderMessagesPane(false)
+        });
+      });
+    });
+    startMethodCardCountdownTick();
 
     // Bind quote jump
     feed.querySelectorAll('[data-jump-msg]').forEach(el => {
@@ -3090,6 +3387,7 @@
         const start = inp.selectionStart || inp.value.length;
         const end = inp.selectionEnd || inp.value.length;
         inp.value = inp.value.slice(0, start) + em + inp.value.slice(end);
+        saveDraft(state.activeConvId, inp.value);
         inp.focus();
         inp.setSelectionRange(start + em.length, start + em.length);
       });
@@ -3471,6 +3769,7 @@
   function renderThreadArea(scrollBottom = false) {
     const rightEl = document.getElementById('zy-chat-right');
     if (!rightEl) return;
+    const compSnap = captureActiveComposerState();
     const conv = getActiveConv();
 
     if (!conv) {
@@ -3672,6 +3971,9 @@
             <div class="zy-chat-composer">
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-emoji-toggle" title="Emoji" aria-label="Emoji"><i class="far fa-face-smile"></i></button>
               <button type="button" class="zy-chat-icon-btn" id="zy-chat-img-btn" title="Send Photo" aria-label="Send Photo"><i class="far fa-image"></i></button>
+              ${(String(state.me?.role || '').toLowerCase() === 'agent' && (state.me && typeof state.me.method_vault_access === 'boolean' ? state.me.method_vault_access : Boolean(window.ZY_METHOD_VAULT_ACCESS)) && (conv.type === 'agent_client' || conv.type === 'agent_group' || conv.type === 'agent_channel'))
+                ? `<button type="button" class="zy-chat-icon-btn zy-chat-mv-btn" id="zy-chat-method-btn" title="Send App Method from Vault" aria-label="Send App Method"><i class="fas fa-film"></i></button>`
+                : ''}
               <input type="file" id="zy-chat-file-input" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none;">
               <textarea id="zy-chat-input" class="zy-chat-input" rows="1" maxlength="2000" enterkeyhint="enter" placeholder="${isCh ? 'Post an announcement to all clients...' : 'Type a message...'}"></textarea>
               <button type="button" class="zy-chat-send-btn" id="zy-chat-send" title="Send" aria-label="Send"><i class="fas fa-paper-plane"></i></button>
@@ -3837,6 +4139,11 @@
       });
     }
 
+    const mvBtn = document.getElementById('zy-chat-method-btn');
+    if (mvBtn) {
+      mvBtn.addEventListener('click', () => openChatMethodPickerModal(conv));
+    }
+
     // Drag & Drop photos directly onto thread pane
     if (conv.can_send) {
       const threadCol = rightEl.querySelector('.zy-chat-thread-col');
@@ -3887,8 +4194,10 @@
       inp.addEventListener('input', () => {
         inp.style.height = 'auto';
         inp.style.height = Math.min(120, inp.scrollHeight) + 'px';
+        saveDraft(conv.id, inp.value);
         emitTypingSignal(conv.id);
       });
+      restoreComposerState(conv.id, compSnap, true);
       inp.addEventListener('paste', (e) => {
         const items = e.clipboardData && e.clipboardData.items;
         if (!items) return;
@@ -3977,6 +4286,7 @@
   function renderWorkspace() {
     const root = document.getElementById(state.containerId);
     if (!root) { state.mounted = false; return; }
+    captureActiveComposerState();
     const isAgent = state.me && state.me.role === 'agent';
     const isOwner = state.me && state.me.role === 'owner';
     const isAdminRole = Boolean(isAgent || isOwner);
@@ -4257,6 +4567,172 @@
     }
   }
 
+  let _mvCardTickTimer = null;
+  function stopMethodCardCountdownTick() {
+    if (_mvCardTickTimer) {
+      clearInterval(_mvCardTickTimer);
+      _mvCardTickTimer = null;
+    }
+  }
+  function startMethodCardCountdownTick() {
+    stopMethodCardCountdownTick();
+    const isClientViewer = String(state.me?.role || '').toLowerCase() === 'client';
+    _mvCardTickTimer = setInterval(() => {
+      if (!state.mounted) { stopMethodCardCountdownTick(); return; }
+      const nodes = document.querySelectorAll('[data-zy-mv-exp]');
+      if (!nodes.length) return;
+      let anyClientExpired = false;
+      nodes.forEach(el => {
+        const exp = el.getAttribute('data-zy-mv-exp');
+        if (!exp || typeof window.zyMvFormatCountdown !== 'function') return;
+        const cd = window.zyMvFormatCountdown(exp);
+        if (cd.expired) {
+          if (isClientViewer) {
+            anyClientExpired = true;
+          } else {
+            el.classList.add('is-expired');
+            el.innerHTML = `<i class="fas fa-lock"></i> Expired for Client`;
+          }
+        } else {
+          el.innerHTML = `<i class="fas fa-hourglass-half"></i> ${esc(cd.text)} left`;
+        }
+      });
+      if (anyClientExpired) {
+        renderMessagesPane(false);
+      }
+    }, 1000);
+  }
+
+  async function openChatMethodPickerModal(conv) {
+    if (!conv || !conv.id) return;
+    let methods = [];
+    try {
+      const ov = await apiFetch('/api/method-vault/agent/overview');
+      methods = Array.isArray(ov?.methods) ? ov.methods : [];
+    } catch (err) {
+      if (typeof toast === 'function') toast(err.message || 'Could not load Method Vault', 'error');
+      return;
+    }
+    if (!methods.length) {
+      if (typeof toast === 'function') toast('No saved App Methods in your Vault yet. Upload one in Apps Method first.', 'warning');
+      return;
+    }
+    const existing = document.getElementById('zy-chat-mv-modal');
+    if (existing) existing.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'zy-chat-mv-modal';
+    wrap.className = 'zy-mv-player-backdrop';
+    wrap.innerHTML = `
+      <div class="zy-mv-chat-send-dialog" role="dialog" aria-modal="true" aria-label="Send App Method">
+        <div class="zy-mv-player-head">
+          <div class="zy-mv-player-title-wrap">
+            <span class="zy-mv-player-ico"><i class="fas fa-film"></i></span>
+            <div style="min-width:0;">
+              <div class="zy-mv-player-title">Send App Method from Vault</div>
+              <div class="zy-mv-player-sub">To: ${esc(conv.title || 'Chat')}</div>
+            </div>
+          </div>
+          <button type="button" class="zy-mv-head-btn is-close" id="zy-cmv-close"><i class="fas fa-times"></i></button>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+          <div>
+            <label class="zy-lbl">Select App Method *</label>
+            <select id="zy-cmv-method" class="zy-input">
+              ${methods.map(m => `<option value="${Number(m.id)}" data-def-hrs="${Number(m.default_hours || 24)}">${esc(m.app_name)}${m.has_video ? ' 🎬' : ''}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="zy-lbl">Quick Auto-Hide Timer</label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;" id="zy-cmv-presets">
+              ${[['30m', 30], ['1h', 60], ['2h', 120], ['4h', 240], ['12h', 720], ['24h', 1440], ['48h', 2880]].map(([lbl, mins]) =>
+                `<button type="button" class="btn btn-outline btn-xs" data-cmv-mins="${mins}">${lbl}</button>`
+              ).join('')}
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div>
+              <label class="zy-lbl">Hours</label>
+              <input type="number" id="zy-cmv-hrs" class="zy-input" value="${Number(methods[0]?.default_hours || 24)}" min="0" max="720">
+            </div>
+            <div>
+              <label class="zy-lbl">Minutes</label>
+              <input type="number" id="zy-cmv-mins" class="zy-input" value="0" min="0" max="59">
+            </div>
+          </div>
+          <div>
+            <label class="zy-lbl">Custom Caption / Note (Optional)</label>
+            <textarea id="zy-cmv-note" class="zy-input" rows="2" placeholder="Leave blank to use saved caption…"></textarea>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;">
+            <button type="button" class="zy-btn-grey" id="zy-cmv-cancel">Cancel</button>
+            <button type="button" class="zy-btn-blue" id="zy-cmv-send"><i class="fas fa-paper-plane"></i> Send Method</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+    const closeMe = () => wrap.remove();
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) closeMe(); });
+    wrap.querySelector('#zy-cmv-close')?.addEventListener('click', closeMe);
+    wrap.querySelector('#zy-cmv-cancel')?.addEventListener('click', closeMe);
+    const sel = wrap.querySelector('#zy-cmv-method');
+    const hrsIn = wrap.querySelector('#zy-cmv-hrs');
+    const minsIn = wrap.querySelector('#zy-cmv-mins');
+    if (sel && hrsIn && minsIn) {
+      sel.addEventListener('change', () => {
+        const opt = sel.options[sel.selectedIndex];
+        const dh = Number(opt?.getAttribute('data-def-hrs') || 24);
+        hrsIn.value = String(dh);
+        minsIn.value = '0';
+      });
+    }
+    wrap.querySelectorAll('[data-cmv-mins]').forEach(b => {
+      b.addEventListener('click', () => {
+        const total = Number(b.getAttribute('data-cmv-mins') || 60);
+        if (hrsIn) hrsIn.value = String(Math.floor(total / 60));
+        if (minsIn) minsIn.value = String(total % 60);
+      });
+    });
+    const sendBtn = wrap.querySelector('#zy-cmv-send');
+    if (sendBtn) {
+      sendBtn.addEventListener('click', async () => {
+        const method_id = Number(sel?.value || 0);
+        const totalMinutes = (Math.max(0, parseInt(hrsIn?.value || '0', 10) || 0) * 60)
+          + Math.max(0, parseInt(minsIn?.value || '0', 10) || 0);
+        if (!method_id || totalMinutes < 1) {
+          if (typeof toast === 'function') toast('Pick a method and set at least 1 minute timer', 'error');
+          return;
+        }
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Sending…';
+        try {
+          const res = await apiFetch('/api/method-vault/agent/send', {
+            method: 'POST',
+            body: JSON.stringify({
+              method_id,
+              conversation_id: Number(conv.id),
+              duration_minutes: totalMinutes,
+              custom_note: (wrap.querySelector('#zy-cmv-note')?.value || '').trim()
+            })
+          });
+          if (res && res.success) {
+            closeMe();
+            if (typeof toast === 'function') toast('Timed Method Video sent!', 'success');
+            await loadMessages(conv.id, { silent: true });
+          } else {
+            if (typeof toast === 'function') toast(res?.error || 'Could not send method', 'error');
+            sendBtn.disabled = false;
+            sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Method';
+          }
+        } catch (err) {
+          if (typeof toast === 'function') toast(err.message || 'Could not send method', 'error');
+          sendBtn.disabled = false;
+          sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Method';
+        }
+      });
+    }
+  }
+
   // Public API
   const HumexLiveChat = {
     async renderPage(containerId = 'page-content') {
@@ -4289,17 +4765,29 @@
       const isDesktopVp = window.innerWidth > 768;
       if (state.activeConvId && state.conversations.some(c => Number(c.id) === Number(state.activeConvId))) {
         state.mobileShowThread = true;
-        syncChatUrlId(state.activeConvId);
+        syncChatUrlId(state.activeConvId, false);
         renderWorkspace();
         await loadMessages(state.activeConvId, { silent: true });
       } else if (isDesktopVp && state.conversations.length > 0) {
-        // Desktop split-pane: automatically open the most recent thread on the right pane
-        await selectConversation(state.conversations[0].id);
+        // Desktop split-pane: automatically open the most recent thread on the right pane without adding an extra Back step
+        await selectConversation(state.conversations[0].id, { replaceHistory: true, skipFocus: true });
       } else if (urlChatId) {
-        syncChatUrlId(null);
+        syncChatUrlId(null, false);
+      }
+    },
+    handleHistoryPop(nextChatId) {
+      if (!state.mounted) return;
+      const cid = Number(nextChatId || 0);
+      if (cid > 0 && state.conversations.some(c => Number(c.id) === cid)) {
+        if (Number(state.activeConvId) !== cid || !state.mobileShowThread) {
+          selectConversation(cid, { fromHistory: true, skipFocus: true });
+        }
+      } else if (state.activeConvId || state.mobileShowThread) {
+        closeProfileChatInternal(false);
       }
     },
     unmount() {
+      captureActiveComposerState();
       state.mounted = false;
       state.emojiOpen = false;
       state.reactionPickerMsgId = null;
@@ -4312,6 +4800,7 @@
         document.body.classList.remove('zy-is-live-chat');
       } catch (_) {}
       stopScheduleCountdownTick();
+      stopMethodCardCountdownTick();
     },
     refreshBadge: () => fetchBootstrap(true),
     getUnreadCount: () => state.totalUnread,

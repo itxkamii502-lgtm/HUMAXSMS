@@ -27,6 +27,11 @@ const ZY_CLIENT_ICONS = {
     <rect x="3.5" y="13.3" width="7.2" height="7.2" rx="2" fill="currentColor" opacity="0.88"/>
     <path d="M14 17h6m-3-3 3 3-3 3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`,
+  'apps-method': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="3" y="4.5" width="18" height="15" rx="3" fill="currentColor" opacity="0.2" stroke="currentColor" stroke-width="1.8"/>
+    <path d="M10 9.2 15.5 12 10 14.8V9.2Z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="M7 4.5v3M17 4.5v3M7 16.5v3M17 16.5v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.7"/>
+  </svg>`,
   'live-access': `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <circle cx="12" cy="12" r="2.6" fill="currentColor"/>
     <path d="M8.2 15.8a5.4 5.4 0 0 1 0-7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
@@ -87,6 +92,7 @@ const ZY_CLIENT_MENU = [
   { label: 'Whitenoise Reports', page: 'cdr2', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)', hiddenByDefault: true },
   { label: 'Live Access', page: 'live-access', color: '#10b981', tint: 'rgba(16, 185, 129, 0.12)', hiddenByDefault: true },
   { label: 'Apps Links', page: 'app-links', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)', hiddenByDefault: true },
+  { label: 'Apps Method', page: 'apps-method', color: '#7c3aed', tint: 'rgba(124, 58, 237, 0.12)', hiddenByDefault: true },
   { label: 'Notifications', page: 'news', color: '#0284c7', tint: 'rgba(2, 132, 199, 0.11)' },
   { label: 'Payment Requests', page: 'payout-requests', color: '#059669', tint: 'rgba(5, 150, 105, 0.11)' },
   { label: 'Credit Notes', page: 'my-earnings', color: '#0d9488', tint: 'rgba(13, 148, 136, 0.11)' },
@@ -96,6 +102,7 @@ const ZY_LABELS = {
   'dashboard': 'Dashboard',
   'live-chat': 'Live Chat',
   'app-links': 'Apps Links',
+  'apps-method': 'Apps Method',
   'live-access': 'Live Access',
   'my-numbers': 'My Numbers',
   'sms-overview': 'Ranges Add',
@@ -191,6 +198,7 @@ window.CLIENT_ROUTE_PARENT = CLIENT_ROUTE_PARENT;
 window.ZY_WHITENOISE_ACCESS = false;
 window.ZY_APP_LINKS_ACCESS = false;
 window.ZY_LIVE_ACCESS_ENABLED = false;
+window.ZY_METHOD_VAULT_ACCESS = false;
 window.zySyncLiveAccessNav = function(enabled) {
   window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
   const laEl = document.getElementById('nav-live-access');
@@ -205,6 +213,10 @@ window.zyRefreshWhitenoiseNav = function(me) {
   window.ZY_APP_LINKS_ACCESS = appAllowed;
   const appEl = document.getElementById('nav-app-links');
   if (appEl) appEl.style.display = appAllowed ? '' : 'none';
+  const mvAllowed = Boolean(me && me.method_vault_access);
+  window.ZY_METHOD_VAULT_ACCESS = mvAllowed;
+  const mvEl = document.getElementById('nav-apps-method');
+  if (mvEl) mvEl.style.display = mvAllowed ? '' : 'none';
   if (me && typeof me.live_access_enabled === 'boolean') {
     window.zySyncLiveAccessNav(me.live_access_enabled);
   }
@@ -228,6 +240,13 @@ if (typeof apiFetch === 'function') {
 
 const _zyPrevLoad = loadPage;
 loadPage = function (page) {
+  if (page === 'apps-method') {
+    if (window.zyCloseSidebar) window.zyCloseSidebar();
+    if (typeof window.zyOpenClientAppsMethodDrawer === 'function') {
+      window.zyOpenClientAppsMethodDrawer();
+    }
+    return;
+  }
   _zyPrevLoad(page);
   const bc = document.getElementById('breadcrumb');
   if (bc) bc.textContent = ZY_LABELS[page] || page;

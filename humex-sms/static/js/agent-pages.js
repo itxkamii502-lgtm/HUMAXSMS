@@ -5618,6 +5618,937 @@ async function pgAgentAllocationHistory(resetState = true) {
   zyAgtAllocHistLoad();
 }
 
+/* ═══ APPS METHOD VIDEO VAULT (AGENT) ════════════════════════ */
+window._zyMvState = {
+  tab: 'vault',
+  search: '',
+  data: null,
+  linkDrafts: []
+};
+
+async function pgMethodVault(tabOverride) {
+  if (tabOverride) window._zyMvState.tab = tabOverride;
+  const c = document.getElementById('page-content');
+  zyCrumb(['Apps Method']);
+  c.innerHTML = `
+    <div class="page-header" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div class="page-title" style="display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-film" style="color:#7c3aed;"></i> Apps Method Video Vault
+        </div>
+        <div class="page-subtitle">Store protected app method videos &amp; links (25 GB shared cap), approve client Need requests, or send directly to any Client, Group, or Channel with auto-expiring timers.</div>
+      </div>
+      <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-outline btn-sm" onclick="zyMvLoadOverview()"><i class="fas fa-rotate"></i> Refresh</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="zyMvOpenUploadModal()"><i class="fas fa-cloud-arrow-up"></i> Upload App Method</button>
+      </div>
+    </div>
+
+    <div id="zy-mv-agent-root">
+      <div class="card" style="padding:28px;text-align:center;color:var(--sp-text-muted,#64748b);">
+        <i class="fas fa-spinner fa-spin" style="font-size:20px;color:#7c3aed;margin-bottom:8px;"></i>
+        <div>Loading Method Vault…</div>
+      </div>
+    </div>
+  `;
+  await zyMvLoadOverview();
+}
+
+window.zyMvLoadOverview = async function() {
+  const root = document.getElementById('zy-mv-agent-root');
+  if (!root) return;
+  try {
+    const res = await apiFetch('/api/method-vault/agent/overview');
+    if (!res || res.error) {
+      root.innerHTML = `<div class="card" style="padding:24px;text-align:center;color:#b91c1c;"><i class="fas fa-lock" style="font-size:22px;margin-bottom:8px;"></i><div>${zyEsc(res?.error || 'Apps Method Vault access is not enabled for your account. Ask Owner to enable it in General Settings.')}</div></div>`;
+      return;
+    }
+    window._zyMvState.data = res;
+    zyMvRenderAgentView();
+  } catch (err) {
+    root.innerHTML = `<div class="card" style="padding:24px;text-align:center;color:#b91c1c;">${zyEsc(err.message || 'Failed to load Method Vault')}</div>`;
+  }
+};
+
+window.zyMvSwitchTab = function(tab) {
+  window._zyMvState.tab = tab;
+  zyMvRenderAgentView();
+};
+
+window.zyMvSetSearch = function(val) {
+  window._zyMvState.search = String(val || '');
+  zyMvRenderAgentView();
+};
+
+function zyMvRenderAgentView() {
+  const root = document.getElementById('zy-mv-agent-root');
+  const d = window._zyMvState.data;
+  if (!root || !d) return;
+
+  const st = d.storage || {};
+  const methods = Array.isArray(d.methods) ? d.methods : [];
+  const requests = Array.isArray(d.requests) ? d.requests : [];
+  const pendingReqs = requests.filter(r => String(r.status || '').toLowerCase() === 'pending');
+
+  const usedGb = Number(st.used_gb || 0).toFixed(2);
+  const maxGb = Number(st.max_gb || 25).toFixed(0);
+  const pct = Math.min(100, Math.max(0, Number(st.used_percent || 0)));
+  const barColor = pct >= 90 ? '#dc2626' : (pct >= 75 ? '#d97706' : '#7c3aed');
+  const freeDisk = st.disk_free_gb != null ? `${Number(st.disk_free_gb).toFixed(1)} GB VPS free` : 'VPS Protected';
+
+  const q = String(window._zyMvState.search || '').trim().toLowerCase();
+  const filteredMethods = q
+    ? methods.filter(m =>
+        String(m.app_name || '').toLowerCase().includes(q) ||
+        String(m.description || '').toLowerCase().includes(q)
+      )
+    : methods;
+
+  const activeTab = window._zyMvState.tab || 'vault';
+
+  root.innerHTML = `
+    <!-- Storage & KPI Overview -->
+    <div class="zy-mv-stats-grid">
+      <div class="card zy-mv-meter-card">
+        <div class="zy-mv-owner-meter-top">
+          <div>
+            <div style="font-size:13px;font-weight:800;color:var(--sp-text-primary,#0f172a);"><i class="fas fa-hard-drive" style="color:#7c3aed;margin-right:5px;"></i> Shared Vault Storage Cap (${maxGb} GB Max)</div>
+            <div style="font-size:11.5px;color:var(--sp-text-muted,#64748b);margin-top:2px;">Your Videos: <strong>${Number(st.agent_used_mb || 0).toFixed(1)} MB</strong> · Delete any old method to immediately free VPS space (${zyEsc(freeDisk)}).</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:15px;font-weight:800;color:${barColor};font-variant-numeric:tabular-nums;">${usedGb} GB / ${maxGb} GB</div>
+            <div style="font-size:11px;color:var(--sp-text-muted,#64748b);">${pct}% used</div>
+          </div>
+        </div>
+        <div class="zy-mv-progress-track">
+          <div class="zy-mv-progress-fill" style="width:${pct}%;background:${barColor};"></div>
+        </div>
+      </div>
+
+      <div class="card zy-mv-kpi-mini">
+        <div class="zy-mv-kpi-lbl">Saved Methods</div>
+        <div class="zy-mv-kpi-val" style="color:#7c3aed;">${methods.length}</div>
+        <div class="zy-mv-kpi-sub">${methods.filter(m => m.active !== false).length} Active for Clients</div>
+      </div>
+
+      <div class="card zy-mv-kpi-mini" style="cursor:pointer;" onclick="zyMvSwitchTab('requests')">
+        <div class="zy-mv-kpi-lbl">Pending Requests</div>
+        <div class="zy-mv-kpi-val" style="color:${pendingReqs.length ? '#d97706' : '#059669'};">${pendingReqs.length}</div>
+        <div class="zy-mv-kpi-sub">${Number(d.active_grants_count || 0)} Active Unlocks</div>
+      </div>
+    </div>
+
+    <!-- Tabs + Toolbar -->
+    <div class="card" style="padding:12px 14px;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="zy-mv-tab-btn ${activeTab === 'vault' ? 'is-active' : ''}" onclick="zyMvSwitchTab('vault')">
+            <i class="fas fa-film"></i> Method Storage <span class="zy-mv-tab-cnt">${methods.length}</span>
+          </button>
+          <button type="button" class="zy-mv-tab-btn ${activeTab === 'requests' ? 'is-active' : ''}" onclick="zyMvSwitchTab('requests')">
+            <i class="fas fa-inbox"></i> Client Requests ${pendingReqs.length ? `<span class="zy-mv-tab-cnt is-alert">${pendingReqs.length}</span>` : `<span class="zy-mv-tab-cnt">${requests.length}</span>`}
+          </button>
+        </div>
+        ${activeTab === 'vault' ? `
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="text" class="zy-input" style="min-width:210px;height:34px;font-size:12.5px;" placeholder="Search app name or caption…" value="${zyEsc(window._zyMvState.search)}" oninput="zyMvSetSearch(this.value)">
+          </div>
+        ` : ''}
+      </div>
+    </div>
+
+    ${activeTab === 'vault' ? zyMvRenderMethodsGrid(filteredMethods) : zyMvRenderRequestsPanel(requests)}
+  `;
+}
+
+function zyMvRenderMethodsGrid(list) {
+  if (!list.length) {
+    return `
+      <div class="card" style="padding:36px 20px;text-align:center;">
+        <i class="fas fa-film" style="font-size:34px;color:#a78bfa;margin-bottom:10px;"></i>
+        <div style="font-size:15px;font-weight:800;color:var(--sp-text-primary,#0f172a);margin-bottom:4px;">No App Methods Saved Yet</div>
+        <div style="font-size:12.5px;color:var(--sp-text-muted,#64748b);margin-bottom:14px;">Upload your first App Method video + caption + links to share securely with clients.</div>
+        <button type="button" class="btn btn-primary btn-sm" onclick="zyMvOpenUploadModal()"><i class="fas fa-cloud-arrow-up"></i> Upload App Method</button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="zy-mv-cards-grid">
+      ${list.map(m => {
+        const id = Number(m.id);
+        const isActive = m.active !== false;
+        const sizeMb = (Number(m.video_size || 0) / (1024 * 1024)).toFixed(1);
+        const links = Array.isArray(m.links) ? m.links : [];
+        return `
+          <div class="card zy-mv-method-card ${isActive ? '' : 'is-inactive'}">
+            <div class="zy-mv-card-top">
+              <div style="min-width:0;flex:1;">
+                <div class="zy-mv-card-title">${zyEsc(m.app_name)}</div>
+                <div class="zy-mv-card-meta">
+                  ${m.has_video ? `<span><i class="fas fa-video" style="color:#7c3aed;"></i> ${sizeMb} MB</span>` : '<span><i class="fas fa-file-lines"></i> Text &amp; Links Only</span>'}
+                  <span><i class="fas fa-clock" style="color:#0284c7;"></i> Default ${Number(m.default_hours || 24)}h</span>
+                  ${links.length ? `<span><i class="fas fa-link" style="color:#059669;"></i> ${links.length} link${links.length === 1 ? '' : 's'}</span>` : ''}
+                </div>
+              </div>
+              <label class="zy-mv-switch-wrap is-compact" title="${isActive ? 'Visible to Clients in Apps Method' : 'Hidden from Clients'}">
+                <input type="checkbox" ${isActive ? 'checked' : ''} onchange="zyMvToggleMethodActive(${id}, this.checked, this)">
+                <span class="zy-mv-switch-slider"></span>
+                <span class="zy-mv-switch-lbl">${isActive ? 'Active' : 'Hidden'}</span>
+              </label>
+            </div>
+
+            ${m.description ? `<div class="zy-mv-card-desc">${zyEsc(m.description).replace(/\n/g, '<br>')}</div>` : ''}
+
+            ${links.length ? `
+              <div class="zy-mv-links-list" style="margin-top:8px;">
+                ${links.map(l => {
+                  const href = typeof window.zyMvSafeHref === 'function' ? window.zyMvSafeHref(l.url) : '';
+                  if (!href) return '';
+                  return `<a class="zy-mv-link-chip" href="${zyEsc(href)}" target="_blank" rel="noopener noreferrer"><i class="fas fa-arrow-up-right-from-square"></i> <span>${zyEsc(l.label || l.url)}</span></a>`;
+                }).join('')}
+              </div>
+            ` : ''}
+
+            <div class="zy-mv-card-actions">
+              ${m.has_video ? `
+                <button type="button" class="btn btn-outline btn-xs" onclick="zyMvPreviewMethod(${id})" title="Preview Video">
+                  <i class="fas fa-play"></i> Preview
+                </button>
+              ` : ''}
+              <button type="button" class="btn btn-primary btn-xs" onclick="zyMvOpenDirectSendModal(${id})" title="Send directly to a Client, Group, or Channel">
+                <i class="fas fa-paper-plane"></i> Send to Client / Group
+              </button>
+              <button type="button" class="btn btn-outline btn-xs" onclick="zyMvOpenEditModal(${id})" title="Edit Method Details">
+                <i class="fas fa-pen"></i>
+              </button>
+              <button type="button" class="btn btn-danger btn-xs" onclick="zyMvDeleteMethod(${id})" title="Delete Method & Free Disk Space">
+                <i class="fas fa-trash-can"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function zyMvRenderRequestsPanel(requests) {
+  if (!requests.length) {
+    return `
+      <div class="card" style="padding:34px 20px;text-align:center;color:var(--sp-text-muted,#64748b);">
+        <i class="fas fa-inbox" style="font-size:30px;opacity:0.5;margin-bottom:8px;"></i>
+        <div>No client App Method requests yet. When clients tap <strong>Need</strong> in their Apps Method menu, requests appear here instantly.</div>
+      </div>
+    `;
+  }
+  const pending = requests.filter(r => String(r.status || '').toLowerCase() === 'pending');
+  const history = requests.filter(r => String(r.status || '').toLowerCase() !== 'pending');
+
+  const renderRow = (r) => {
+    const st = String(r.status || 'pending').toLowerCase();
+    const cls = st === 'approved' ? 'is-approved' : (st === 'declined' ? 'is-declined' : 'is-pending');
+    const when = String(r.created_at || '').replace('T', ' ').slice(0, 16);
+    return `
+      <div class="zy-mv-req-row ${st === 'pending' ? 'is-pending-row' : ''}">
+        <div style="min-width:0;flex:1;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:13.5px;color:var(--sp-text-primary,#0f172a);">${zyEsc(r.client_username || 'Client')}</strong>
+            <span style="font-size:12px;color:var(--sp-text-muted,#64748b);">requested</span>
+            <span class="badge" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;font-weight:700;">${zyEsc(r.app_name || 'App Method')}</span>
+            <span class="zy-mv-st-tag ${cls}">${zyEsc(st.toUpperCase())}</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--sp-text-muted,#64748b);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;">
+            <span><i class="fas fa-clock"></i> ${zyEsc(when)}</span>
+            ${st === 'approved' && r.expires_at ? `<span style="color:#059669;font-weight:600;"><i class="fas fa-hourglass-half"></i> Expires: ${zyEsc(String(r.expires_at).replace('T', ' ').slice(0, 16))} UTC</span>` : ''}
+            ${st === 'declined' && r.decline_reason ? `<span style="color:#b91c1c;"><i class="fas fa-circle-info"></i> Reason: ${zyEsc(r.decline_reason)}</span>` : ''}
+          </div>
+        </div>
+        ${st === 'pending' ? `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">
+            <button type="button" class="btn btn-success btn-sm" onclick="zyMvOpenApproveModal(${Number(r.id)})">
+              <i class="fas fa-check"></i> Accept &amp; Send
+            </button>
+            <button type="button" class="btn btn-danger btn-sm" onclick="zyMvOpenDeclineModal(${Number(r.id)})">
+              <i class="fas fa-times"></i> Decline
+            </button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  };
+
+  return `
+    ${pending.length ? `
+      <div class="card" style="margin-bottom:14px;padding:14px;">
+        <div style="font-size:13px;font-weight:800;color:#b45309;margin-bottom:10px;"><i class="fas fa-bell" style="margin-right:5px;"></i> Pending Client Requests (${pending.length})</div>
+        <div class="zy-mv-req-list">${pending.map(renderRow).join('')}</div>
+      </div>
+    ` : ''}
+    ${history.length ? `
+      <div class="card" style="padding:14px;">
+        <div style="font-size:13px;font-weight:800;color:var(--sp-text-secondary,#475569);margin-bottom:10px;"><i class="fas fa-clock-rotate-left" style="margin-right:5px;"></i> Request History (${history.length})</div>
+        <div class="zy-mv-req-list">${history.map(renderRow).join('')}</div>
+      </div>
+    ` : ''}
+  `;
+}
+
+function zyMvFindMethod(id) {
+  return ((window._zyMvState.data && window._zyMvState.data.methods) || []).find(m => Number(m.id) === Number(id)) || null;
+}
+
+window.zyMvPreviewMethod = function(id) {
+  const m = zyMvFindMethod(id);
+  if (!m) return;
+  if (typeof window.zyOpenSecureMethodPlayer === 'function') {
+    window.zyOpenSecureMethodPlayer({
+      methodId: m.id,
+      appName: m.app_name,
+      description: m.description,
+      links: m.links,
+      isAgentPreview: true
+    });
+  }
+};
+
+window.zyMvToggleMethodActive = async function(id, active, cb) {
+  if (cb) cb.disabled = true;
+  try {
+    const res = await apiFetch(`/api/method-vault/agent/items/${Number(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ active: Boolean(active) })
+    });
+    if (res && res.success) {
+      toast(`Method ${active ? 'activated for Clients' : 'hidden from Clients'}`, 'success');
+      await zyMvLoadOverview();
+    } else {
+      if (cb) cb.checked = !active;
+      toast(res?.error || 'Update failed', 'error');
+    }
+  } catch (err) {
+    if (cb) cb.checked = !active;
+    toast(err.message || 'Update failed', 'error');
+  } finally {
+    if (cb) cb.disabled = false;
+  }
+};
+
+window.zyMvDeleteMethod = async function(id) {
+  const m = zyMvFindMethod(id);
+  const ok = await zyConfirm(
+    `Delete "${m ? m.app_name : 'this method'}" permanently? Its video file will be deleted from VPS storage immediately to free disk space.`,
+    { title: 'Delete App Method', confirmLabel: 'Delete & Free Space', danger: true }
+  );
+  if (!ok) return;
+  try {
+    const res = await apiFetch(`/api/method-vault/agent/items/${Number(id)}`, { method: 'DELETE' });
+    if (res && res.success) {
+      toast('Method deleted and storage freed.', 'success');
+      await zyMvLoadOverview();
+    } else {
+      toast(res?.error || 'Delete failed', 'error');
+    }
+  } catch (err) {
+    toast(err.message || 'Delete failed', 'error');
+  }
+};
+
+/* Dynamic Links Builder helper for Upload/Edit modals */
+window.zyMvRenderLinkRows = function(containerId, links) {
+  const host = document.getElementById(containerId);
+  if (!host) return;
+  const arr = Array.isArray(links) ? links : [];
+  if (!arr.length) {
+    host.innerHTML = `<div style="font-size:11.5px;color:#64748b;padding:4px 0;">No links attached yet. Click "+ Add Link" to attach app/download links.</div>`;
+    return;
+  }
+  host.innerHTML = arr.map((l, idx) => `
+    <div class="zy-mv-link-edit-row" data-mv-link-row="${idx}">
+      <input type="text" class="zy-input zy-mv-link-lbl-in" placeholder="Button / Label (e.g. Play Store)" value="${zyEsc(l.label || '')}">
+      <input type="url" class="zy-input zy-mv-link-url-in" placeholder="https://..." value="${zyEsc(l.url || '')}">
+      <button type="button" class="btn btn-outline btn-xs" style="color:#dc2626;" onclick="this.closest('.zy-mv-link-edit-row').remove()" title="Remove Link"><i class="fas fa-times"></i></button>
+    </div>
+  `).join('');
+};
+
+window.zyMvAddLinkRow = function(containerId) {
+  const host = document.getElementById(containerId);
+  if (!host) return;
+  if (!host.querySelector('.zy-mv-link-edit-row')) host.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'zy-mv-link-edit-row';
+  row.innerHTML = `
+    <input type="text" class="zy-input zy-mv-link-lbl-in" placeholder="Label (e.g. Download App)">
+    <input type="url" class="zy-input zy-mv-link-url-in" placeholder="https://...">
+    <button type="button" class="btn btn-outline btn-xs" style="color:#dc2626;" onclick="this.closest('.zy-mv-link-edit-row').remove()" title="Remove Link"><i class="fas fa-times"></i></button>
+  `;
+  host.appendChild(row);
+};
+
+function zyMvCollectLinks(containerId) {
+  const host = document.getElementById(containerId);
+  if (!host) return [];
+  const rows = Array.from(host.querySelectorAll('.zy-mv-link-edit-row'));
+  const out = [];
+  for (const r of rows) {
+    const label = (r.querySelector('.zy-mv-link-lbl-in')?.value || '').trim();
+    const url = (r.querySelector('.zy-mv-link-url-in')?.value || '').trim();
+    if (url) out.push({ label: label || url, url });
+  }
+  return out;
+}
+
+window.zyMvOpenUploadModal = function() {
+  zyModal('Upload App Method (Video + Caption + Links)', `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label class="zy-lbl">App Name *</label>
+        <input type="text" id="mv-up-name" class="zy-input" placeholder="e.g. WhatsApp Business Method, Telegram OTP Setup" maxlength="120">
+      </div>
+      <div>
+        <label class="zy-lbl">Method Video (.mp4, .webm, .mov — max 500 MB per video)</label>
+        <input type="file" id="mv-up-file" class="zy-input" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v" style="padding:7px;">
+        <div id="mv-up-file-info" style="font-size:11.5px;color:#64748b;margin-top:4px;">Videos stream directly to isolated 25 GB Vault storage (never slows SMS or backups).</div>
+      </div>
+      <div>
+        <label class="zy-lbl">Caption / Step-by-Step Instructions (WhatsApp-style)</label>
+        <textarea id="mv-up-desc" class="zy-input" rows="3" placeholder="Write method notes, instructions, or tips sent along with the video…" maxlength="3000"></textarea>
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+          <label class="zy-lbl" style="margin:0;">Attached Links (Optional)</label>
+          <button type="button" class="btn btn-outline btn-xs" onclick="zyMvAddLinkRow('mv-up-links-host')"><i class="fas fa-plus"></i> Add Link</button>
+        </div>
+        <div id="mv-up-links-host" style="display:flex;flex-direction:column;gap:6px;"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;">
+        <div>
+          <label class="zy-lbl">Default Unlock Timer (Hours)</label>
+          <input type="number" id="mv-up-hours" class="zy-input" value="24" min="1" max="720">
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;font-weight:700;padding-top:18px;">
+          <input type="checkbox" id="mv-up-active" checked> Active in Client "Apps Method"
+        </label>
+      </div>
+      <div id="mv-up-prog-wrap" style="display:none;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700;color:#5b21b6;margin-bottom:6px;">
+          <span id="mv-up-prog-lbl">Uploading video…</span>
+          <span id="mv-up-prog-pct">0%</span>
+        </div>
+        <div class="zy-mv-progress-track">
+          <div id="mv-up-prog-bar" class="zy-mv-progress-fill" style="width:0%;background:#7c3aed;"></div>
+        </div>
+      </div>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" id="mv-up-cancel" onclick="closeModal()">Cancel</button>
+    <button type="button" class="zy-btn-blue" id="mv-up-submit" onclick="zyMvSubmitUpload()"><i class="fas fa-cloud-arrow-up"></i> Save to Vault</button>
+  `);
+  zyMvRenderLinkRows('mv-up-links-host', []);
+};
+
+window.zyMvSubmitUpload = async function() {
+  const appName = (document.getElementById('mv-up-name')?.value || '').trim();
+  const desc = (document.getElementById('mv-up-desc')?.value || '').trim();
+  const fileEl = document.getElementById('mv-up-file');
+  const file = fileEl && fileEl.files ? fileEl.files[0] : null;
+  const links = zyMvCollectLinks('mv-up-links-host');
+  const defaultHours = Math.max(1, Math.min(720, parseInt(document.getElementById('mv-up-hours')?.value || '24', 10) || 24));
+  const active = Boolean(document.getElementById('mv-up-active')?.checked);
+
+  if (!appName) { toast('App Name is required', 'error'); return; }
+  if (!file && !desc && !links.length) {
+    toast('Attach a video, caption, or at least one link', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('mv-up-submit');
+  const cancelBtn = document.getElementById('mv-up-cancel');
+  const progWrap = document.getElementById('mv-up-prog-wrap');
+  const progBar = document.getElementById('mv-up-prog-bar');
+  const progPct = document.getElementById('mv-up-prog-pct');
+  const progLbl = document.getElementById('mv-up-prog-lbl');
+
+  const resetBtn = () => {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-arrow-up"></i> Save to Vault'; }
+    if (cancelBtn) cancelBtn.disabled = false;
+  };
+  const setProgress = (loaded, total, labelOverride) => {
+    const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+    if (progBar) progBar.style.width = pct + '%';
+    if (progPct) progPct.textContent = pct + '%';
+    if (progLbl) {
+      if (labelOverride) {
+        progLbl.textContent = labelOverride;
+      } else {
+        const loadedMb = (loaded / (1024 * 1024)).toFixed(1);
+        const totalMb = (total / (1024 * 1024)).toFixed(1);
+        progLbl.textContent = `Uploading ${loadedMb} MB / ${totalMb} MB…`;
+      }
+    }
+  };
+
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading…'; }
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (progWrap) progWrap.style.display = 'block';
+
+  const tok = sessionStorage.getItem('admin_token') || localStorage.getItem('admin_token') || '';
+  const authHeaders = tok ? { Authorization: 'Bearer ' + tok } : {};
+
+  // Use resilient 768KB chunked upload for any video > 700KB (bypasses strict Nginx 1M/50M limits & survives slow internet)
+  if (file && file.size > 700 * 1024) {
+    try {
+      setProgress(0, file.size, 'Preparing video upload…');
+      const initRes = await apiFetch('/api/method-vault/agent/upload-init', {
+        method: 'POST',
+        body: JSON.stringify({
+          file_name: file.name || 'video.mp4',
+          file_size: file.size,
+          file_mime: file.type || 'video/mp4'
+        })
+      });
+      if (!initRes || !initRes.success || !initRes.upload_id) {
+        toast((initRes && initRes.error) || 'Could not start video upload', 'error');
+        resetBtn();
+        return;
+      }
+      const uploadId = initRes.upload_id;
+      const chunkSize = Number(initRes.chunk_size) || (768 * 1024);
+      const totalChunks = Math.ceil(file.size / chunkSize);
+
+      const uploadSingleChunk = (blob, idx, offsetBytes) => new Promise((resolve, reject) => {
+        const fdChunk = new FormData();
+        fdChunk.append('upload_id', uploadId);
+        fdChunk.append('chunk_index', String(idx));
+        fdChunk.append('chunk', blob, `chunk_${idx}.part`);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/method-vault/agent/upload-chunk', true);
+        xhr.withCredentials = true;
+        xhr.timeout = 90000;
+        if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) {
+            setProgress(Math.min(file.size, offsetBytes + ev.loaded), file.size);
+          }
+        };
+        xhr.onload = () => {
+          let data = null;
+          try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+          if (xhr.status >= 200 && xhr.status < 300 && data && data.success) {
+            resolve(data);
+          } else {
+            const err = new Error((data && data.error) || `Chunk upload failed (HTTP ${xhr.status})`);
+            err.httpStatus = xhr.status;
+            reject(err);
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error during chunk upload'));
+        xhr.ontimeout = () => reject(new Error('Upload timed out on slow connection'));
+        xhr.send(fdChunk);
+      });
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(file.size, start + chunkSize);
+        const blob = file.slice(start, end);
+        let uploaded = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          try {
+            await uploadSingleChunk(blob, i, start);
+            uploaded = true;
+            break;
+          } catch (chunkErr) {
+            lastErr = chunkErr;
+            // Don't retry hard 4xx validation/cap rejections
+            if (chunkErr.httpStatus && chunkErr.httpStatus >= 400 && chunkErr.httpStatus < 500 && chunkErr.httpStatus !== 408) {
+              break;
+            }
+            setProgress(start, file.size, `Slow connection — retrying part ${i + 1}/${totalChunks} (${attempt}/4)…`);
+            await new Promise(r => setTimeout(r, 900 * attempt));
+          }
+        }
+        if (!uploaded) {
+          throw lastErr || new Error('Upload interrupted on slow internet. Please try again.');
+        }
+        setProgress(end, file.size);
+      }
+
+      setProgress(file.size, file.size, 'Finalizing and saving to Vault…');
+      const compRes = await apiFetch('/api/method-vault/agent/upload-complete', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          upload_id: uploadId,
+          app_name: appName,
+          description: desc,
+          links,
+          default_hours: defaultHours,
+          active
+        })
+      });
+      if (compRes && compRes.success) {
+        if (progBar) progBar.style.width = '100%';
+        if (progPct) progPct.textContent = '100%';
+        closeModal();
+        toast('App Method saved to Vault!', 'success');
+        await zyMvLoadOverview();
+      } else {
+        toast((compRes && compRes.error) || 'Could not finalize video', 'error');
+        resetBtn();
+      }
+    } catch (err) {
+      toast(err.message || 'Video upload failed', 'error');
+      resetBtn();
+    }
+    return;
+  }
+
+  // Fast single-request path for text/links-only or tiny videos (<= 700KB)
+  const fd = new FormData();
+  fd.append('app_name', appName);
+  fd.append('description', desc);
+  fd.append('links', JSON.stringify(links));
+  fd.append('default_hours', String(defaultHours));
+  fd.append('active', active ? 'true' : 'false');
+  if (file) fd.append('video', file);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/method-vault/agent/items', true);
+  xhr.withCredentials = true;
+  if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
+
+  xhr.upload.onprogress = (ev) => {
+    if (!ev.lengthComputable) return;
+    setProgress(ev.loaded, ev.total);
+  };
+
+  xhr.onload = async () => {
+    let data = null;
+    try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+    if (xhr.status >= 200 && xhr.status < 300 && data && data.success) {
+      if (progBar) progBar.style.width = '100%';
+      if (progPct) progPct.textContent = '100%';
+      closeModal();
+      toast('App Method saved to Vault!', 'success');
+      await zyMvLoadOverview();
+    } else {
+      toast((data && data.error) || `Upload failed (HTTP ${xhr.status})`, 'error');
+      resetBtn();
+    }
+  };
+  xhr.onerror = () => {
+    toast('Network error while uploading video', 'error');
+    resetBtn();
+  };
+  xhr.send(fd);
+};
+
+window.zyMvOpenEditModal = function(id) {
+  const m = zyMvFindMethod(id);
+  if (!m) return;
+  zyModal(`Edit Method — ${zyEsc(m.app_name)}`, `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label class="zy-lbl">App Name *</label>
+        <input type="text" id="mv-ed-name" class="zy-input" value="${zyEsc(m.app_name || '')}" maxlength="120">
+      </div>
+      <div>
+        <label class="zy-lbl">Caption / Instructions</label>
+        <textarea id="mv-ed-desc" class="zy-input" rows="3" maxlength="3000">${zyEsc(m.description || '')}</textarea>
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+          <label class="zy-lbl" style="margin:0;">Attached Links</label>
+          <button type="button" class="btn btn-outline btn-xs" onclick="zyMvAddLinkRow('mv-ed-links-host')"><i class="fas fa-plus"></i> Add Link</button>
+        </div>
+        <div id="mv-ed-links-host" style="display:flex;flex-direction:column;gap:6px;"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;">
+        <div>
+          <label class="zy-lbl">Default Unlock Timer (Hours)</label>
+          <input type="number" id="mv-ed-hours" class="zy-input" value="${Number(m.default_hours || 24)}" min="1" max="720">
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;font-weight:700;padding-top:18px;">
+          <input type="checkbox" id="mv-ed-active" ${m.active !== false ? 'checked' : ''}> Active for Clients
+        </label>
+      </div>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="zy-btn-blue" id="mv-ed-save" onclick="zyMvSubmitEdit(${Number(m.id)})"><i class="fas fa-save"></i> Save Changes</button>
+  `);
+  zyMvRenderLinkRows('mv-ed-links-host', Array.isArray(m.links) ? m.links : []);
+};
+
+window.zyMvSubmitEdit = async function(id) {
+  const app_name = (document.getElementById('mv-ed-name')?.value || '').trim();
+  if (!app_name) { toast('App Name is required', 'error'); return; }
+  const payload = {
+    app_name,
+    description: (document.getElementById('mv-ed-desc')?.value || '').trim(),
+    links: zyMvCollectLinks('mv-ed-links-host'),
+    default_hours: Math.max(1, Math.min(720, parseInt(document.getElementById('mv-ed-hours')?.value || '24', 10) || 24)),
+    active: Boolean(document.getElementById('mv-ed-active')?.checked)
+  };
+  const btn = document.getElementById('mv-ed-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const res = await apiFetch(`/api/method-vault/agent/items/${Number(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.success) {
+      closeModal();
+      toast('Method updated.', 'success');
+      await zyMvLoadOverview();
+    } else {
+      toast(res?.error || 'Update failed', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+    }
+  } catch (err) {
+    toast(err.message || 'Update failed', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+  }
+};
+
+window.zyMvSetTimerPreset = function(hrsId, minsId, totalMinutes) {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const hEl = document.getElementById(hrsId);
+  const mEl = document.getElementById(minsId);
+  if (hEl) hEl.value = String(h);
+  if (mEl) mEl.value = String(m);
+};
+
+window.zyMvOpenApproveModal = function(reqId) {
+  const r = ((window._zyMvState.data && window._zyMvState.data.requests) || []).find(x => Number(x.id) === Number(reqId));
+  if (!r) return;
+  const m = zyMvFindMethod(r.method_id);
+  const defHours = Number(m?.default_hours || 24);
+  zyModal(`Approve & Send Method to ${zyEsc(r.client_username || 'Client')}`, `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:9px;padding:10px 12px;font-size:12.5px;">
+        <strong>App Method:</strong> ${zyEsc(r.app_name || 'App Method')}<br>
+        <span style="color:#64748b;">Sent directly from your Vault into <strong>${zyEsc(r.client_username || 'Client')}</strong>'s Live Chat. Auto-hides when the timer hits 00:00:00.</span>
+      </div>
+      <div>
+        <label class="zy-lbl">Quick Timer Presets</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${[
+            ['30 min', 30], ['1 hr', 60], ['2 hrs', 120], ['4 hrs', 240], ['12 hrs', 720], ['24 hrs', 1440], ['48 hrs', 2880]
+          ].map(([lbl, mins]) => `<button type="button" class="btn btn-outline btn-xs" onclick="zyMvSetTimerPreset('mv-ap-hrs','mv-ap-mins',${mins})">${lbl}</button>`).join('')}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div>
+          <label class="zy-lbl">Access Hours</label>
+          <input type="number" id="mv-ap-hrs" class="zy-input" value="${defHours}" min="0" max="720">
+        </div>
+        <div>
+          <label class="zy-lbl">Extra Minutes</label>
+          <input type="number" id="mv-ap-mins" class="zy-input" value="0" min="0" max="59">
+        </div>
+      </div>
+      <div>
+        <label class="zy-lbl">Custom Caption / Note (Optional)</label>
+        <textarea id="mv-ap-note" class="zy-input" rows="2" placeholder="Leave blank to use saved method caption…"></textarea>
+      </div>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="zy-btn-blue" id="mv-ap-btn" onclick="zyMvConfirmApprove(${Number(r.id)})"><i class="fas fa-paper-plane"></i> Approve &amp; Send to Chat</button>
+  `);
+};
+
+window.zyMvConfirmApprove = async function(reqId) {
+  const hrs = Math.max(0, parseInt(document.getElementById('mv-ap-hrs')?.value || '0', 10) || 0);
+  const mins = Math.max(0, parseInt(document.getElementById('mv-ap-mins')?.value || '0', 10) || 0);
+  const totalMinutes = hrs * 60 + mins;
+  if (totalMinutes < 1) { toast('Set at least 1 minute timer', 'error'); return; }
+  const custom_note = (document.getElementById('mv-ap-note')?.value || '').trim();
+  const btn = document.getElementById('mv-ap-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const res = await apiFetch(`/api/method-vault/agent/requests/${Number(reqId)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'approve', duration_minutes: totalMinutes, custom_note })
+    });
+    if (res && res.success) {
+      closeModal();
+      toast('Approved! Timed Method Video sent to Client Live Chat.', 'success');
+      await zyMvLoadOverview();
+    } else {
+      toast(res?.error || 'Could not approve request', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Approve &amp; Send to Chat'; }
+    }
+  } catch (err) {
+    toast(err.message || 'Could not approve request', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Approve &amp; Send to Chat'; }
+  }
+};
+
+window.zyMvOpenDeclineModal = function(reqId) {
+  const r = ((window._zyMvState.data && window._zyMvState.data.requests) || []).find(x => Number(x.id) === Number(reqId));
+  if (!r) return;
+  zyModal(`Decline Request — ${zyEsc(r.client_username || 'Client')}`, `
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="font-size:12.5px;color:#475569;">Declining <strong>${zyEsc(r.app_name || 'App Method')}</strong> request for <strong>${zyEsc(r.client_username || 'Client')}</strong>.</div>
+      <div>
+        <label class="zy-lbl">Reason (Optional — shown to Client)</label>
+        <input type="text" id="mv-dec-reason" class="zy-input" placeholder="e.g. Complete current range first / Not active today" maxlength="300">
+      </div>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="btn btn-danger btn-sm" id="mv-dec-btn" onclick="zyMvConfirmDecline(${Number(r.id)})"><i class="fas fa-times"></i> Confirm Decline</button>
+  `);
+};
+
+window.zyMvConfirmDecline = async function(reqId) {
+  const reason = (document.getElementById('mv-dec-reason')?.value || '').trim();
+  const btn = document.getElementById('mv-dec-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Declining…'; }
+  try {
+    const res = await apiFetch(`/api/method-vault/agent/requests/${Number(reqId)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'decline', reason })
+    });
+    if (res && res.success) {
+      closeModal();
+      toast('Request declined.', 'info');
+      await zyMvLoadOverview();
+    } else {
+      toast(res?.error || 'Could not decline request', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-times"></i> Confirm Decline'; }
+    }
+  } catch (err) {
+    toast(err.message || 'Could not decline request', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-times"></i> Confirm Decline'; }
+  }
+};
+
+window.zyMvOpenDirectSendModal = function(methodId) {
+  const m = zyMvFindMethod(methodId);
+  const d = window._zyMvState.data || {};
+  if (!m) return;
+  const clients = Array.isArray(d.clients) ? d.clients : [];
+  const groups = Array.isArray(d.groups) ? d.groups : [];
+  const defHours = Number(m.default_hours || 24);
+
+  zyModal(`Send Method — ${zyEsc(m.app_name)}`, `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label class="zy-lbl">Send Destination *</label>
+        <div style="display:flex;gap:10px;">
+          <label style="flex:1;display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:700;">
+            <input type="radio" name="mv-send-kind" value="client" checked onchange="zyMvToggleSendDest('client')">
+            <i class="fas fa-user" style="color:#0284c7;"></i> Direct Client (${clients.length})
+          </label>
+          <label style="flex:1;display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:700;">
+            <input type="radio" name="mv-send-kind" value="group" onchange="zyMvToggleSendDest('group')">
+            <i class="fas fa-users" style="color:#7c3aed;"></i> Group / Channel (${groups.length})
+          </label>
+        </div>
+      </div>
+
+      <div id="mv-send-client-wrap">
+        <label class="zy-lbl">Select Client *</label>
+        <select id="mv-send-client" class="zy-input">
+          <option value="">— Choose Client —</option>
+          ${clients.map(cl => `<option value="${Number(cl.id)}">${zyEsc(cl.username)}${cl.full_name ? ` (${zyEsc(cl.full_name)})` : ''}</option>`).join('')}
+        </select>
+      </div>
+
+      <div id="mv-send-group-wrap" style="display:none;">
+        <label class="zy-lbl">Select Client Group / Channel *</label>
+        <select id="mv-send-conv" class="zy-input">
+          <option value="">— Choose Group or Channel —</option>
+          ${groups.map(g => `<option value="${Number(g.id)}">${g.type === 'agent_channel' ? '📢 Channel: ' : '👥 Group: '}${zyEsc(g.title)} (${Number(g.member_count || 0)} members)</option>`).join('')}
+        </select>
+      </div>
+
+      <div>
+        <label class="zy-lbl">Quick Timer Presets</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${[
+            ['30 min', 30], ['1 hr', 60], ['2 hrs', 120], ['4 hrs', 240], ['12 hrs', 720], ['24 hrs', 1440], ['48 hrs', 2880]
+          ].map(([lbl, mins]) => `<button type="button" class="btn btn-outline btn-xs" onclick="zyMvSetTimerPreset('mv-ds-hrs','mv-ds-mins',${mins})">${lbl}</button>`).join('')}
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div>
+          <label class="zy-lbl">Auto-Hide Hours</label>
+          <input type="number" id="mv-ds-hrs" class="zy-input" value="${defHours}" min="0" max="720">
+        </div>
+        <div>
+          <label class="zy-lbl">Extra Minutes</label>
+          <input type="number" id="mv-ds-mins" class="zy-input" value="0" min="0" max="59">
+        </div>
+      </div>
+
+      <div>
+        <label class="zy-lbl">Custom Caption / Note (Optional)</label>
+        <textarea id="mv-ds-note" class="zy-input" rows="2" placeholder="Leave blank to use saved method caption…"></textarea>
+      </div>
+    </div>
+  `, `
+    <button type="button" class="zy-btn-grey" onclick="closeModal()">Cancel</button>
+    <button type="button" class="zy-btn-blue" id="mv-ds-btn" onclick="zyMvSubmitDirectSend(${Number(m.id)})"><i class="fas fa-paper-plane"></i> Send Method Now</button>
+  `);
+};
+
+window.zyMvToggleSendDest = function(kind) {
+  const cWrap = document.getElementById('mv-send-client-wrap');
+  const gWrap = document.getElementById('mv-send-group-wrap');
+  if (cWrap) cWrap.style.display = kind === 'client' ? '' : 'none';
+  if (gWrap) gWrap.style.display = kind === 'group' ? '' : 'none';
+};
+
+window.zyMvSubmitDirectSend = async function(methodId) {
+  const kind = document.querySelector('input[name="mv-send-kind"]:checked')?.value || 'client';
+  const clientId = Number(document.getElementById('mv-send-client')?.value || 0);
+  const convId = Number(document.getElementById('mv-send-conv')?.value || 0);
+  if (kind === 'client' && !clientId) { toast('Please select a Client', 'error'); return; }
+  if (kind === 'group' && !convId) { toast('Please select a Group or Channel', 'error'); return; }
+
+  const hrs = Math.max(0, parseInt(document.getElementById('mv-ds-hrs')?.value || '0', 10) || 0);
+  const mins = Math.max(0, parseInt(document.getElementById('mv-ds-mins')?.value || '0', 10) || 0);
+  const totalMinutes = hrs * 60 + mins;
+  if (totalMinutes < 1) { toast('Set at least 1 minute timer', 'error'); return; }
+
+  const payload = {
+    method_id: Number(methodId),
+    duration_minutes: totalMinutes,
+    custom_note: (document.getElementById('mv-ds-note')?.value || '').trim()
+  };
+  if (kind === 'client') payload.client_id = clientId;
+  else payload.conversation_id = convId;
+
+  const btn = document.getElementById('mv-ds-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const res = await apiFetch('/api/method-vault/agent/send', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.success) {
+      closeModal();
+      toast('Timed Method Video sent straight to Live Chat!', 'success');
+      await zyMvLoadOverview();
+    } else {
+      toast(res?.error || 'Could not send method', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Method Now'; }
+    }
+  } catch (err) {
+    toast(err.message || 'Could not send method', 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Method Now'; }
+  }
+};
+
   const map = {
     'dashboard': () => pgDashboard(),
     'sms-ranges': pgSmsRanges, 'sms-overview': pgSmsRanges, 'sms-ratecard': pgSmsRanges,
@@ -5632,6 +6563,7 @@ async function pgAgentAllocationHistory(resetState = true) {
     'live-chat': () => { if (window.HumexLiveChat) window.HumexLiveChat.renderPage('page-content'); },
     'live-access': () => { if (window.zyRenderLiveAccessPage) window.zyRenderLiveAccessPage({ role: 'agent' }); },
     'app-links': () => pgAppLinks(),
+    'method-vault': () => pgMethodVault(),
     'my-clients': pgMyClients,
     'bulk-add': pgBulkAdd,
     'audit-logs': () => { if (window.HumexProfile) window.HumexProfile.render('page-content', 'audit'); },
@@ -5673,3 +6605,4 @@ async function pgAgentAllocationHistory(resetState = true) {
     if (window.zyCloseSidebar) window.zyCloseSidebar();
   };
 })();
+

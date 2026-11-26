@@ -5049,6 +5049,623 @@ window.zyRenderAppLinksPager = function(opts) {
   `;
 };
 
+/* ═══════════════════════════════════════════════════════════════
+   HUMEX SMS — Apps Method Video Vault (Protected Watermarked Player + Client Drawer)
+   ═══════════════════════════════════════════════════════════════ */
+(function initMethodVaultUiKit() {
+  function mvEsc(s) {
+    if (typeof window.zyEsc === 'function') return window.zyEsc(s);
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function mvSafeHref(rawUrl) {
+    const raw = String(rawUrl || '').trim();
+    if (!raw) return '';
+    try {
+      const normalized = /^https?:\/\//i.test(raw) ? raw : (`https://${raw}`);
+      const u = new URL(normalized);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+      return u.href;
+    } catch (_) {
+      return '';
+    }
+  }
+  window.zyMvSafeHref = mvSafeHref;
+
+  function mvFormatCountdown(expiresAt) {
+    if (!expiresAt) return { expired: false, text: 'No Expiry', ms: Infinity };
+    const endMs = new Date(expiresAt).getTime();
+    if (!Number.isFinite(endMs)) return { expired: false, text: 'Active', ms: Infinity };
+    const diff = endMs - Date.now();
+    if (diff <= 0) return { expired: true, text: 'Expired', ms: 0 };
+    const totalSec = Math.floor(diff / 1000);
+    const days = Math.floor(totalSec / 86400);
+    const hrs = Math.floor((totalSec % 86400) / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    const p = n => String(n).padStart(2, '0');
+    const hms = `${p(hrs)}:${p(mins)}:${p(secs)}`;
+    return {
+      expired: false,
+      text: days > 0 ? `${days}d ${hms}` : hms,
+      ms: diff
+    };
+  }
+  window.zyMvFormatCountdown = mvFormatCountdown;
+
+  function mvGetViewerIdentity() {
+    let sess = {};
+    try { sess = JSON.parse(sessionStorage.getItem('admin_user') || '{}'); } catch (_) {}
+    const u = (window.CLIENT_USER && window.CLIENT_USER.username)
+      || (window.AGENT_USER && window.AGENT_USER.username)
+      || sess.username
+      || 'User';
+    const id = (window.CLIENT_USER && window.CLIENT_USER.id)
+      || (window.AGENT_USER && window.AGENT_USER.id)
+      || sess.id
+      || '';
+    return { username: String(u), id: id ? `#${id}` : '' };
+  }
+
+  let _playerTimers = { wm: null, exp: null };
+  function clearPlayerTimers() {
+    if (_playerTimers.wm) { clearInterval(_playerTimers.wm); _playerTimers.wm = null; }
+    if (_playerTimers.exp) { clearInterval(_playerTimers.exp); _playerTimers.exp = null; }
+  }
+
+  window.zyCloseSecureMethodPlayer = function() {
+    clearPlayerTimers();
+    const modal = document.getElementById('zy-mv-player-modal');
+    if (modal) {
+      const vid = modal.querySelector('video');
+      if (vid) {
+        try { vid.pause(); } catch (_) {}
+        try { vid.removeAttribute('src'); vid.load(); } catch (_) {}
+      }
+      if (document.fullscreenElement && modal.contains(document.fullscreenElement)) {
+        try { document.exitFullscreen(); } catch (_) {}
+      }
+      modal.remove();
+    }
+    document.removeEventListener('keydown', _onPlayerKeyDown);
+  };
+
+  function _onPlayerKeyDown(e) {
+    if (e.key === 'Escape') {
+      if (!document.fullscreenElement) window.zyCloseSecureMethodPlayer();
+    }
+  }
+
+  window.zyOpenSecureMethodPlayer = function(opts = {}) {
+    window.zyCloseSecureMethodPlayer();
+    const isPreview = Boolean(opts.isAgentPreview);
+    const streamId = isPreview ? Number(opts.methodId || opts.id) : Number(opts.grantId || opts.grant_id || opts.id);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      if (typeof toast === 'function') toast('Video stream reference missing', 'error');
+      return;
+    }
+    const expiresAt = opts.expiresAt || opts.expires_at || null;
+    if (!isPreview && expiresAt && mvFormatCountdown(expiresAt).expired) {
+      if (typeof toast === 'function') toast('This method access has expired.', 'warning');
+      return;
+    }
+
+    const appName = String(opts.appName || opts.app_name || 'App Method');
+    const description = String(opts.description || '').trim();
+    const rawLinks = Array.isArray(opts.links) ? opts.links : [];
+    const safeLinks = rawLinks
+      .map(l => ({ label: String(l?.label || l?.title || l?.url || 'Open Link').trim(), href: mvSafeHref(l?.url || l) }))
+      .filter(l => l.href);
+
+    const streamUrl = isPreview
+      ? `/api/method-vault/stream/${streamId}?preview=1`
+      : `/api/method-vault/stream/${streamId}`;
+
+    const viewer = mvGetViewerIdentity();
+    const makeWmText = () => {
+      const d = new Date();
+      const p = n => String(n).padStart(2, '0');
+      const t = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+      return `${viewer.username} ${viewer.id} · ${t}`.trim();
+    };
+
+    const modal = document.createElement('div');
+    modal.id = 'zy-mv-player-modal';
+    modal.className = 'zy-mv-player-backdrop';
+    modal.innerHTML = `
+      <div class="zy-mv-player-dialog" role="dialog" aria-modal="true" aria-label="${mvEsc(appName)}">
+        <div class="zy-mv-player-head">
+          <div class="zy-mv-player-title-wrap">
+            <span class="zy-mv-player-ico"><i class="fas fa-film"></i></span>
+            <div style="min-width:0;">
+              <div class="zy-mv-player-title">${mvEsc(appName)}</div>
+              <div class="zy-mv-player-sub">
+                ${isPreview
+                  ? '<span class="zy-mv-badge is-preview"><i class="fas fa-eye"></i> Agent Vault Preview</span>'
+                  : `<span class="zy-mv-badge is-timer" id="zy-mv-player-timer"><i class="fas fa-hourglass-half"></i> ${mvEsc(mvFormatCountdown(expiresAt).text)} left</span>`}
+                <span class="zy-mv-badge is-shield"><i class="fas fa-shield-halved"></i> Watermark Protected</span>
+              </div>
+            </div>
+          </div>
+          <div class="zy-mv-player-head-acts">
+            <button type="button" class="zy-mv-head-btn" id="zy-mv-fs-btn" title="Protected Fullscreen">
+              <i class="fas fa-expand"></i> <span>Fullscreen</span>
+            </button>
+            <button type="button" class="zy-mv-head-btn is-close" id="zy-mv-close-btn" title="Close Player" aria-label="Close">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="zy-mv-player-stage" id="zy-mv-player-stage">
+          <video id="zy-mv-video"
+                 class="zy-mv-video-el"
+                 controls
+                 controlsList="nodownload noplaybackrate noremoteplayback"
+                 disablePictureInPicture
+                 playsinline
+                 preload="metadata"
+                 src="${mvEsc(streamUrl)}">
+            Your browser does not support HTML5 video playback.
+          </video>
+          <div class="zy-mv-wm-floating" id="zy-mv-wm-floating" aria-hidden="true">${mvEsc(makeWmText())}</div>
+          <div class="zy-mv-wm-ghost" id="zy-mv-wm-ghost" aria-hidden="true">${mvEsc(viewer.username)} ${mvEsc(viewer.id)}</div>
+        </div>
+
+        ${(description || safeLinks.length) ? `
+          <div class="zy-mv-player-details">
+            ${description ? `<div class="zy-mv-player-desc">${mvEsc(description).replace(/\n/g, '<br>')}</div>` : ''}
+            ${safeLinks.length ? `
+              <div class="zy-mv-player-links">
+                <div class="zy-mv-links-lbl"><i class="fas fa-link"></i> Attached Links</div>
+                <div class="zy-mv-links-list">
+                  ${safeLinks.map(l => `
+                    <a class="zy-mv-link-chip" href="${mvEsc(l.href)}" target="_blank" rel="noopener noreferrer">
+                      <i class="fas fa-arrow-up-right-from-square"></i>
+                      <span>${mvEsc(l.label)}</span>
+                    </a>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+    document.addEventListener('keydown', _onPlayerKeyDown);
+
+    const stage = modal.querySelector('#zy-mv-player-stage');
+    const video = modal.querySelector('#zy-mv-video');
+    const wmEl = modal.querySelector('#zy-mv-wm-floating');
+    const fsBtn = modal.querySelector('#zy-mv-fs-btn');
+    const closeBtn = modal.querySelector('#zy-mv-close-btn');
+
+    if (closeBtn) closeBtn.addEventListener('click', window.zyCloseSecureMethodPlayer);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) window.zyCloseSecureMethodPlayer();
+    });
+    if (stage) {
+      stage.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
+    }
+    if (video) {
+      video.addEventListener('contextmenu', (e) => { e.preventDefault(); return false; });
+      video.addEventListener('error', () => {
+        if (typeof toast === 'function') {
+          toast('Video stream unavailable or access expired.', 'error');
+        }
+      });
+    }
+    if (fsBtn && stage) {
+      fsBtn.addEventListener('click', () => {
+        try {
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else if (stage.requestFullscreen) {
+            stage.requestFullscreen();
+          } else if (stage.webkitRequestFullscreen) {
+            stage.webkitRequestFullscreen();
+          }
+        } catch (_) {}
+      });
+    }
+
+    const wmSpots = [
+      { top: '12%', left: '10%' },
+      { top: '16%', left: '56%' },
+      { top: '44%', left: '28%' },
+      { top: '64%', left: '12%' },
+      { top: '62%', left: '54%' },
+      { top: '30%', left: '50%' }
+    ];
+    let spotIdx = Math.floor(Math.random() * wmSpots.length);
+    const moveWm = () => {
+      if (!wmEl) return;
+      spotIdx = (spotIdx + 1) % wmSpots.length;
+      const pos = wmSpots[spotIdx];
+      wmEl.style.top = pos.top;
+      wmEl.style.left = pos.left;
+      wmEl.textContent = makeWmText();
+    };
+    moveWm();
+    _playerTimers.wm = setInterval(moveWm, 3500);
+
+    if (!isPreview && expiresAt) {
+      const timerBadge = modal.querySelector('#zy-mv-player-timer');
+      _playerTimers.exp = setInterval(() => {
+        const st = mvFormatCountdown(expiresAt);
+        if (st.expired) {
+          window.zyCloseSecureMethodPlayer();
+          if (typeof toast === 'function') {
+            toast('Method timer finished — video automatically hidden.', 'warning');
+          }
+          if (typeof opts.onExpired === 'function') {
+            try { opts.onExpired(); } catch (_) {}
+          }
+          return;
+        }
+        if (timerBadge) {
+          timerBadge.innerHTML = `<i class="fas fa-hourglass-half"></i> ${mvEsc(st.text)} left`;
+        }
+      }, 1000);
+    }
+  };
+
+  /* ── Client Slide-Over "Apps Method" Drawer ─────────────────── */
+  const drawerState = {
+    open: false,
+    loading: false,
+    selectedMethodId: null,
+    submitting: false,
+    catalog: [],
+    activeUnlocks: [],
+    requests: [],
+    tickTimer: null
+  };
+
+  function stopDrawerTick() {
+    if (drawerState.tickTimer) {
+      clearInterval(drawerState.tickTimer);
+      drawerState.tickTimer = null;
+    }
+  }
+
+  window.zyCloseClientAppsMethodDrawer = function(fromPopState) {
+    const wasOpen = Boolean(drawerState.open);
+    drawerState.open = false;
+    stopDrawerTick();
+    const wrap = document.getElementById('zy-mv-client-drawer-wrap');
+    if (wrap) {
+      wrap.classList.remove('is-open');
+      setTimeout(() => {
+        if (!drawerState.open && wrap.parentNode) wrap.remove();
+      }, 220);
+    }
+    document.removeEventListener('keydown', _onDrawerKeyDown);
+    if (wasOpen && !fromPopState) {
+      try {
+        if (history.state && history.state.zyOverlay === 'apps-method') {
+          history.back();
+        }
+      } catch (_) {}
+    }
+  };
+
+  function _onDrawerKeyDown(e) {
+    if (e.key === 'Escape' && !document.getElementById('zy-mv-player-modal')) {
+      window.zyCloseClientAppsMethodDrawer();
+    }
+  }
+
+  function renderClientDrawerBody() {
+    const body = document.getElementById('zy-mv-drawer-body');
+    if (!body) return;
+    if (drawerState.loading) {
+      body.innerHTML = `<div class="zy-mv-drawer-empty"><i class="fas fa-spinner fa-spin" style="font-size:22px;color:#7c3aed;margin-bottom:8px;"></i><div>Loading available Apps Methods…</div></div>`;
+      return;
+    }
+
+    const catalog = drawerState.catalog || [];
+    const unlocks = (drawerState.activeUnlocks || []).filter(u => !mvFormatCountdown(u.expires_at).expired);
+    const reqs = drawerState.requests || [];
+
+    const pendingMethodIds = new Set(
+      reqs.filter(r => String(r.status || '').toLowerCase() === 'pending').map(r => Number(r.method_id))
+    );
+    const activeMethodIds = new Set(unlocks.map(u => Number(u.method_id)));
+
+    const selectedId = Number(drawerState.selectedMethodId || 0);
+    const selectedItem = catalog.find(m => Number(m.id) === selectedId) || null;
+    const isSelectedPending = selectedItem && pendingMethodIds.has(Number(selectedItem.id));
+
+    body.innerHTML = `
+      <div class="zy-mv-drawer-sec">
+        <div class="zy-mv-drawer-sec-head">
+          <span><i class="fas fa-layer-group" style="color:#7c3aed;"></i> Available Apps Methods</span>
+          <span class="zy-mv-sec-pill">${catalog.length} Active</span>
+        </div>
+        <div class="zy-mv-drawer-hint">Select <strong>one app</strong> below and tap <strong>Need</strong> to request its method video from your Agent.</div>
+
+        ${catalog.length ? `
+          <div class="zy-mv-app-radio-list" role="radiogroup" aria-label="Available Apps">
+            ${catalog.map(app => {
+              const id = Number(app.id);
+              const checked = id === selectedId;
+              const isPend = pendingMethodIds.has(id);
+              const isUnlocked = activeMethodIds.has(id);
+              return `
+                <label class="zy-mv-app-radio-item ${checked ? 'is-selected' : ''}" data-mv-pick="${id}">
+                  <input type="radio" name="zy-mv-app-choice" value="${id}" ${checked ? 'checked' : ''} onchange="window.zyMvClientSelectApp(${id})">
+                  <span class="zy-mv-radio-dot"></span>
+                  <span class="zy-mv-radio-main">
+                    <span class="zy-mv-radio-name">${mvEsc(app.app_name)}</span>
+                    <span class="zy-mv-radio-meta">
+                      ${app.has_video ? '<span><i class="fas fa-video"></i> Video</span>' : ''}
+                      ${Number(app.links_count || 0) > 0 ? `<span><i class="fas fa-link"></i> ${Number(app.links_count)} Link${Number(app.links_count) === 1 ? '' : 's'}</span>` : ''}
+                    </span>
+                  </span>
+                  ${isUnlocked
+                    ? '<span class="zy-mv-st-tag is-unlocked"><i class="fas fa-unlock"></i> Unlocked</span>'
+                    : (isPend ? '<span class="zy-mv-st-tag is-pending"><i class="fas fa-clock"></i> Pending</span>' : '')}
+                </label>
+              `;
+            }).join('')}
+          </div>
+
+          <div class="zy-mv-need-bar">
+            <button type="button"
+                    class="zy-mv-need-btn"
+                    id="zy-mv-need-submit"
+                    onclick="window.zyMvClientSubmitNeed()"
+                    ${(!selectedItem || drawerState.submitting || isSelectedPending) ? 'disabled' : ''}>
+              ${drawerState.submitting
+                ? '<i class="fas fa-spinner fa-spin"></i> Sending Request…'
+                : (isSelectedPending
+                  ? '<i class="fas fa-clock"></i> Already Requested (Waiting for Agent)'
+                  : (selectedItem
+                    ? `<i class="fas fa-paper-plane"></i> Need — ${mvEsc(selectedItem.app_name)}`
+                    : '<i class="fas fa-hand-pointer"></i> Select an App &amp; Tap Need'))}
+            </button>
+          </div>
+        ` : `
+          <div class="zy-mv-drawer-empty">
+            <i class="fas fa-film" style="font-size:24px;opacity:0.45;margin-bottom:6px;"></i>
+            <div>No active Apps Methods available from your Agent right now.</div>
+          </div>
+        `}
+      </div>
+
+      ${unlocks.length ? `
+        <div class="zy-mv-drawer-sec">
+          <div class="zy-mv-drawer-sec-head">
+            <span><i class="fas fa-unlock-keyhole" style="color:#059669;"></i> Unlocked Methods</span>
+            <span class="zy-mv-sec-pill is-green">${unlocks.length} Active</span>
+          </div>
+          <div class="zy-mv-unlock-list">
+            ${unlocks.map(u => {
+              const cd = mvFormatCountdown(u.expires_at);
+              const links = (Array.isArray(u.links) ? u.links : [])
+                .map(l => ({ label: String(l?.label || l?.url || 'Open Link'), href: mvSafeHref(l?.url || l) }))
+                .filter(l => l.href);
+              return `
+                <div class="zy-mv-unlock-card" data-mv-unlock-id="${Number(u.grant_id)}">
+                  <div class="zy-mv-unlock-top">
+                    <strong class="zy-mv-unlock-name">${mvEsc(u.app_name)}</strong>
+                    <span class="zy-mv-countdown-pill" data-mv-drawer-exp="${mvEsc(u.expires_at)}">
+                      <i class="fas fa-hourglass-half"></i> ${mvEsc(cd.text)}
+                    </span>
+                  </div>
+                  ${u.description ? `<div class="zy-mv-unlock-desc">${mvEsc(u.description).replace(/\n/g, '<br>')}</div>` : ''}
+                  ${links.length ? `
+                    <div class="zy-mv-links-list" style="margin-top:8px;">
+                      ${links.map(l => `
+                        <a class="zy-mv-link-chip" href="${mvEsc(l.href)}" target="_blank" rel="noopener noreferrer">
+                          <i class="fas fa-arrow-up-right-from-square"></i> <span>${mvEsc(l.label)}</span>
+                        </a>
+                      `).join('')}
+                    </div>
+                  ` : ''}
+                  <div class="zy-mv-unlock-acts">
+                    ${u.has_video ? `
+                      <button type="button" class="zy-mv-play-btn" onclick="window.zyMvClientPlayGrant(${Number(u.grant_id)})">
+                        <i class="fas fa-play-circle"></i> Watch Method Video
+                      </button>
+                    ` : ''}
+                    <button type="button" class="zy-mv-chat-btn" onclick="window.zyCloseClientAppsMethodDrawer(); if(typeof loadPage==='function') loadPage('live-chat');">
+                      <i class="fas fa-comments"></i> Open Chat
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      ${reqs.length ? `
+        <div class="zy-mv-drawer-sec">
+          <div class="zy-mv-drawer-sec-head">
+            <span><i class="fas fa-clock-rotate-left" style="color:#0284c7;"></i> My Recent Requests</span>
+          </div>
+          <div class="zy-mv-req-hist-list">
+            ${reqs.slice(0, 12).map(r => {
+              const st = String(r.status || 'pending').toLowerCase();
+              const cls = st === 'approved' ? 'is-approved' : (st === 'declined' ? 'is-declined' : 'is-pending');
+              const label = st === 'approved' ? 'Approved' : (st === 'declined' ? 'Declined' : 'Pending');
+              const when = String(r.created_at || '').replace('T', ' ').slice(0, 16);
+              return `
+                <div class="zy-mv-req-hist-row">
+                  <div style="min-width:0;flex:1;">
+                    <div class="zy-mv-req-hist-name">${mvEsc(r.app_name || 'App Method')}</div>
+                    <div class="zy-mv-req-hist-time">${mvEsc(when)}</div>
+                    ${st === 'declined' && r.decline_reason ? `<div class="zy-mv-req-hist-reason"><i class="fas fa-circle-info"></i> ${mvEsc(r.decline_reason)}</div>` : ''}
+                  </div>
+                  <span class="zy-mv-st-tag ${cls}">${label}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+    `;
+  }
+
+  window.zyMvClientSelectApp = function(methodId) {
+    drawerState.selectedMethodId = Number(methodId) || null;
+    renderClientDrawerBody();
+  };
+
+  window.zyMvClientPlayGrant = function(grantId) {
+    const u = (drawerState.activeUnlocks || []).find(x => Number(x.grant_id) === Number(grantId));
+    if (!u) return;
+    window.zyOpenSecureMethodPlayer({
+      grantId: u.grant_id,
+      appName: u.app_name,
+      description: u.description,
+      links: u.links,
+      expiresAt: u.expires_at,
+      isAgentPreview: false,
+      onExpired: () => {
+        if (drawerState.open) refreshClientDrawer();
+      }
+    });
+  };
+
+  window.zyMvClientSubmitNeed = async function() {
+    const mid = Number(drawerState.selectedMethodId || 0);
+    if (!mid || drawerState.submitting) return;
+    drawerState.submitting = true;
+    renderClientDrawerBody();
+    try {
+      const res = await apiFetch('/api/method-vault/client/request', {
+        method: 'POST',
+        body: JSON.stringify({ method_id: mid })
+      });
+      if (res && res.success) {
+        if (typeof toast === 'function') toast(res.message || 'Method request sent to your Agent!', 'success');
+        drawerState.selectedMethodId = null;
+        await refreshClientDrawer();
+      } else {
+        if (typeof toast === 'function') toast(res?.error || 'Could not send request', 'error');
+      }
+    } catch (err) {
+      if (typeof toast === 'function') toast(err.message || 'Could not send request', 'error');
+    } finally {
+      drawerState.submitting = false;
+      renderClientDrawerBody();
+    }
+  };
+
+  async function refreshClientDrawer() {
+    drawerState.loading = true;
+    renderClientDrawerBody();
+    try {
+      const res = await apiFetch('/api/method-vault/client/catalog', { silent: true });
+      if (res && !res.error) {
+        const list = Array.isArray(res.catalog) ? res.catalog : (Array.isArray(res.apps) ? res.apps : []);
+        drawerState.catalog = list;
+        drawerState.activeUnlocks = Array.isArray(res.active_unlocks) ? res.active_unlocks : [];
+        drawerState.requests = Array.isArray(res.requests) ? res.requests : [];
+      } else {
+        if (res && res.error && /not enabled|forbidden/i.test(String(res.error))) {
+          window.ZY_METHOD_VAULT_ACCESS = false;
+          const mvNav = document.getElementById('nav-apps-method');
+          if (mvNav) mvNav.style.display = 'none';
+          window.zyCloseClientAppsMethodDrawer();
+          return;
+        }
+        drawerState.catalog = [];
+        drawerState.activeUnlocks = [];
+        drawerState.requests = [];
+      }
+    } catch (err) {
+      if (err && /not enabled|forbidden|403/i.test(String(err.message || ''))) {
+        window.ZY_METHOD_VAULT_ACCESS = false;
+        const mvNav = document.getElementById('nav-apps-method');
+        if (mvNav) mvNav.style.display = 'none';
+        window.zyCloseClientAppsMethodDrawer();
+        return;
+      }
+      drawerState.catalog = [];
+      drawerState.activeUnlocks = [];
+      drawerState.requests = [];
+    } finally {
+      drawerState.loading = false;
+      renderClientDrawerBody();
+    }
+  }
+
+  window.zyOpenClientAppsMethodDrawer = function() {
+    if (!window.ZY_METHOD_VAULT_ACCESS) return;
+    let wrap = document.getElementById('zy-mv-client-drawer-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'zy-mv-client-drawer-wrap';
+      wrap.className = 'zy-mv-drawer-backdrop';
+      wrap.innerHTML = `
+        <aside class="zy-mv-drawer-panel" role="dialog" aria-modal="true" aria-label="Apps Method">
+          <div class="zy-mv-drawer-head">
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+              <span class="zy-mv-drawer-ic"><i class="fas fa-film"></i></span>
+              <div style="min-width:0;">
+                <div class="zy-mv-drawer-title">Apps Method</div>
+                <div class="zy-mv-drawer-sub">Request active app methods from your Agent</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <button type="button" class="zy-mv-drawer-icon-btn" id="zy-mv-drawer-refresh" title="Refresh"><i class="fas fa-rotate"></i></button>
+              <button type="button" class="zy-mv-drawer-icon-btn" id="zy-mv-drawer-close" title="Close" aria-label="Close"><i class="fas fa-times"></i></button>
+            </div>
+          </div>
+          <div class="zy-mv-drawer-body" id="zy-mv-drawer-body"></div>
+        </aside>
+      `;
+      document.body.appendChild(wrap);
+      wrap.addEventListener('click', (e) => {
+        if (e.target === wrap) window.zyCloseClientAppsMethodDrawer();
+      });
+      const closeBtn = wrap.querySelector('#zy-mv-drawer-close');
+      if (closeBtn) closeBtn.addEventListener('click', window.zyCloseClientAppsMethodDrawer);
+      const refBtn = wrap.querySelector('#zy-mv-drawer-refresh');
+      if (refBtn) refBtn.addEventListener('click', refreshClientDrawer);
+    }
+
+    drawerState.open = true;
+    drawerState.selectedMethodId = null;
+    document.addEventListener('keydown', _onDrawerKeyDown);
+    requestAnimationFrame(() => wrap.classList.add('is-open'));
+    try {
+      if (!history.state || history.state.zyOverlay !== 'apps-method') {
+        history.pushState(Object.assign({}, history.state || {}, { zyOverlay: 'apps-method' }), '', location.pathname + location.search);
+      }
+    } catch (_) {}
+    refreshClientDrawer();
+
+    stopDrawerTick();
+    drawerState.tickTimer = setInterval(() => {
+      if (!drawerState.open) return;
+      let needsRerender = false;
+      document.querySelectorAll('[data-mv-drawer-exp]').forEach(el => {
+        const exp = el.getAttribute('data-mv-drawer-exp');
+        const st = mvFormatCountdown(exp);
+        if (st.expired) {
+          needsRerender = true;
+        } else {
+          el.innerHTML = `<i class="fas fa-hourglass-half"></i> ${mvEsc(st.text)}`;
+        }
+      });
+      if (needsRerender) renderClientDrawerBody();
+    }, 1000);
+  };
+})();
+
+
 
 
 

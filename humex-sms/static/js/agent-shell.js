@@ -15,6 +15,9 @@ const ZY_AGENT_MENU = [
   { t: null, c: '#0284c7', items: [
       ['Apps Links', 'app-links', 'fa-link'],
   ] },
+  { t: null, c: '#7c3aed', items: [
+      ['Apps Method', 'method-vault', 'fa-film'],
+  ] },
   { t: null, c: '#10b981', items: [
       ['Live Access', 'live-access', 'fa-tower-broadcast'],
   ] },
@@ -55,6 +58,7 @@ const ZY_LABELS = {
   'dashboard': 'Dashboard',
   'live-chat': 'Live Chat',
   'app-links': 'Apps Links',
+  'method-vault': 'Apps Method',
   'live-access': 'Live Access',
   'sms-ranges': 'Ranges Add',
   'sms-overview': 'Ranges Add',
@@ -123,7 +127,7 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
         return g.items.map(([label, page, icon]) => {
           const href = (typeof window.zyPageUrl === 'function') ? window.zyPageUrl(page) : `/ints/agent/${page}`;
           return `<a class="zy-snav nav-item" id="nav-${page}" data-page="${page}" href="${href}"
-                ${page === 'live-access' ? 'style="display:none;"' : ''}
+                ${(page === 'live-access' || page === 'method-vault') ? 'style="display:none;"' : ''}
                 onclick="return window.zyNavClick ? window.zyNavClick(event, '${page}') : (event.preventDefault(), loadPage('${page}'), false)">
              <span class="zy-ic" style="--ic-accent:${g.c};"><i class="fas ${icon}" style="color:${g.c}"></i></span><span class="zy-snav-txt">${label}</span>
              <i class="fas fa-chevron-right zy-caret zy-caret-sm"></i>
@@ -185,6 +189,7 @@ window.AGENT_ROUTE_PARENT = AGENT_ROUTE_PARENT;
 window.ZY_WHITENOISE_ACCESS = false;
 window.ZY_APP_LINKS_ACCESS = true;
 window.ZY_LIVE_ACCESS_ENABLED = false;
+window.ZY_METHOD_VAULT_ACCESS = false;
 window.zySyncLiveAccessNav = function(enabled) {
   window.ZY_LIVE_ACCESS_ENABLED = Boolean(enabled);
   const laEl = document.getElementById('nav-live-access');
@@ -198,6 +203,10 @@ window.zyRefreshWhitenoiseNav = function(me) {
   window.ZY_APP_LINKS_ACCESS = true;
   const appEl = document.getElementById('nav-app-links');
   if (appEl) appEl.style.display = '';
+  const mvAllowed = Boolean(me && me.method_vault_access);
+  window.ZY_METHOD_VAULT_ACCESS = mvAllowed;
+  const mvEl = document.getElementById('nav-method-vault');
+  if (mvEl) mvEl.style.display = mvAllowed ? '' : 'none';
   if (me && typeof me.live_access_enabled === 'boolean') {
     window.zySyncLiveAccessNav(me.live_access_enabled);
   }

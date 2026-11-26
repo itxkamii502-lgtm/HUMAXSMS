@@ -5327,6 +5327,11 @@ async function openAdminAddAgentModal() {
           <input type="checkbox" id="aa-applinks-access"> Apps Links Access (Show Apps Links Directory &amp; Allow Sharing with Clients)
         </label>
       </div>
+      <div class="form-group" style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:#5b21b6;margin:0;">
+          <input type="checkbox" id="aa-vault-access"> Apps Method Video Vault Access (25 GB Shared Pool · Timed Watermarked Videos)
+        </label>
+      </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
         <button type="submit" class="btn btn-primary" id="aa-submit-btn"><i class="fas fa-user-plus"></i> Create Agent</button>
@@ -5393,6 +5398,7 @@ async function submitAdminAddAgent(event) {
       commission_rate: parseFloat(document.getElementById('aa-commission').value) || 5,
       whitenoise_access: Boolean(document.getElementById('aa-wn-access')?.checked),
       app_links_access: Boolean(document.getElementById('aa-applinks-access')?.checked),
+      method_vault_access: Boolean(document.getElementById('aa-vault-access')?.checked),
       status: 'active'
     };
 
@@ -5451,7 +5457,7 @@ async function renderAdminAgents(page = 1, search = '') {
         ${buildTable(
           ['Username', 'Full Name', 'Balance', 'Clients', 'Numbers', 'Today OTP', 'Commission', 'Status', 'Actions'],
           visibleAgents.map(a => [
-            `<span class="zy-col-username"><strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.app_links_access ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-size:10px;" title="Apps Links Enabled">APPS</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}</span>`,
+            `<span class="zy-col-username"><strong>${escapeHtml(a.username || '—')}</strong>${a.whitenoise_access ? ' <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;font-size:10px;">WN</span>' : ''}${a.app_links_access ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-size:10px;" title="Apps Links Enabled">APPS</span>' : ''}${a.method_vault_access ? ' <span class="badge" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;font-size:10px;" title="Apps Method Video Vault Enabled">VAULT</span>' : ''}${a.two_fa ? ' <span class="badge" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;font-size:10px;" title="2FA Protected — Password changes require Agent Authenticator OTP"><i class="fas fa-shield-halved"></i> 2FA</span>' : ''}</span>`,
             escapeHtml(a.full_name || '—'),
             `<span class="text-success fw-600" title="Auto-earned from SMS traffic">$${zyFmtMoney((a.balance || 0), 4)}</span>`,
             `<span class="monospace fw-600">${Number(a.clients_count || 0).toLocaleString()}</span>`,
@@ -5600,10 +5606,16 @@ async function openEditAgentModal(id) {
             Whitenoise Access (Numbers, Ranges &amp; CDR 2 · Monthly 30/5 {W})
           </label>
         </div>
-        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
+        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;margin-bottom:10px;">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:700;color:#075985;margin:0;">
             <input type="checkbox" id="edit-ag-applinks-access" ${agent.app_links_access ? 'checked' : ''}>
             Apps Links Access (Show Apps Links Directory &amp; Allow Sharing with Clients)
+          </label>
+        </div>
+        <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:700;color:#5b21b6;margin:0;">
+            <input type="checkbox" id="edit-ag-vault-access" ${agent.method_vault_access ? 'checked' : ''}>
+            Apps Method Video Vault Access (Upload Methods, Approve Client Requests &amp; Send Timed Videos)
           </label>
         </div>
         <div class="form-actions">
@@ -5632,6 +5644,7 @@ async function submitEditAgent(event, id) {
     commission_rate: parseFloat(document.getElementById('edit-ag-comm').value) || 0,
     whitenoise_access: Boolean(document.getElementById('edit-ag-wn-access')?.checked),
     app_links_access: Boolean(document.getElementById('edit-ag-applinks-access')?.checked),
+    method_vault_access: Boolean(document.getElementById('edit-ag-vault-access')?.checked),
     alloc_mode: agMode || null,
     alloc_daily_limit: agDailyRaw !== '' && agDailyRaw !== undefined ? Math.max(0, parseInt(agDailyRaw, 10) || 0) : null,
     alloc_total_limit: agTotalRaw !== '' && agTotalRaw !== undefined ? Math.max(0, parseInt(agTotalRaw, 10) || 0) : null
@@ -7384,6 +7397,7 @@ async function renderGeneralSettings() {
       <div class="gs-subtabs" id="gs-section-tabs">
         <button type="button" class="gs-subtab-btn active" data-gs-tab="brand" onclick="switchGsSectionTab('brand', this)"><i class="fas fa-palette"></i> Brand &amp; Role Theme Studio</button>
         <button type="button" class="gs-subtab-btn" data-gs-tab="rates" onclick="switchGsSectionTab('rates', this)"><i class="fas fa-coins"></i> FX, Payterms &amp; Limits</button>
+        <button type="button" class="gs-subtab-btn" data-gs-tab="vault" onclick="switchGsSectionTab('vault', this)"><i class="fas fa-film"></i> Method Vault Access</button>
         <button type="button" class="gs-subtab-btn" data-gs-tab="system" onclick="switchGsSectionTab('system', this)"><i class="fas fa-server"></i> System &amp; Cleanup</button>
         <button type="button" class="gs-subtab-btn" data-gs-tab="all" onclick="switchGsSectionTab('all', this)"><i class="fas fa-layer-group"></i> Show All</button>
       </div>
@@ -7631,6 +7645,17 @@ async function renderGeneralSettings() {
             </div>
           </div>
 
+          <!-- Apps Method Video Vault Access Control (Owner Only) -->
+          <div class="card gs-card-section gs-hidden" data-gs-sec="vault" id="gs-method-vault-card">
+            <div class="card-header" style="border-bottom:1px solid #eef2f6;padding-bottom:12px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+              <div class="card-title"><i class="fas fa-film" style="color:#7c3aed;margin-right:6px;"></i> Apps Method Video Vault — Agent Access &amp; 25 GB Storage Guard</div>
+              <button type="button" class="btn btn-outline btn-sm" onclick="loadOwnerMethodVaultAccess()"><i class="fas fa-rotate"></i> Refresh</button>
+            </div>
+            <div id="gs-method-vault-body">
+              <div class="text-muted fs-12" style="padding:18px;text-align:center;"><i class="fas fa-spinner fa-spin"></i> Loading Method Vault storage &amp; agent access…</div>
+            </div>
+          </div>
+
           <!-- System Logs & Data Maintenance Card -->
           <div class="card gs-card-section gs-hidden" data-gs-sec="system" style="border: 1px solid #fed7aa; background: #fffaf0;">
             <div class="card-header" style="border-bottom:1px solid #fde68a;padding-bottom:12px;margin-bottom:14px;">
@@ -7827,24 +7852,111 @@ async function renderGeneralSettings() {
     window._roleThemeCatalog = catalog;
     gsRenderCatalogCards(catalog);
     gsUpdateLiveRolePreview(activeTheme);
+    loadOwnerMethodVaultAccess();
   } catch (err) {
     console.error('General settings error:', err);
     toast('Failed to load settings', 'error');
   }
 }
 
+window.loadOwnerMethodVaultAccess = async function() {
+  const host = document.getElementById('gs-method-vault-body');
+  if (!host) return;
+  try {
+    const res = await apiFetch('/api/owner/method-vault/agents');
+    if (!res) return;
+    const st = res.storage || {};
+    const agents = Array.isArray(res.agents) ? res.agents : [];
+    const usedGb = Number(st.used_gb || 0).toFixed(2);
+    const maxGb = Number(st.max_gb || 25).toFixed(0);
+    const pct = Math.min(100, Math.max(0, Number(st.used_percent || 0)));
+    const barColor = pct >= 90 ? '#dc2626' : (pct >= 75 ? '#d97706' : '#7c3aed');
+    const freeDiskStr = st.disk_free_gb != null ? `${Number(st.disk_free_gb).toFixed(1)} GB free on VPS` : 'Isolated Vault Folder';
+
+    host.innerHTML = `
+      <div class="zy-mv-owner-meter">
+        <div class="zy-mv-owner-meter-top">
+          <div>
+            <div style="font-size:13px;font-weight:800;color:#0f172a;">Hard 25 GB Vault Storage Cap <span class="badge" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;font-size:10.5px;margin-left:6px;">${Number(st.file_count || 0)} Video Files</span></div>
+            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Stored outside <code>humex-sms/data/</code> so SMS database &amp; backups stay 100% untouched. Automatic 15 GB VPS free-space safety guard active.</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:15px;font-weight:800;color:${barColor};font-variant-numeric:tabular-nums;">${usedGb} GB / ${maxGb} GB</div>
+            <div style="font-size:11px;color:#64748b;">${escapeHtml(freeDiskStr)}</div>
+          </div>
+        </div>
+        <div class="zy-mv-progress-track">
+          <div class="zy-mv-progress-fill" style="width:${pct}%;background:${barColor};"></div>
+        </div>
+      </div>
+
+      <div style="font-size:12.5px;font-weight:700;color:#334155;margin:14px 0 8px;">Per-Agent Apps Method Vault Access Control</div>
+      <div class="zy-mv-owner-agent-list">
+        ${agents.length ? agents.map(ag => `
+          <div class="zy-mv-owner-agent-row">
+            <div style="min-width:0;flex:1;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong style="font-size:13.5px;color:#0f172a;">${escapeHtml(ag.username)}</strong>
+                ${ag.full_name ? `<span style="font-size:12px;color:#64748b;">(${escapeHtml(ag.full_name)})</span>` : ''}
+                ${statusBadge(ag.status || 'active')}
+              </div>
+              <div style="font-size:11.5px;color:#64748b;margin-top:3px;display:flex;gap:12px;flex-wrap:wrap;">
+                <span><i class="fas fa-film" style="color:#7c3aed;"></i> ${Number(ag.method_count || 0)} Methods</span>
+                <span><i class="fas fa-hard-drive" style="color:#0284c7;"></i> ${Number(ag.used_mb || 0).toFixed(1)} MB used</span>
+                <span><i class="fas fa-clock" style="color:#d97706;"></i> ${Number(ag.pending_requests || 0)} Pending Requests</span>
+              </div>
+            </div>
+            <label class="zy-mv-switch-wrap" title="Enable or disable Apps Method Vault for this Agent and their Clients">
+              <input type="checkbox" ${ag.method_vault_access ? 'checked' : ''} onchange="toggleOwnerAgentVaultAccess(${Number(ag.id)}, this.checked, this)">
+              <span class="zy-mv-switch-slider"></span>
+              <span class="zy-mv-switch-lbl">${ag.method_vault_access ? 'Enabled' : 'Disabled'}</span>
+            </label>
+          </div>
+        `).join('') : '<div class="text-muted fs-12" style="padding:16px;text-align:center;">No agents created yet.</div>'}
+      </div>
+    `;
+  } catch (err) {
+    host.innerHTML = `<div class="text-danger fs-12" style="padding:14px;">Failed to load Method Vault access: ${escapeHtml(err.message || '')}</div>`;
+  }
+};
+
+window.toggleOwnerAgentVaultAccess = async function(agentId, enabled, checkboxEl) {
+  if (checkboxEl) checkboxEl.disabled = true;
+  try {
+    const res = await apiFetch(`/api/owner/method-vault/agents/${Number(agentId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: Boolean(enabled) })
+    });
+    if (res && res.success) {
+      toast(`Apps Method Vault ${enabled ? 'enabled' : 'disabled'} for ${res.username || 'Agent'}`, 'success');
+      await loadOwnerMethodVaultAccess();
+    } else {
+      if (checkboxEl) checkboxEl.checked = !enabled;
+      toast(res?.error || 'Failed to update access', 'error');
+    }
+  } catch (err) {
+    if (checkboxEl) checkboxEl.checked = !enabled;
+    toast(err.message || 'Failed to update access', 'error');
+  } finally {
+    if (checkboxEl) checkboxEl.disabled = false;
+  }
+};
+
 window.switchGsSectionTab = function(tab, btn) {
   document.querySelectorAll('#gs-section-tabs .gs-subtab-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   const grid = document.getElementById('gs-main-grid');
   if (grid) {
-    grid.style.gridTemplateColumns = (tab === 'rates' || tab === 'system') ? '1fr' : '';
+    grid.style.gridTemplateColumns = (tab === 'rates' || tab === 'system' || tab === 'vault') ? '1fr' : '';
   }
   document.querySelectorAll('.gs-card-section').forEach(el => {
     const sec = el.getAttribute('data-gs-sec');
     if (tab === 'all' || sec === tab) el.classList.remove('gs-hidden');
     else el.classList.add('gs-hidden');
   });
+  if (tab === 'vault' && typeof window.loadOwnerMethodVaultAccess === 'function') {
+    window.loadOwnerMethodVaultAccess();
+  }
 };
 
 function gsRenderCatalogCards(catalog) {

@@ -2067,6 +2067,27 @@ function hasAppLinksAccess(userOrRef) {
   return false;
 }
 
+function hasMethodVaultAccess(userOrRef) {
+  if (!userOrRef) return false;
+  const role = normRole(userOrRef.role);
+  if (role === 'owner') return true;
+  if (role === 'agent') {
+    const agents = readDb('agents') || [];
+    const ag = agents.find(a => Number(a.id) === Number(userOrRef.id) || (userOrRef.username && String(a.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
+    return Boolean(ag && ag.method_vault_access);
+  }
+  if (role === 'client') {
+    const clients = readDb('clients') || [];
+    const cl = clients.find(c => Number(c.id) === Number(userOrRef.id) || (userOrRef.username && String(c.username || '').toLowerCase() === String(userOrRef.username).toLowerCase()));
+    const agId = (cl && cl.agent_id) || userOrRef.agent_id;
+    if (!agId) return false;
+    const agents = readDb('agents') || [];
+    const ag = agents.find(a => Number(a.id) === Number(agId));
+    return Boolean(ag && ag.method_vault_access);
+  }
+  return false;
+}
+
 function hasLiveAccess(userOrRef) {
   if (!userOrRef) return false;
   const role = normRole(userOrRef.role);
@@ -7749,7 +7770,10 @@ const API_RULES = [
   { m: new Set(['POST']), p: /^\/payout-requests(\/|$)/, roles: ['owner', 'agent', 'client'] },
   { m: WRITE_METHODS, p: /^\/payments(\/|$)/, roles: ['owner', 'agent'] },
   { p: /^\/agent\/(client-rates|pkr-target|allocation-history|client-payment-tracker)(\/|$)/, roles: ['agent'] },
-  { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] }
+  { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] },
+  { p: /^\/method-vault\/agent(\/|$)/, roles: ['agent'] },
+  { p: /^\/method-vault\/client(\/|$)/, roles: ['client'] },
+  { m: new Set(['GET']), p: /^\/method-vault\/stream(\/|$)/, roles: ['agent', 'client'] }
 ];
 // Client is default-deny: only these routes exist for them.
 const CLIENT_ALLOW = [
@@ -7774,7 +7798,9 @@ const CLIENT_ALLOW = [
   { m: new Set(['GET']), p: /^\/client\/\d+\// },
   { m: new Set(['GET']), p: /^\/(credit-notes|statements)(\/|$)/ },
   { m: new Set(['GET', 'POST']), p: /^\/payout-requests(\/|$)/ },
-  { m: new Set(['GET']), p: /^\/payments(\/|$)/ }
+  { m: new Set(['GET']), p: /^\/payments(\/|$)/ },
+  { m: new Set(['GET', 'POST']), p: /^\/method-vault\/client(\/|$)/ },
+  { m: new Set(['GET']), p: /^\/method-vault\/stream(\/|$)/ }
 ];
 function ruleHit(list, p, method) { return list.some(r => (!r.m || r.m.has(method)) && r.p.test(p)); }
 
@@ -8469,6 +8495,7 @@ app.get('/api/auth/me', (req, res) => {
   const wnAccess = hasWhitenoiseAccess(sessionUser);
   const appLinksAccess = hasAppLinksAccess(sessionUser);
   const liveAccessEnabled = hasLiveAccess(sessionUser);
+  const methodVaultAccess = hasMethodVaultAccess(sessionUser);
   const found = findUserAnywhere(sessionUser.username);
   const dbUser = (found && found.user) || {};
   const clientChatId = sessionUser.role === 'Client' ? ensureSingleClientChatId(sessionUser.id) : '';
@@ -8489,6 +8516,7 @@ app.get('/api/auth/me', (req, res) => {
     whitenoise_access: wnAccess,
     app_links_access: appLinksAccess,
     live_access_enabled: liveAccessEnabled,
+    method_vault_access: methodVaultAccess,
     cdr2_terms_accepted: Boolean(dbUser.cdr2_terms_accepted_at),
     cdr2_terms_accepted_at: dbUser.cdr2_terms_accepted_at || null,
     permissions: sessionUser.role === 'Owner' ? ['all'] : [sessionUser.role.toLowerCase()]
@@ -15216,6 +15244,7 @@ function registerPaginatedCrud(routePath, tableName) {
       item.balance = 0;
       item.whitenoise_access = Boolean(req.body && req.body.whitenoise_access);
       item.app_links_access = Boolean(req.body && req.body.app_links_access);
+      item.method_vault_access = Boolean(req.body && req.body.method_vault_access);
       delete item.manager_id;
       delete item.manager_username;
     } else if (tableName === 'clients') {
@@ -15611,7 +15640,7 @@ function registerPaginatedCrud(routePath, tableName) {
           }
           req.body.app_links_access = Boolean(req.body.app_links_access);
         }
-      } else if (req.body && ('whitenoise_access' in req.body || 'app_links_access' in req.body)) {
+      } else if (req.body && ('whitenoise_access' in req.body || 'app_links_access' in req.body || 'method_vault_access' in req.body)) {
         return res.status(403).json({ error: 'Forbidden. Only Owner/authorized Agent may manage feature access.' });
       }
       if (tableName === 'numbers') {
@@ -15720,6 +15749,9 @@ function registerPaginatedCrud(routePath, tableName) {
     }
     if (['agents', 'clients'].includes(tableName) && ('app_links_access' in updates)) {
       updates.app_links_access = Boolean(updates.app_links_access);
+    }
+    if (tableName === 'agents' && ('method_vault_access' in updates)) {
+      updates.method_vault_access = Boolean(updates.method_vault_access);
     }
     if (tableName === 'clients') {
       if (updates.auto_generate_chat_id === true) {
@@ -24699,6 +24731,14 @@ function projectMessageForActor(msg, actor, conv) {
     }
   }
 
+  // Project timed App Method Video Card (auto-expire & strip content for Clients once timer ends)
+  if (out.method_card && typeof out.method_card === 'object' && !out.deleted) {
+    out.method_card = projectMethodCardForActor(out.method_card, actor, out);
+    if (actor && actor.role === 'client' && out.method_card && out.method_card.expired) {
+      out.body = '';
+    }
+  }
+
   if (canActorPreviewDeletedMessage(actor, conv, msg)) {
     out.can_preview_deleted = true;
     out.deleted_preview_body = typeof msg.deleted_original_body === 'string' ? msg.deleted_original_body : '';
@@ -25428,7 +25468,10 @@ app.get('/api/chat/bootstrap', requireAuth, (req, res) => {
   const total_unread = conversations.reduce((sum, c) => sum + (c.unread_count || 0), 0);
 
   res.json({
-    me: actor,
+    me: {
+      ...actor,
+      method_vault_access: hasMethodVaultAccess(req.sessionUser)
+    },
     contacts,
     conversations,
     total_unread
@@ -27251,6 +27294,1307 @@ app.get('/api/reports/orphans', requireAuth, (req, res) => {
     orphaned_clients: orphanedClients.map(safeUser),
     orphaned_numbers: orphanedNumbers
   });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// APPS METHOD VIDEO VAULT (25 GB Cap · Disk Streaming · Timed Access)
+// Stored strictly outside humex-sms/data/ so backups & SMS DB stay untouched.
+// ═══════════════════════════════════════════════════════════════
+const MEDIA_VAULT_ROOT = path.join(__dirname, 'media_vault');
+const MEDIA_VAULT_VIDEOS_DIR = path.join(MEDIA_VAULT_ROOT, 'videos');
+const METHOD_VAULT_MAX_BYTES = 25 * 1024 * 1024 * 1024;       // Hard 25 GB total cap
+const METHOD_VAULT_MIN_FREE_BYTES = 15 * 1024 * 1024 * 1024;  // Require >= 15 GB free disk space on VPS
+const METHOD_VAULT_MAX_FILE_BYTES = 500 * 1024 * 1024;        // Max 500 MB per video file
+const METHOD_VAULT_ALLOWED_EXT = new Set(['.mp4', '.webm', '.mov', '.m4v']);
+const METHOD_VAULT_ALLOWED_MIME = new Set([
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v', 'application/octet-stream'
+]);
+
+function ensureMethodVaultDir() {
+  try {
+    if (!fs.existsSync(MEDIA_VAULT_VIDEOS_DIR)) {
+      fs.mkdirSync(MEDIA_VAULT_VIDEOS_DIR, { recursive: true });
+    }
+  } catch (e) {
+    console.error('[METHOD-VAULT] Failed to create media directory:', e && e.message);
+  }
+}
+ensureMethodVaultDir();
+
+function safeResolveVaultVideoPath(fileName) {
+  const clean = path.basename(String(fileName || '').trim());
+  if (!clean || clean !== String(fileName || '').trim() || clean.includes('..') || clean.includes('/') || clean.includes('\\')) {
+    return null;
+  }
+  const baseDir = path.resolve(MEDIA_VAULT_VIDEOS_DIR);
+  const resolved = path.resolve(baseDir, clean);
+  if (!resolved.startsWith(baseDir + path.sep)) return null;
+  return resolved;
+}
+
+function unlinkVaultVideoSafe(fileName) {
+  try {
+    const p = safeResolveVaultVideoPath(fileName);
+    if (p && fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (_) {}
+}
+
+function getMethodVaultStorageStats() {
+  ensureMethodVaultDir();
+  let usedBytes = 0;
+  let fileCount = 0;
+  try {
+    const entries = fs.readdirSync(MEDIA_VAULT_VIDEOS_DIR);
+    for (const name of entries) {
+      const p = safeResolveVaultVideoPath(name);
+      if (!p) continue;
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile()) {
+          usedBytes += st.size;
+          fileCount += 1;
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  let diskFreeBytes = null;
+  let diskTotalBytes = null;
+  try {
+    if (typeof fs.statfsSync === 'function') {
+      const sfs = fs.statfsSync(MEDIA_VAULT_VIDEOS_DIR);
+      const bsize = Number(sfs.bsize || 4096);
+      diskFreeBytes = Number(sfs.bavail || 0) * bsize;
+      diskTotalBytes = Number(sfs.blocks || 0) * bsize;
+    }
+  } catch (_) {}
+
+  const remainingCapBytes = Math.max(0, METHOD_VAULT_MAX_BYTES - usedBytes);
+  const vpsLowDisk = diskFreeBytes !== null && diskFreeBytes < METHOD_VAULT_MIN_FREE_BYTES;
+  const capReached = usedBytes >= METHOD_VAULT_MAX_BYTES;
+  const usedPct = Math.min(100, Math.round((usedBytes / METHOD_VAULT_MAX_BYTES) * 1000) / 10);
+
+  return {
+    used_bytes: usedBytes,
+    max_bytes: METHOD_VAULT_MAX_BYTES,
+    remaining_bytes: remainingCapBytes,
+    used_pct: usedPct,
+    file_count: fileCount,
+    max_file_bytes: METHOD_VAULT_MAX_FILE_BYTES,
+    disk_free_bytes: diskFreeBytes,
+    disk_total_bytes: diskTotalBytes,
+    min_free_bytes: METHOD_VAULT_MIN_FREE_BYTES,
+    vps_low_disk: vpsLowDisk,
+    cap_reached: capReached,
+    can_upload: !vpsLowDisk && !capReached
+  };
+}
+
+function sanitizeMethodLinks(raw) {
+  let arr = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    try {
+      arr = JSON.parse(trimmed);
+    } catch (_) {
+      arr = trimmed.split(/\r?\n/).map(line => {
+        const parts = line.split('|').map(s => s.trim());
+        if (parts.length >= 2) return { label: parts[0], url: parts.slice(1).join('|') };
+        return { label: '', url: parts[0] };
+      });
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const item of arr.slice(0, 12)) {
+    if (!item) continue;
+    const rawUrl = String(typeof item === 'string' ? item : (item.url || '')).trim();
+    if (!rawUrl) continue;
+    let parsed;
+    try {
+      parsed = new URL(rawUrl);
+    } catch (_) {
+      continue;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    const label = String((typeof item === 'object' ? item.label : '') || parsed.hostname || 'Open Link').trim().slice(0, 80);
+    out.push({ label: label || 'Open Link', url: parsed.toString().slice(0, 500) });
+  }
+  return out;
+}
+
+function resolveMethodMimeFromExt(ext, rawMime) {
+  const e = String(ext || '').toLowerCase();
+  if (e === '.mp4' || e === '.m4v') return 'video/mp4';
+  if (e === '.webm') return 'video/webm';
+  if (e === '.mov') return 'video/quicktime';
+  if (rawMime && rawMime.startsWith('video/')) return rawMime;
+  return 'video/mp4';
+}
+
+const methodVaultVideoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      ensureMethodVaultDir();
+      cb(null, MEDIA_VAULT_VIDEOS_DIR);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(String(file.originalname || '')).toLowerCase();
+      const safeExt = METHOD_VAULT_ALLOWED_EXT.has(ext) ? ext : '.mp4';
+      const aid = Number(req.sessionUser?.id || 0);
+      const token = crypto.randomBytes(12).toString('hex');
+      cb(null, `mv_${aid}_${Date.now()}_${token}${safeExt}`);
+    }
+  }),
+  limits: { fileSize: METHOD_VAULT_MAX_FILE_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(String(file.originalname || '')).toLowerCase();
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (!METHOD_VAULT_ALLOWED_EXT.has(ext) || !METHOD_VAULT_ALLOWED_MIME.has(mime)) {
+      return cb(new Error('Only MP4, WebM, MOV, or M4V video files are allowed.'));
+    }
+    cb(null, true);
+  }
+});
+
+function isGrantActiveForClient(grant, clientId, agentId, convsCache = null) {
+  if (!grant || grant.revoked) return false;
+  if (Number(grant.agent_id) !== Number(agentId)) return false;
+  const expMs = new Date(grant.expires_at || 0).getTime();
+  if (!Number.isFinite(expMs) || Date.now() >= expMs) return false;
+  if (grant.scope === 'client') {
+    return Number(grant.client_id) === Number(clientId);
+  }
+  if (grant.scope === 'conversation' && grant.conversation_id) {
+    const convs = Array.isArray(convsCache) ? convsCache : (readDb('chat_conversations') || []);
+    const conv = convs.find(c => Number(c.id) === Number(grant.conversation_id));
+    if (!conv || !Array.isArray(conv.participants)) return false;
+    return conv.participants.includes(`client:${Number(clientId)}`);
+  }
+  return false;
+}
+
+function projectMethodCardForActor(rawCard, actor, msgObj) {
+  if (!rawCard || typeof rawCard !== 'object') return rawCard;
+  const grantId = Number(rawCard.grant_id || 0);
+  const grants = readDb('method_vault_grants') || [];
+  const grant = grants.find(g => Number(g.id) === grantId) || null;
+  const methods = readDb('method_vault_items') || [];
+  const method = methods.find(m => Number(m.id) === Number(rawCard.method_id || grant?.method_id || 0)) || null;
+
+  const expiresAt = (grant && grant.expires_at) || rawCard.expires_at || '';
+  const expMs = new Date(expiresAt || 0).getTime();
+  const isRevoked = Boolean(grant && grant.revoked);
+  const isDeletedMethod = !method;
+  const isTimeExpired = !Number.isFinite(expMs) || Date.now() >= expMs;
+  const isExpired = isRevoked || isDeletedMethod || isTimeExpired;
+
+  if (actor && actor.role === 'client') {
+    const clientHasAccess = hasMethodVaultAccess({ role: 'Client', id: actor.id });
+    if (!clientHasAccess) {
+      return null;
+    }
+    if (isExpired) {
+      return {
+        grant_id: grantId,
+        app_name: String(rawCard.app_name || method?.app_name || 'App Method'),
+        expires_at: expiresAt,
+        duration_minutes: Number(rawCard.duration_minutes || grant?.duration_minutes || 0),
+        expired: true,
+        revoked: isRevoked
+      };
+    }
+    return {
+      grant_id: grantId,
+      method_id: Number(method.id),
+      app_name: String(method.app_name || rawCard.app_name || 'App Method'),
+      description: String(rawCard.custom_note || method.description || ''),
+      links: Array.isArray(method.links) ? method.links : (Array.isArray(rawCard.links) ? rawCard.links : []),
+      has_video: Boolean(method.video_file && safeResolveVaultVideoPath(method.video_file) && fs.existsSync(safeResolveVaultVideoPath(method.video_file))),
+      video_size: Number(method.video_size || 0),
+      expires_at: expiresAt,
+      duration_minutes: Number(rawCard.duration_minutes || grant?.duration_minutes || 0),
+      expired: false
+    };
+  }
+
+  // Agent / Owner preview
+  return {
+    grant_id: grantId,
+    method_id: Number(method?.id || rawCard.method_id || 0),
+    app_name: String(method?.app_name || rawCard.app_name || 'App Method'),
+    description: String(rawCard.custom_note || method?.description || ''),
+    links: Array.isArray(method?.links) ? method.links : (Array.isArray(rawCard.links) ? rawCard.links : []),
+    has_video: Boolean(method && method.video_file && safeResolveVaultVideoPath(method.video_file) && fs.existsSync(safeResolveVaultVideoPath(method.video_file))),
+    video_size: Number(method?.video_size || rawCard.video_size || 0),
+    expires_at: expiresAt,
+    duration_minutes: Number(rawCard.duration_minutes || grant?.duration_minutes || 0),
+    expired: isExpired,
+    revoked: isRevoked,
+    is_agent_view: true
+  };
+}
+
+function getOrCreateAgentClientDirectConv(agentSessionUser, clientRec) {
+  const agentKey = `agent:${Number(agentSessionUser.id)}`;
+  const clientKey = `client:${Number(clientRec.id)}`;
+  const convs = readDb('chat_conversations') || [];
+  let conv = convs.find(c =>
+    c.type === 'agent_client' &&
+    Array.isArray(c.participants) &&
+    c.participants.length === 2 &&
+    c.participants.includes(agentKey) &&
+    c.participants.includes(clientKey)
+  );
+  if (!conv) {
+    const now = new Date().toISOString();
+    conv = {
+      id: nextId(convs, 'chat_conversations'),
+      type: 'agent_client',
+      owner_agent_id: Number(agentSessionUser.id),
+      title: '',
+      description: '',
+      participants: [agentKey, clientKey],
+      admin_only: false,
+      pinned_message_id: null,
+      read_cursors: { [agentKey]: 0, [clientKey]: 0 },
+      last_message_id: 0,
+      last_message_preview: '',
+      last_message_sender_key: '',
+      last_message_sender_name: '',
+      last_message_at: null,
+      created_at: now,
+      updated_at: now
+    };
+    convs.push(conv);
+    writeDb('chat_conversations', convs);
+  }
+  return { conv, convs };
+}
+
+function postMethodCardToConversation(agentSessionUser, convId, methodItem, grant, customNote = '') {
+  const convs = readDb('chat_conversations') || [];
+  const conv = convs.find(c => Number(c.id) === Number(convId));
+  if (!conv) return null;
+
+  const actor = resolveLiveChatActor(agentSessionUser);
+  if (!actor) return null;
+
+  const allMessages = readDb('chat_messages') || [];
+  const now = new Date().toISOString();
+  const noteText = String(customNote || '').trim().slice(0, 1200);
+  const previewBody = `🎬 App Method: ${methodItem.app_name}`;
+
+  const msgRecord = {
+    id: nextId(allMessages, 'chat_messages'),
+    conversation_id: Number(conv.id),
+    sender_key: actor.key,
+    sender_role: 'agent',
+    sender_chat_id: '',
+    sender_name: actor.display_name || actor.username,
+    body: noteText,
+    method_card: {
+      grant_id: Number(grant.id),
+      method_id: Number(methodItem.id),
+      app_name: String(methodItem.app_name || 'App Method'),
+      custom_note: noteText || String(methodItem.description || ''),
+      links: Array.isArray(methodItem.links) ? methodItem.links : [],
+      has_video: Boolean(methodItem.video_file),
+      video_size: Number(methodItem.video_size || 0),
+      duration_minutes: Number(grant.duration_minutes || 180),
+      expires_at: grant.expires_at
+    },
+    reply_to: null,
+    deleted: false,
+    created_at: now
+  };
+  allMessages.push(msgRecord);
+  writeDb('chat_messages', allMessages);
+
+  if (!conv.read_cursors) conv.read_cursors = {};
+  conv.read_cursors[actor.key] = msgRecord.id;
+  conv.last_message_id = msgRecord.id;
+  conv.last_message_preview = previewBody.slice(0, 120);
+  conv.last_message_sender_key = actor.key;
+  conv.last_message_sender_name = msgRecord.sender_name;
+  conv.last_message_at = now;
+  conv.updated_at = now;
+  writeDb('chat_conversations', convs);
+
+  broadcastChatMessageForConv(conv, msgRecord, { alert_priority: 'admin_alert' });
+  return msgRecord;
+}
+
+// ── OWNER: General Settings Agent Method Vault Access Management ─
+app.get('/api/owner/method-vault/agents', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner access required.' });
+  }
+  const agents = readDb('agents') || [];
+  const items = readDb('method_vault_items') || [];
+  const storage = getMethodVaultStorageStats();
+
+  const perAgentMap = new Map();
+  for (const it of items) {
+    if (!it) continue;
+    const aid = Number(it.agent_id);
+    const prev = perAgentMap.get(aid) || { count: 0, bytes: 0, active_count: 0 };
+    prev.count += 1;
+    if (it.active !== false) prev.active_count += 1;
+    prev.bytes += Number(it.video_size || 0);
+    perAgentMap.set(aid, prev);
+  }
+
+  const list = agents.map(a => {
+    const st = perAgentMap.get(Number(a.id)) || { count: 0, bytes: 0, active_count: 0 };
+    return {
+      id: Number(a.id),
+      username: a.username,
+      status: a.status || 'active',
+      method_vault_access: Boolean(a.method_vault_access),
+      video_count: st.count,
+      active_apps_count: st.active_count,
+      used_bytes: st.bytes
+    };
+  });
+
+  res.json({ storage, agents: list });
+});
+
+app.put('/api/owner/method-vault/agents/:id', requireAuth, (req, res) => {
+  if (normRole(req.sessionUser.role) !== 'owner') {
+    return res.status(403).json({ error: 'Forbidden. Owner access required.' });
+  }
+  const agentId = Number(req.params.id);
+  const agents = readDb('agents') || [];
+  const idx = agents.findIndex(a => Number(a.id) === agentId);
+  if (idx === -1) return res.status(404).json({ error: 'Agent not found.' });
+
+  const enabled = Boolean(req.body && req.body.method_vault_access);
+  agents[idx].method_vault_access = enabled;
+  writeDb('agents', agents);
+
+  logAudit(req.sessionUser.username || 'Owner', 'Toggle Method Vault Access', `${enabled ? 'Enabled' : 'Disabled'} Apps Method Video Vault for Agent ${agents[idx].username}`, 'agents');
+  sendInstantNotification({
+    recipient_role: 'agent',
+    recipient_id: agentId,
+    recipient_username: agents[idx].username,
+    title: enabled ? 'Apps Method Video Vault Enabled' : 'Apps Method Video Vault Disabled',
+    message: enabled
+      ? 'Owner enabled Apps Method Video Vault access for your panel. You can now upload app method videos and share timed access with your clients.'
+      : 'Owner disabled Apps Method Video Vault access for your panel.',
+    type: 'system',
+    category: 'system',
+    action_page: enabled ? 'method-vault' : 'dashboard',
+    actor_role: 'Owner',
+    actor_name: req.sessionUser.username || 'Owner'
+  });
+
+  res.json({ success: true, agent_id: agentId, method_vault_access: enabled });
+});
+
+// ── AGENT: Vault Bootstrap (Storage + Methods + Requests + Targets) ─
+app.get('/api/method-vault/agent/overview', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Apps Method Video Vault access is not enabled for your account. Contact Owner.' });
+  }
+  const aid = Number(sessionUser.id);
+  const storage = getMethodVaultStorageStats();
+  const items = (readDb('method_vault_items') || [])
+    .filter(m => m && Number(m.agent_id) === aid)
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+
+  const agentUsedBytes = items.reduce((s, m) => s + Number(m.video_size || 0), 0);
+  const requests = (readDb('method_vault_requests') || [])
+    .filter(r => r && Number(r.agent_id) === aid)
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+
+  const nowMs = Date.now();
+  const grants = (readDb('method_vault_grants') || []).filter(g => g && Number(g.agent_id) === aid);
+  const activeGrants = grants.filter(g => !g.revoked && new Date(g.expires_at || 0).getTime() > nowMs);
+
+  // Agent's clients & groups/channels for direct send picker
+  const clients = (readDb('clients') || [])
+    .filter(c => c && Number(c.agent_id) === aid)
+    .map(c => ({ id: Number(c.id), username: c.username, status: c.status || 'active' }))
+    .sort((a, b) => a.username.localeCompare(b.username));
+
+  const convs = (readDb('chat_conversations') || [])
+    .filter(c => c && Number(c.owner_agent_id) === aid && (c.type === 'agent_group' || c.type === 'agent_channel'))
+    .map(c => ({
+      id: Number(c.id),
+      type: c.type,
+      title: c.title || (c.type === 'agent_channel' ? 'Channel' : 'Client Group'),
+      member_count: Math.max(0, (Array.isArray(c.participants) ? c.participants.length : 1) - 1)
+    }));
+
+  res.json({
+    storage: { ...storage, agent_used_bytes: agentUsedBytes },
+    methods: items.map(m => ({
+      id: Number(m.id),
+      app_name: m.app_name,
+      description: m.description || '',
+      links: Array.isArray(m.links) ? m.links : [],
+      default_hours: Number(m.default_hours || 3),
+      active: m.active !== false,
+      has_video: Boolean(m.video_file && safeResolveVaultVideoPath(m.video_file) && fs.existsSync(safeResolveVaultVideoPath(m.video_file))),
+      video_size: Number(m.video_size || 0),
+      original_name: m.original_name || '',
+      created_at: m.created_at,
+      updated_at: m.updated_at || m.created_at
+    })),
+    requests: requests.slice(0, 200),
+    active_grants_count: activeGrants.length,
+    pending_requests_count: requests.filter(r => r.status === 'pending').length,
+    clients,
+    groups: convs
+  });
+});
+
+// ── AGENT: Upload / Create New Method (Disk-Streamed, 25GB + 15GB Free Guard) ─
+app.post('/api/method-vault/agent/items', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent') {
+    return res.status(403).json({ error: 'Forbidden. Agent account required.' });
+  }
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Apps Method Video Vault access is not enabled for your account.' });
+  }
+
+  // Pre-flight storage & VPS disk safety check BEFORE receiving upload
+  const preStats = getMethodVaultStorageStats();
+  if (preStats.vps_low_disk) {
+    return res.status(507).json({ error: 'VPS free disk space is below the 15 GB safety limit. Delete older videos before uploading to protect main system data.' });
+  }
+  if (preStats.cap_reached) {
+    return res.status(507).json({ error: '25 GB Method Vault storage cap reached. Please delete older videos to free space.' });
+  }
+
+  methodVaultVideoUpload.single('video')(req, res, (uploadErr) => {
+    if (uploadErr) {
+      if (req.file && req.file.filename) unlinkVaultVideoSafe(req.file.filename);
+      if (uploadErr.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Video exceeds maximum single-file limit of 500 MB.' });
+      }
+      return res.status(400).json({ error: uploadErr.message || 'Video upload failed.' });
+    }
+
+    const uploadedFile = req.file || null;
+    const cleanupUploaded = () => {
+      if (uploadedFile && uploadedFile.filename) unlinkVaultVideoSafe(uploadedFile.filename);
+    };
+
+    try {
+      const appName = String(req.body?.app_name || '').trim().slice(0, 100);
+      if (!appName) {
+        cleanupUploaded();
+        return res.status(400).json({ error: 'App Name is required.' });
+      }
+      const description = String(req.body?.description || '').trim().slice(0, 2000);
+      const links = sanitizeMethodLinks(req.body?.links);
+      const rawHours = Number(req.body?.default_hours);
+      const defaultHours = (Number.isFinite(rawHours) && rawHours >= 0.25 && rawHours <= 168) ? Math.round(rawHours * 100) / 100 : 3;
+      const active = String(req.body?.active ?? 'true') !== 'false';
+
+      if (!uploadedFile && !description && links.length === 0) {
+        return res.status(400).json({ error: 'Please attach a video, method description, or at least one link.' });
+      }
+
+      // Post-upload hard 25 GB & 15 GB free-disk verification
+      if (uploadedFile) {
+        const postStats = getMethodVaultStorageStats();
+        if (postStats.used_bytes > METHOD_VAULT_MAX_BYTES) {
+          cleanupUploaded();
+          return res.status(507).json({ error: 'Upload rejected: exceeds the 25 GB Method Vault storage cap. Delete older videos to free space.' });
+        }
+        if (postStats.vps_low_disk) {
+          cleanupUploaded();
+          return res.status(507).json({ error: 'Upload rejected: VPS free disk space dropped below the 15 GB safety threshold.' });
+        }
+      }
+
+      const items = readDb('method_vault_items') || [];
+      const nowIso = new Date().toISOString();
+      const ext = uploadedFile ? path.extname(uploadedFile.filename).toLowerCase() : '';
+      const record = {
+        id: nextId(items, 'method_vault_items'),
+        agent_id: Number(sessionUser.id),
+        agent_username: sessionUser.username,
+        app_name: appName,
+        description,
+        links,
+        default_hours: defaultHours,
+        active,
+        video_file: uploadedFile ? uploadedFile.filename : '',
+        video_mime: uploadedFile ? resolveMethodMimeFromExt(ext, uploadedFile.mimetype) : '',
+        video_size: uploadedFile ? Number(uploadedFile.size || 0) : 0,
+        original_name: uploadedFile ? String(uploadedFile.originalname || '').slice(0, 140) : '',
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+
+      items.unshift(record);
+      writeDb('method_vault_items', items);
+      logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${record.video_size ? Math.round(record.video_size / 1048576 * 10) / 10 + ' MB' : 'text/links only'})`, 'method_vault_items');
+
+      res.json({ success: true, item: record, storage: getMethodVaultStorageStats() });
+    } catch (err) {
+      cleanupUploaded();
+      console.error('[METHOD-VAULT] Save error:', err);
+      res.status(500).json({ error: 'Failed to save app method.' });
+    }
+  });
+});
+
+// ── AGENT: Chunked Video Upload (768KB chunks — bypasses strict Nginx 1M/50M limits & survives slow internet) ─
+const MEDIA_VAULT_TMP_DIR = path.join(MEDIA_VAULT_ROOT, 'tmp');
+const methodVaultChunkSessions = new Map();
+const METHOD_VAULT_CHUNK_LIMIT = 4 * 1024 * 1024;
+const methodVaultChunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: METHOD_VAULT_CHUNK_LIMIT, files: 1 }
+});
+
+function cleanupStaleChunkSessions() {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [uid, sess] of methodVaultChunkSessions.entries()) {
+    if (!sess || sess.updatedAt < cutoff) {
+      try { if (sess && sess.tmpPath && fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
+      methodVaultChunkSessions.delete(uid);
+    }
+  }
+}
+
+app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Apps Method Video Vault access is not enabled for your account.' });
+  }
+  cleanupStaleChunkSessions();
+
+  const preStats = getMethodVaultStorageStats();
+  if (preStats.vps_low_disk) {
+    return res.status(507).json({ error: 'VPS free disk space is below the 15 GB safety limit. Delete older videos before uploading.' });
+  }
+  if (preStats.cap_reached) {
+    return res.status(507).json({ error: '25 GB Method Vault storage cap reached. Please delete older videos to free space.' });
+  }
+
+  const fileName = String(req.body?.file_name || '').trim();
+  const fileSize = Number(req.body?.file_size || 0);
+  const fileMime = String(req.body?.file_mime || '').toLowerCase();
+  const ext = path.extname(fileName).toLowerCase();
+
+  if (!fileName || !METHOD_VAULT_ALLOWED_EXT.has(ext)) {
+    return res.status(400).json({ error: 'Only MP4, WebM, MOV, or M4V video files are allowed.' });
+  }
+  if (fileMime && !METHOD_VAULT_ALLOWED_MIME.has(fileMime) && fileMime !== 'application/octet-stream') {
+    return res.status(400).json({ error: 'Unsupported video file type.' });
+  }
+  if (!Number.isFinite(fileSize) || fileSize <= 0 || fileSize > METHOD_VAULT_MAX_FILE_BYTES) {
+    return res.status(413).json({ error: 'Video exceeds maximum single-file limit of 500 MB.' });
+  }
+  if ((preStats.used_bytes + fileSize) > METHOD_VAULT_MAX_BYTES) {
+    return res.status(507).json({ error: 'This video exceeds the remaining 25 GB Method Vault storage cap. Delete older videos first.' });
+  }
+
+  try {
+    ensureMethodVaultDir();
+    if (!fs.existsSync(MEDIA_VAULT_TMP_DIR)) fs.mkdirSync(MEDIA_VAULT_TMP_DIR, { recursive: true });
+    const uploadId = `mvup_${Number(sessionUser.id)}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+    const tmpPath = path.join(MEDIA_VAULT_TMP_DIR, `${uploadId}.part`);
+    fs.writeFileSync(tmpPath, Buffer.alloc(0));
+    methodVaultChunkSessions.set(uploadId, {
+      uploadId,
+      agentId: Number(sessionUser.id),
+      originalName: fileName.slice(0, 140),
+      ext,
+      mime: resolveMethodMimeFromExt(ext, fileMime),
+      expectedSize: fileSize,
+      receivedBytes: 0,
+      nextChunkIndex: 0,
+      tmpPath,
+      updatedAt: Date.now()
+    });
+    res.json({ success: true, upload_id: uploadId, chunk_size: 768 * 1024 });
+  } catch (err) {
+    console.error('[METHOD-VAULT] upload-init error:', err);
+    res.status(500).json({ error: 'Could not initialize video upload.' });
+  }
+});
+
+app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  methodVaultChunkUpload.single('chunk')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Chunk upload failed.' });
+    const uploadId = String(req.body?.upload_id || '').trim();
+    const chunkIndex = parseInt(req.body?.chunk_index, 10);
+    const sess = methodVaultChunkSessions.get(uploadId);
+    if (!sess || Number(sess.agentId) !== Number(sessionUser.id)) {
+      return res.status(404).json({ error: 'Upload session expired or not found. Please retry.' });
+    }
+    if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
+      return res.status(400).json({ error: 'Empty upload chunk.' });
+    }
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return res.status(400).json({ error: 'Invalid chunk index.' });
+    }
+    // Idempotent retry support: if client retries an already-written chunk, accept cleanly
+    if (chunkIndex < sess.nextChunkIndex) {
+      sess.updatedAt = Date.now();
+      return res.json({ success: true, received_bytes: sess.receivedBytes, duplicate: true });
+    }
+    if (chunkIndex !== sess.nextChunkIndex) {
+      return res.status(409).json({ error: 'Chunk out of order. Please retry upload.' });
+    }
+    if ((sess.receivedBytes + req.file.buffer.length) > Math.min(METHOD_VAULT_MAX_FILE_BYTES, sess.expectedSize + 1024)) {
+      try { if (fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
+      methodVaultChunkSessions.delete(uploadId);
+      return res.status(413).json({ error: 'Uploaded video exceeded expected size limit.' });
+    }
+    try {
+      fs.appendFileSync(sess.tmpPath, req.file.buffer);
+      sess.receivedBytes += req.file.buffer.length;
+      sess.nextChunkIndex += 1;
+      sess.updatedAt = Date.now();
+      res.json({ success: true, received_bytes: sess.receivedBytes });
+    } catch (ioErr) {
+      console.error('[METHOD-VAULT] upload-chunk write error:', ioErr);
+      res.status(500).json({ error: 'Failed writing video chunk to storage.' });
+    }
+  });
+});
+
+app.post('/api/method-vault/agent/upload-complete', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const uploadId = String(req.body?.upload_id || '').trim();
+  const sess = methodVaultChunkSessions.get(uploadId);
+  if (!sess || Number(sess.agentId) !== Number(sessionUser.id)) {
+    return res.status(404).json({ error: 'Upload session not found or expired.' });
+  }
+
+  let finalFilename = '';
+  const cleanupAll = () => {
+    methodVaultChunkSessions.delete(uploadId);
+    try { if (sess.tmpPath && fs.existsSync(sess.tmpPath)) fs.unlinkSync(sess.tmpPath); } catch (_) {}
+    if (finalFilename) unlinkVaultVideoSafe(finalFilename);
+  };
+
+  try {
+    const appName = String(req.body?.app_name || '').trim().slice(0, 100);
+    if (!appName) {
+      cleanupAll();
+      return res.status(400).json({ error: 'App Name is required.' });
+    }
+    const description = String(req.body?.description || '').trim().slice(0, 2000);
+    const links = sanitizeMethodLinks(req.body?.links);
+    const rawHours = Number(req.body?.default_hours);
+    const defaultHours = (Number.isFinite(rawHours) && rawHours >= 0.25 && rawHours <= 168) ? Math.round(rawHours * 100) / 100 : 3;
+    const active = String(req.body?.active ?? 'true') !== 'false';
+
+    if (!fs.existsSync(sess.tmpPath)) {
+      cleanupAll();
+      return res.status(400).json({ error: 'Uploaded file is missing. Please retry.' });
+    }
+
+    ensureMethodVaultDir();
+    finalFilename = `mv_${Number(sessionUser.id)}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${sess.ext}`;
+    const finalPath = safeResolveVaultVideoPath(finalFilename);
+    if (!finalPath) {
+      cleanupAll();
+      return res.status(500).json({ error: 'Invalid vault path.' });
+    }
+
+    fs.renameSync(sess.tmpPath, finalPath);
+    methodVaultChunkSessions.delete(uploadId);
+
+    const postStats = getMethodVaultStorageStats();
+    if (postStats.used_bytes > METHOD_VAULT_MAX_BYTES) {
+      unlinkVaultVideoSafe(finalFilename);
+      return res.status(507).json({ error: 'Upload rejected: exceeds the 25 GB Method Vault storage cap. Delete older videos to free space.' });
+    }
+    if (postStats.vps_low_disk) {
+      unlinkVaultVideoSafe(finalFilename);
+      return res.status(507).json({ error: 'Upload rejected: VPS free disk space dropped below the 15 GB safety threshold.' });
+    }
+
+    const stat = fs.statSync(finalPath);
+    const items = readDb('method_vault_items') || [];
+    const nowIso = new Date().toISOString();
+    const record = {
+      id: nextId(items, 'method_vault_items'),
+      agent_id: Number(sessionUser.id),
+      agent_username: sessionUser.username,
+      app_name: appName,
+      description,
+      links,
+      default_hours: defaultHours,
+      active,
+      video_file: finalFilename,
+      video_mime: sess.mime,
+      video_size: Number(stat.size || sess.receivedBytes || 0),
+      original_name: sess.originalName,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    items.unshift(record);
+    writeDb('method_vault_items', items);
+    logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${Math.round(record.video_size / 1048576 * 10) / 10} MB)`, 'method_vault_items');
+
+    res.json({ success: true, item: record, storage: getMethodVaultStorageStats() });
+  } catch (err) {
+    cleanupAll();
+    console.error('[METHOD-VAULT] upload-complete error:', err);
+    res.status(500).json({ error: 'Failed to finalize uploaded video.' });
+  }
+});
+
+// ── AGENT: Update Method Details / Active Toggle ────────────────
+app.patch('/api/method-vault/agent/items/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const aid = Number(sessionUser.id);
+  const id = Number(req.params.id);
+  const items = readDb('method_vault_items') || [];
+  const idx = items.findIndex(m => m && Number(m.id) === id && Number(m.agent_id) === aid);
+  if (idx === -1) return res.status(404).json({ error: 'Method not found.' });
+
+  const b = req.body || {};
+  if (b.app_name !== undefined) {
+    const nm = String(b.app_name || '').trim().slice(0, 100);
+    if (!nm) return res.status(400).json({ error: 'App Name cannot be empty.' });
+    items[idx].app_name = nm;
+  }
+  if (b.description !== undefined) items[idx].description = String(b.description || '').trim().slice(0, 2000);
+  if (b.links !== undefined) items[idx].links = sanitizeMethodLinks(b.links);
+  if (b.default_hours !== undefined) {
+    const h = Number(b.default_hours);
+    if (!Number.isFinite(h) || h < 0.25 || h > 168) return res.status(400).json({ error: 'Default timer must be between 0.25 and 168 hours.' });
+    items[idx].default_hours = Math.round(h * 100) / 100;
+  }
+  if (b.active !== undefined) items[idx].active = Boolean(b.active);
+  items[idx].updated_at = new Date().toISOString();
+  writeDb('method_vault_items', items);
+
+  res.json({ success: true, item: items[idx] });
+});
+
+// ── AGENT: Delete Method & Free Disk Space Immediately ──────────
+app.delete('/api/method-vault/agent/items/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const aid = Number(sessionUser.id);
+  const id = Number(req.params.id);
+  const items = readDb('method_vault_items') || [];
+  const idx = items.findIndex(m => m && Number(m.id) === id && Number(m.agent_id) === aid);
+  if (idx === -1) return res.status(404).json({ error: 'Method not found.' });
+
+  const removed = items[idx];
+  if (removed.video_file) unlinkVaultVideoSafe(removed.video_file);
+  items.splice(idx, 1);
+  writeDb('method_vault_items', items);
+
+  // Revoke any active grants pointing to this deleted method
+  const grants = readDb('method_vault_grants') || [];
+  let gDirty = false;
+  for (const g of grants) {
+    if (g && Number(g.method_id) === id && !g.revoked) {
+      g.revoked = true;
+      gDirty = true;
+    }
+  }
+  if (gDirty) writeDb('method_vault_grants', grants);
+
+  logAudit(sessionUser.username || 'Agent', 'Delete Method Vault Item', `Deleted "${removed.app_name}" and freed disk storage`, 'method_vault_items');
+  res.json({ success: true, storage: getMethodVaultStorageStats() });
+});
+
+// ── AGENT: Approve or Decline a Client Method Request ───────────
+app.post('/api/method-vault/agent/requests/:id/resolve', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const aid = Number(sessionUser.id);
+  const reqId = Number(req.params.id);
+  const requests = readDb('method_vault_requests') || [];
+  const rIdx = requests.findIndex(r => r && Number(r.id) === reqId && Number(r.agent_id) === aid);
+  if (rIdx === -1) return res.status(404).json({ error: 'Request not found.' });
+
+  const reqItem = requests[rIdx];
+  if (reqItem.status !== 'pending') {
+    return res.status(409).json({ error: `Request #${reqId} is already ${reqItem.status}.` });
+  }
+
+  const action = String(req.body?.action || '').trim().toLowerCase();
+  if (action !== 'approve' && action !== 'decline') {
+    return res.status(400).json({ error: 'action must be "approve" or "decline".' });
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (action === 'decline') {
+    const reason = String(req.body?.reason || '').trim().slice(0, 300);
+    requests[rIdx] = {
+      ...reqItem,
+      status: 'declined',
+      decline_reason: reason,
+      resolved_at: nowIso,
+      resolved_by: sessionUser.username
+    };
+    writeDb('method_vault_requests', requests);
+
+    sendInstantNotification({
+      recipient_role: 'client',
+      recipient_id: Number(reqItem.client_id),
+      recipient_username: reqItem.client_username,
+      title: `App Method Request Declined (${reqItem.app_name})`,
+      message: `Your request for ${reqItem.app_name} method was declined by ${sessionUser.username}${reason ? ` — Reason: ${reason}` : ''}.`,
+      type: 'system',
+      category: 'general',
+      action_page: 'dashboard',
+      actor_role: 'Agent',
+      actor_name: sessionUser.username
+    });
+    return res.json({ success: true, request: requests[rIdx] });
+  }
+
+  // Approve: lookup method + client + create timed grant + send straight to Client's 1-to-1 Live Chat!
+  const items = readDb('method_vault_items') || [];
+  const methodItem = items.find(m => m && Number(m.id) === Number(reqItem.method_id) && Number(m.agent_id) === aid);
+  if (!methodItem) {
+    return res.status(404).json({ error: 'This app method was deleted from your Vault storage.' });
+  }
+
+  const clients = readDb('clients') || [];
+  const clientRec = clients.find(c => c && Number(c.id) === Number(reqItem.client_id) && Number(c.agent_id) === aid);
+  if (!clientRec) {
+    return res.status(404).json({ error: 'Client account not found.' });
+  }
+
+  const rawMinutes = Number(req.body?.duration_minutes);
+  const rawHours = Number(req.body?.duration_hours);
+  let durationMinutes = Math.round(Number(methodItem.default_hours || 3) * 60);
+  if (Number.isFinite(rawMinutes) && rawMinutes >= 5 && rawMinutes <= 10080) {
+    durationMinutes = Math.round(rawMinutes);
+  } else if (Number.isFinite(rawHours) && rawHours >= 0.1 && rawHours <= 168) {
+    durationMinutes = Math.round(rawHours * 60);
+  }
+  const customNote = String(req.body?.custom_note || '').trim().slice(0, 1200);
+  const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+
+  const { conv } = getOrCreateAgentClientDirectConv(sessionUser, clientRec);
+
+  const grants = readDb('method_vault_grants') || [];
+  const grant = {
+    id: nextId(grants, 'method_vault_grants'),
+    agent_id: aid,
+    method_id: Number(methodItem.id),
+    app_name: methodItem.app_name,
+    scope: 'client',
+    client_id: Number(clientRec.id),
+    client_username: clientRec.username,
+    conversation_id: Number(conv.id),
+    request_id: reqId,
+    duration_minutes: durationMinutes,
+    expires_at: expiresAt,
+    custom_note: customNote,
+    revoked: false,
+    created_at: nowIso
+  };
+  grants.unshift(grant);
+  writeDb('method_vault_grants', grants);
+
+  const chatMsg = postMethodCardToConversation(sessionUser, conv.id, methodItem, grant, customNote);
+
+  requests[rIdx] = {
+    ...reqItem,
+    status: 'approved',
+    duration_minutes: durationMinutes,
+    grant_id: grant.id,
+    expires_at: expiresAt,
+    resolved_at: nowIso,
+    resolved_by: sessionUser.username
+  };
+  writeDb('method_vault_requests', requests);
+
+  const hrsLabel = durationMinutes >= 60
+    ? `${Math.floor(durationMinutes / 60)}h${durationMinutes % 60 ? ' ' + (durationMinutes % 60) + 'm' : ''}`
+    : `${durationMinutes}m`;
+
+  sendInstantNotification({
+    recipient_role: 'client',
+    recipient_id: Number(clientRec.id),
+    recipient_username: clientRec.username,
+    title: `App Method Unlocked: ${methodItem.app_name} (${hrsLabel})`,
+    message: `${sessionUser.username} approved your request and sent ${methodItem.app_name} method to your Live Chat. Auto-hides after ${hrsLabel}.`,
+    type: 'system',
+    category: 'general',
+    action_page: 'live-chat',
+    actor_role: 'Agent',
+    actor_name: sessionUser.username
+  });
+
+  logAudit(sessionUser.username || 'Agent', 'Approve Method Request', `Approved "${methodItem.app_name}" for ${clientRec.username} (${hrsLabel})`, 'method_vault_grants');
+  res.json({ success: true, request: requests[rIdx], grant, conversation_id: conv.id, message_id: chatMsg?.id || null });
+});
+
+// ── AGENT: Send Method Directly to Own Client 1-to-1 Chat OR Client Group/Channel ─
+app.post('/api/method-vault/agent/send', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  const aid = Number(sessionUser.id);
+  const methodId = Number(req.body?.method_id);
+  const items = readDb('method_vault_items') || [];
+  const methodItem = items.find(m => m && Number(m.id) === methodId && Number(m.agent_id) === aid);
+  if (!methodItem) return res.status(404).json({ error: 'App method not found in your storage.' });
+
+  const rawMinutes = Number(req.body?.duration_minutes);
+  const rawHours = Number(req.body?.duration_hours);
+  let durationMinutes = Math.round(Number(methodItem.default_hours || 3) * 60);
+  if (Number.isFinite(rawMinutes) && rawMinutes >= 5 && rawMinutes <= 10080) {
+    durationMinutes = Math.round(rawMinutes);
+  } else if (Number.isFinite(rawHours) && rawHours >= 0.1 && rawHours <= 168) {
+    durationMinutes = Math.round(rawHours * 60);
+  }
+  const customNote = String(req.body?.custom_note || '').trim().slice(0, 1200);
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+
+  const targetConversationId = Number(req.body?.conversation_id || 0);
+  const targetClientId = Number(req.body?.client_id || 0);
+
+  let conv = null;
+  let grantScope = 'client';
+  let grantClientId = null;
+  let grantClientUsername = '';
+  let targetLabel = '';
+
+  if (targetConversationId > 0) {
+    const convs = readDb('chat_conversations') || [];
+    conv = convs.find(c => Number(c.id) === targetConversationId);
+    if (!conv || Number(conv.owner_agent_id) !== aid) {
+      return res.status(403).json({ error: 'Forbidden. You can only send methods to your own client chats or groups.' });
+    }
+    if (conv.type === 'agent_client') {
+      const otherKey = (conv.participants || []).find(k => String(k).startsWith('client:')) || '';
+      const cid = Number(otherKey.split(':')[1] || 0);
+      const clientRec = (readDb('clients') || []).find(c => Number(c.id) === cid && Number(c.agent_id) === aid);
+      if (!clientRec) return res.status(404).json({ error: 'Target client not found.' });
+      grantScope = 'client';
+      grantClientId = cid;
+      grantClientUsername = clientRec.username;
+      targetLabel = clientRec.username;
+    } else if (conv.type === 'agent_group' || conv.type === 'agent_channel') {
+      grantScope = 'conversation';
+      targetLabel = conv.title || 'Client Group';
+    } else {
+      return res.status(400).json({ error: 'Methods can only be sent to your Clients, Client Groups, or Channels.' });
+    }
+  } else if (targetClientId > 0) {
+    const clientRec = (readDb('clients') || []).find(c => c && Number(c.id) === targetClientId && Number(c.agent_id) === aid);
+    if (!clientRec) return res.status(404).json({ error: 'Client not found.' });
+    const created = getOrCreateAgentClientDirectConv(sessionUser, clientRec);
+    conv = created.conv;
+    grantScope = 'client';
+    grantClientId = Number(clientRec.id);
+    grantClientUsername = clientRec.username;
+    targetLabel = clientRec.username;
+  } else {
+    return res.status(400).json({ error: 'Select a target client or client group.' });
+  }
+
+  const grants = readDb('method_vault_grants') || [];
+  const grant = {
+    id: nextId(grants, 'method_vault_grants'),
+    agent_id: aid,
+    method_id: Number(methodItem.id),
+    app_name: methodItem.app_name,
+    scope: grantScope,
+    client_id: grantClientId,
+    client_username: grantClientUsername,
+    conversation_id: Number(conv.id),
+    duration_minutes: durationMinutes,
+    expires_at: expiresAt,
+    custom_note: customNote,
+    revoked: false,
+    created_at: nowIso
+  };
+  grants.unshift(grant);
+  writeDb('method_vault_grants', grants);
+
+  const chatMsg = postMethodCardToConversation(sessionUser, conv.id, methodItem, grant, customNote);
+
+  const hrsLabel = durationMinutes >= 60
+    ? `${Math.floor(durationMinutes / 60)}h${durationMinutes % 60 ? ' ' + (durationMinutes % 60) + 'm' : ''}`
+    : `${durationMinutes}m`;
+
+  if (grantScope === 'client' && grantClientId) {
+    sendInstantNotification({
+      recipient_role: 'client',
+      recipient_id: grantClientId,
+      recipient_username: grantClientUsername,
+      title: `New App Method Sent: ${methodItem.app_name} (${hrsLabel})`,
+      message: `${sessionUser.username} sent ${methodItem.app_name} method to your Live Chat. Auto-hides after ${hrsLabel}.`,
+      type: 'system',
+      category: 'general',
+      action_page: 'live-chat',
+      actor_role: 'Agent',
+      actor_name: sessionUser.username
+    });
+  }
+
+  logAudit(sessionUser.username || 'Agent', 'Send Method Video', `Sent "${methodItem.app_name}" to ${targetLabel} (${hrsLabel})`, 'method_vault_grants');
+  res.json({ success: true, grant, conversation_id: Number(conv.id), message_id: chatMsg?.id || null });
+});
+
+// ── CLIENT: List Active Apps + Active Unlocks + Request History ─
+app.get('/api/method-vault/client/catalog', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'client') {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Apps Method feature is not enabled by your Admin.' });
+  }
+  const clients = readDb('clients') || [];
+  const cl = clients.find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+  const aid = Number(cl.agent_id || sessionUser.agent_id || 0);
+  if (!aid) return res.json({ apps: [], active_unlocks: [], requests: [] });
+
+  const allItems = (readDb('method_vault_items') || []).filter(m => m && Number(m.agent_id) === aid);
+  const itemMap = new Map(allItems.map(m => [Number(m.id), m]));
+
+  // Only Active apps are shown to the client for requesting (never expose video file or content before unlock!)
+  const apps = allItems
+    .filter(m => m.active !== false)
+    .map(m => ({
+      id: Number(m.id),
+      app_name: m.app_name,
+      has_video: Boolean(m.video_file),
+      links_count: Array.isArray(m.links) ? m.links.length : 0
+    }))
+    .sort((a, b) => a.app_name.localeCompare(b.app_name));
+
+  const convs = readDb('chat_conversations') || [];
+  const grants = readDb('method_vault_grants') || [];
+  const activeUnlocks = [];
+  for (const g of grants) {
+    if (!isGrantActiveForClient(g, sessionUser.id, aid, convs)) continue;
+    const m = itemMap.get(Number(g.method_id));
+    if (!m) continue;
+    activeUnlocks.push({
+      grant_id: Number(g.id),
+      method_id: Number(m.id),
+      app_name: m.app_name,
+      description: String(g.custom_note || m.description || ''),
+      links: Array.isArray(m.links) ? m.links : [],
+      has_video: Boolean(m.video_file && safeResolveVaultVideoPath(m.video_file) && fs.existsSync(safeResolveVaultVideoPath(m.video_file))),
+      video_size: Number(m.video_size || 0),
+      scope: g.scope,
+      conversation_id: Number(g.conversation_id || 0),
+      duration_minutes: Number(g.duration_minutes || 0),
+      expires_at: g.expires_at,
+      created_at: g.created_at
+    });
+  }
+
+  const myRequests = (readDb('method_vault_requests') || [])
+    .filter(r => r && Number(r.client_id) === Number(sessionUser.id) && Number(r.agent_id) === aid)
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .slice(0, 30);
+
+  res.json({
+    apps,
+    catalog: apps,
+    active_unlocks: activeUnlocks,
+    requests: myRequests,
+    server_time: new Date().toISOString()
+  });
+});
+
+// ── CLIENT: Submit Single App Method Request ("Need" Button) ────
+app.post('/api/method-vault/client/request', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  if (normRole(sessionUser.role) !== 'client') {
+    return res.status(403).json({ error: 'Forbidden.' });
+  }
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Apps Method feature is not enabled by your Admin.' });
+  }
+  const clients = readDb('clients') || [];
+  const cl = clients.find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+  const aid = Number(cl.agent_id || sessionUser.agent_id || 0);
+  const methodId = Number(req.body?.method_id);
+  if (!aid || !Number.isInteger(methodId) || methodId <= 0) {
+    return res.status(400).json({ error: 'Please select an app first.' });
+  }
+
+  const items = readDb('method_vault_items') || [];
+  const methodItem = items.find(m => m && Number(m.id) === methodId && Number(m.agent_id) === aid && m.active !== false);
+  if (!methodItem) {
+    return res.status(404).json({ error: 'Selected app method is not currently available.' });
+  }
+
+  const requests = readDb('method_vault_requests') || [];
+  const existingPending = requests.find(r =>
+    r &&
+    Number(r.client_id) === Number(sessionUser.id) &&
+    Number(r.agent_id) === aid &&
+    Number(r.method_id) === methodId &&
+    r.status === 'pending'
+  );
+  if (existingPending) {
+    return res.status(409).json({ error: `You already have a pending request for ${methodItem.app_name}. Please wait for Admin approval.` });
+  }
+
+  const nowIso = new Date().toISOString();
+  const rec = {
+    id: nextId(requests, 'method_vault_requests'),
+    agent_id: aid,
+    client_id: Number(sessionUser.id),
+    client_username: sessionUser.username,
+    method_id: methodId,
+    app_name: methodItem.app_name,
+    status: 'pending',
+    decline_reason: '',
+    grant_id: null,
+    created_at: nowIso,
+    resolved_at: null
+  };
+  requests.unshift(rec);
+  writeDb('method_vault_requests', requests);
+
+  sendInstantNotification({
+    recipient_role: 'agent',
+    recipient_id: aid,
+    title: `App Method Request: ${methodItem.app_name}`,
+    message: `Client ${sessionUser.username} requested the method for ${methodItem.app_name}. Open Apps Method Vault to Accept or Decline.`,
+    type: 'system',
+    category: 'general',
+    action_page: 'method-vault',
+    status: 'pending',
+    actor_role: 'Client',
+    actor_name: sessionUser.username,
+    metadata: { method_request_id: rec.id, method_id: methodId, client_id: sessionUser.id }
+  });
+
+  res.json({ success: true, request: rec });
+});
+
+// ── PROTECTED HTTP 206 RANGE VIDEO STREAMING (Timed + Role-Verified) ─
+app.get('/api/method-vault/stream/:id', requireAuth, (req, res) => {
+  const sessionUser = req.sessionUser;
+  const role = normRole(sessionUser.role);
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+
+  const rawId = Number(req.params.id);
+  if (!Number.isInteger(rawId) || rawId <= 0) {
+    return res.status(400).json({ error: 'Invalid video reference.' });
+  }
+
+  const isPreview = String(req.query.preview || '') === '1';
+  const items = readDb('method_vault_items') || [];
+  let methodItem = null;
+
+  if (role === 'agent' && isPreview) {
+    methodItem = items.find(m => m && Number(m.id) === rawId && Number(m.agent_id) === Number(sessionUser.id));
+    if (!methodItem) return res.status(404).json({ error: 'Video not found.' });
+  } else {
+    const grants = readDb('method_vault_grants') || [];
+    const grant = grants.find(g => g && Number(g.id) === rawId);
+    if (!grant) return res.status(404).json({ error: 'Method access not found.' });
+
+    if (role === 'agent') {
+      if (Number(grant.agent_id) !== Number(sessionUser.id)) {
+        return res.status(403).json({ error: 'Forbidden.' });
+      }
+    } else if (role === 'client') {
+      const clients = readDb('clients') || [];
+      const cl = clients.find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+      const aid = Number(cl.agent_id || sessionUser.agent_id || 0);
+      if (!isGrantActiveForClient(grant, sessionUser.id, aid)) {
+        return res.status(403).json({ error: 'Method access timer has expired or been revoked.' });
+      }
+    } else {
+      return res.status(403).json({ error: 'Forbidden.' });
+    }
+
+    methodItem = items.find(m => m && Number(m.id) === Number(grant.method_id));
+    if (!methodItem) return res.status(404).json({ error: 'Video no longer exists.' });
+  }
+
+  const filePath = safeResolveVaultVideoPath(methodItem.video_file);
+  if (!filePath || !fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Video file not found on storage.' });
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    return res.status(404).json({ error: 'Unable to read video file.' });
+  }
+  const fileSize = stat.size;
+  const contentType = methodItem.video_mime || 'video/mp4';
+  const range = req.headers.range;
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Accept-Ranges', 'bytes');
+
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+    if (!match) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+    const start = match[1] ? parseInt(match[1], 10) : 0;
+    const requestedEnd = match[2] ? parseInt(match[2], 10) : Math.min(start + 1024 * 1024 - 1, fileSize - 1);
+    const end = Math.min(requestedEnd, fileSize - 1);
+    if (isNaN(start) || isNaN(end) || start > end || start >= fileSize) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+    const chunkSize = (end - start) + 1;
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': chunkSize,
+      'Content-Type': contentType
+    });
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+    stream.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': contentType
+    });
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+    stream.pipe(res);
+  }
 });
 
 // ── CRITICAL: Safe API 404 handler (Must ALWAYS return JSON, never HTML) ─────

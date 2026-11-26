@@ -105,6 +105,7 @@
       '2fa': 'TwoFactorAuth',
       'audit-logs': 'AuditLogs',
       'app-links': 'AppsLinks',
+      'method-vault': 'MethodVault',
       'live-access': 'LiveAccess'
     },
     client: {
@@ -162,6 +163,7 @@
       smsrangestats: 'detailed-sms',
       smsnumberstats: 'detailed-sms',
       allocationhistory: 'allocation-history',
+      methodvault: 'method-vault',
       liveaccess: 'live-access'
     },
     client: {
@@ -225,6 +227,15 @@
   window.zyPageUrl = urlFor;
   window.zySyncNavHrefs = syncAllNavHrefs;
   window.zyNavClick = function (e, page) {
+    if (page === 'apps-method') {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (!window.ZY_METHOD_VAULT_ACCESS) return false;
+      if (typeof window.zyCloseSidebar === 'function') window.zyCloseSidebar();
+      if (typeof window.zyOpenClientAppsMethodDrawer === 'function') {
+        window.zyOpenClientAppsMethodDrawer();
+      }
+      return false;
+    }
     // Allow native browser new-tab / new-window actions (Ctrl+Click, Cmd+Click, Shift+Click, Middle-Click)
     if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button === 1)) {
       return true;
@@ -284,14 +295,61 @@
 
   let isNavigatingHistory = false;
   let first = true;
+  let historyInitialized = false;
+  let activeRouterPage = pageFromUrl() || 'dashboard';
   const prev = window.loadPage;
+
+  function currentUrlKey() {
+    return `${location.pathname}${location.search || ''}`;
+  }
+
+  function closeOpenOverlaysForBackNav() {
+    let closedAny = false;
+    try {
+      const player = document.getElementById('zy-mv-player-backdrop');
+      if (player && typeof window.zyCloseSecureMethodPlayer === 'function') {
+        window.zyCloseSecureMethodPlayer();
+        closedAny = true;
+      }
+      const drawer = document.getElementById('zy-mv-client-drawer-wrap');
+      if (drawer && drawer.classList.contains('is-open') && typeof window.zyCloseClientAppsMethodDrawer === 'function') {
+        window.zyCloseClientAppsMethodDrawer(true);
+        closedAny = true;
+      }
+      const chatLb = document.getElementById('zy-chat-lightbox');
+      if (chatLb) {
+        chatLb.remove();
+        closedAny = true;
+      }
+      if (typeof window.zyCloseSidebar === 'function') {
+        window.zyCloseSidebar();
+      }
+    } catch (_) {}
+    return closedAny;
+  }
 
   if (typeof prev === 'function') {
     window.loadPage = function (page) {
+      if (page === 'apps-method') {
+        if (!window.ZY_METHOD_VAULT_ACCESS) return;
+        if (typeof window.zyCloseSidebar === 'function') window.zyCloseSidebar();
+        if (typeof window.zyOpenClientAppsMethodDrawer === 'function') {
+          window.zyOpenClientAppsMethodDrawer();
+        }
+        return;
+      }
+      const isInitialCall = first;
       if (first) {
         first = false;
         const want = pageFromUrl();
         if (want && want !== page) page = want;
+      }
+
+      const prevActivePage = activeRouterPage;
+      activeRouterPage = page;
+
+      if (prevActivePage === 'live-chat' && page !== 'live-chat' && window.HumexLiveChat && typeof window.HumexLiveChat.unmount === 'function') {
+        try { window.HumexLiveChat.unmount(); } catch (_) {}
       }
 
       syncBodyPageClass(page);
@@ -304,7 +362,7 @@
       // 2. Delegate to real page renderer
       prev(page);
 
-      // 3. Sync canonical URL & <title> in-place (replaceState prevents browser Back-button history traps on logout/login)
+      // 3. Push browser history entries for real in-app navigation so Back button steps back through pages
       const label = resolveLabel(page);
       if (!isNavigatingHistory) {
         try {
@@ -313,7 +371,21 @@
             const chatMatch = String(location.search || '').match(/[?&]chat=(\d+)/);
             if (chatMatch) targetUrl = `${targetUrl}?chat=${chatMatch[1]}`;
           }
-          history.replaceState({ page, role }, '', targetUrl);
+          const curKey = currentUrlKey();
+          if (isInitialCall || !historyInitialized) {
+            historyInitialized = true;
+            // If user landed directly on a deep subpage (not dashboard), seed Dashboard behind it so Back returns to Dashboard instead of Chrome New Tab
+            if (page && page !== 'dashboard' && (!history.state || !history.state.zySpa)) {
+              history.replaceState({ page: 'dashboard', role, zySpa: true }, '', urlFor('dashboard'));
+              history.pushState({ page, role, zySpa: true }, '', targetUrl);
+            } else {
+              history.replaceState({ page, role, zySpa: true }, '', targetUrl);
+            }
+          } else if (targetUrl !== curKey || (history.state && history.state.page !== page)) {
+            history.pushState({ page, role, zySpa: true }, '', targetUrl);
+          } else {
+            history.replaceState({ page, role, zySpa: true }, '', targetUrl);
+          }
           document.title = formatTitle(page);
         } catch (e) {}
       } else {
@@ -331,12 +403,34 @@
     };
   }
 
-  /* Browser back / forward buttons (popstate) */
+  /* Browser / Mobile Back & Forward buttons (popstate) */
   window.addEventListener('popstate', e => {
-    const page = (e.state && e.state.page) || pageFromUrl() || 'dashboard';
+    const st = e.state || {};
+    // Close any open slide-over drawer / video player / lightbox cleanly on Back
+    const closedOverlay = closeOpenOverlaysForBackNav();
+    const page = st.page || pageFromUrl() || 'dashboard';
+
+    // If Back merely dismissed the Apps Method overlay while staying on the same page, don't reload the page
+    if (closedOverlay && page === activeRouterPage && !st.chatId && page !== 'live-chat') {
+      return;
+    }
+
+    // Smooth in-place Back navigation inside Live Chat (e.g. from open group/client thread back to Chats list)
+    if (activeRouterPage === 'live-chat' && page === 'live-chat' && window.HumexLiveChat && typeof window.HumexLiveChat.handleHistoryPop === 'function') {
+      const m = String(location.search || '').match(/[?&]chat=(\d+)/);
+      const nextChatId = st.chatId ? Number(st.chatId) : (m ? Number(m[1]) : null);
+      window.HumexLiveChat.handleHistoryPop(nextChatId);
+      try { document.title = formatTitle('live-chat'); } catch (_) {}
+      return;
+    }
+
     if (page && typeof prev === 'function') {
       isNavigatingHistory = true;
       try {
+        if (activeRouterPage === 'live-chat' && page !== 'live-chat' && window.HumexLiveChat && typeof window.HumexLiveChat.unmount === 'function') {
+          try { window.HumexLiveChat.unmount(); } catch (_) {}
+        }
+        activeRouterPage = page;
         syncBodyPageClass(page);
         if (typeof window.zyShowSkeleton === 'function') {
           window.zyShowSkeleton(page);
@@ -367,13 +461,22 @@
           const curPage = sessionStorage.getItem(
             role === 'owner' ? 'admin_current_page' : `${role}_current_page`
           ) || 'dashboard';
+          activeRouterPage = curPage;
+          historyInitialized = true;
           syncBodyPageClass(curPage);
-          history.replaceState({ page: curPage, role }, '', urlFor(curPage));
+          history.replaceState({ page: curPage, role, zySpa: true }, '', urlFor(curPage));
           document.title = formatTitle(curPage);
         } catch (e) {}
       } else if (page) {
+        activeRouterPage = page;
+        historyInitialized = true;
         syncBodyPageClass(page);
-        try { document.title = formatTitle(page); } catch (e) {}
+        try {
+          if (!history.state || !history.state.zySpa) {
+            history.replaceState({ page, role, zySpa: true }, '', currentUrlKey());
+          }
+          document.title = formatTitle(page);
+        } catch (e) {}
       }
     }, 350);
   });

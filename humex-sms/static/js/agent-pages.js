@@ -6402,23 +6402,22 @@ window.zyMvSubmitUpload = function() {
 
       uploadId = initRes.upload_id;
       const SAFE_PROXY_CHUNK = 768 * 1024; // Guaranteed under Nginx default 1 MB client_max_body_size
-      const serverChunk = Number(initRes.chunk_size) || (4 * 1024 * 1024);
-      const serverMaxChunk = Number(initRes.max_chunk_size) || (8 * 1024 * 1024);
+      const serverChunk = Number(initRes.chunk_size) || (2 * 1024 * 1024);
+      const serverMaxChunk = Number(initRes.max_chunk_size) || (4 * 1024 * 1024);
 
       // Check cached proxy body-size capability so we NEVER trigger full-file 413 restarts
       let cachedCap = 0;
       try { cachedCap = parseInt(sessionStorage.getItem('zy_mv_proxy_cap') || '0', 10) || 0; } catch (_) {}
 
       let maxAllowedChunk = cachedCap > 0 ? Math.min(serverMaxChunk, cachedCap) : SAFE_PROXY_CHUNK;
-      let currentChunkSize = cachedCap >= 4 * 1024 * 1024
+      let currentChunkSize = cachedCap >= 2 * 1024 * 1024
         ? Math.min(serverChunk, maxAllowedChunk)
         : SAFE_PROXY_CHUNK;
-      let targetConcurrency = cachedCap >= 4 * 1024 * 1024
-        ? Math.max(2, Math.min(6, Number(initRes.concurrency) || 4))
-        : 6; // 6 parallel 768KB streams = 4.5MB simultaneously in flight with ZERO 413 errors!
+      // CRITICAL: Keep concurrency <= 3 so Chrome's 6-connection-per-origin HTTP/1.1 limit ALWAYS leaves 3+ sockets free for tabs & Live Chat!
+      const targetConcurrency = 3;
       let hitProxyLimit = cachedCap > 0 && cachedCap <= SAFE_PROXY_CHUNK;
-      // For larger files (> 6 MB) when proxy cap is unknown, run ONE single 3 MB probe chunk while other workers blast 768 KB
-      let needsSingleProbe = (cachedCap === 0 && file.size > 6 * 1024 * 1024);
+      // Only probe a 2 MB chunk on large files (> 12 MB) when proxy cap is unknown
+      let needsSingleProbe = (cachedCap === 0 && file.size > 12 * 1024 * 1024);
       let probeDispatched = false;
 
       let nextCursor = 0;
@@ -6431,7 +6430,9 @@ window.zyMvSubmitUpload = function() {
       const refreshProgress = (override) => {
         let inflight = 0;
         for (const v of inFlightBytes.values()) inflight += v;
-        setProgress(Math.min(file.size, completedBytes + inflight), file.size, override);
+        // Keep progress <= 96% until all chunks are confirmed and upload-complete starts
+        const capped = Math.min(Math.round(file.size * 0.96), completedBytes + inflight);
+        setProgress(completedBytes >= file.size ? file.size : capped, file.size, override);
       };
 
       const sendRawChunk = (start, end, wid) => new Promise((resolve, reject) => {
@@ -6443,10 +6444,10 @@ window.zyMvSubmitUpload = function() {
         const slice = file.slice(start, end);
         const len = end - start;
         const xhr = new XMLHttpRequest();
-        const url = `/api/method-vault/agent/upload-chunk?upload_id=${encodeURIComponent(uploadId)}&offset=${start}`;
+        const url = `/api/method-vault/agent/upload-chunk?upload_id=${encodeURIComponent(uploadId)}&offset=${start}&len=${len}`;
         xhr.open('POST', url, true);
         xhr.withCredentials = true;
-        xhr.timeout = 120000;
+        xhr.timeout = 60000;
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         xhr.setRequestHeader('X-Upload-Id', uploadId);
         xhr.setRequestHeader('X-Chunk-Offset', String(start));
@@ -6455,17 +6456,39 @@ window.zyMvSubmitUpload = function() {
 
         activeXhrs.add(xhr);
         const t0 = performance.now();
+        let lastActivityTs = Date.now();
+        let settled = false;
+
+        // Per-chunk stall watchdog: if a socket freezes for 25s with 0 progress, abort & retry immediately instead of hanging!
+        const stallTimer = setInterval(() => {
+          if (settled || aborted) { clearInterval(stallTimer); return; }
+          if (Date.now() - lastActivityTs > 25000) {
+            clearInterval(stallTimer);
+            settled = true;
+            activeXhrs.delete(xhr);
+            inFlightBytes.delete(wid);
+            try { xhr.abort(); } catch (_) {}
+            reject(new Error('Upload connection stalled — retrying'));
+          }
+        }, 5000);
+
+        const cleanup = () => {
+          clearInterval(stallTimer);
+          activeXhrs.delete(xhr);
+          inFlightBytes.delete(wid);
+        };
 
         xhr.upload.onprogress = (ev) => {
-          if (aborted) return;
-          // Cap unconfirmed socket-buffer progress at 85% of chunk until server returns 200 OK
+          if (aborted || settled) return;
+          lastActivityTs = Date.now();
           const loadedNow = ev.lengthComputable ? Math.min(Math.round(len * 0.85), ev.loaded) : 0;
           inFlightBytes.set(wid, loadedNow);
           refreshProgress();
         };
         xhr.onload = () => {
-          activeXhrs.delete(xhr);
-          inFlightBytes.delete(wid);
+          if (settled) return;
+          settled = true;
+          cleanup();
           let data = null;
           try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
           if (xhr.status >= 200 && xhr.status < 300 && data && data.success) {
@@ -6478,18 +6501,21 @@ window.zyMvSubmitUpload = function() {
           }
         };
         xhr.onerror = () => {
-          activeXhrs.delete(xhr);
-          inFlightBytes.delete(wid);
-          reject(new Error('Network error during parallel upload'));
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error('Network error during upload'));
         };
         xhr.ontimeout = () => {
-          activeXhrs.delete(xhr);
-          inFlightBytes.delete(wid);
+          if (settled) return;
+          settled = true;
+          cleanup();
           reject(new Error('Chunk upload timed out'));
         };
         xhr.onabort = () => {
-          activeXhrs.delete(xhr);
-          inFlightBytes.delete(wid);
+          if (settled) return;
+          settled = true;
+          cleanup();
           const e = new Error('Upload cancelled');
           e.aborted = true;
           reject(e);
@@ -6503,24 +6529,14 @@ window.zyMvSubmitUpload = function() {
         const start = nextCursor;
         let size = Math.min(currentChunkSize, maxAllowedChunk);
         let isProbe = false;
-        // Dispatch exactly ONE 3 MB probe chunk (after the first 768 KB chunk) to detect 512M Nginx without risking full-file retries
-        if (needsSingleProbe && !probeDispatched && start > 0 && (file.size - start) >= 3 * 1024 * 1024) {
+        if (needsSingleProbe && !probeDispatched && start > 0 && (file.size - start) >= 2 * 1024 * 1024) {
           probeDispatched = true;
           isProbe = true;
-          size = 3 * 1024 * 1024;
+          size = 2 * 1024 * 1024;
         }
         const end = Math.min(file.size, start + size);
         nextCursor = end;
         return { start, end, attempts: 0, isProbe };
-      };
-
-      const workerPromises = [];
-      let spawnedWorkers = 0;
-      const ensureWorkers = () => {
-        while (spawnedWorkers < targetConcurrency && !aborted && !fatalError) {
-          spawnedWorkers += 1;
-          workerPromises.push(runWorker());
-        }
       };
 
       const runWorker = async () => {
@@ -6533,7 +6549,6 @@ window.zyMvSubmitUpload = function() {
             completedBytes += (task.end - task.start);
             refreshProgress();
 
-            // Probe succeeded! Proxy supports large chunks — unlock full 4–8 MB turbo mode for this & future uploads
             if (task.isProbe) {
               needsSingleProbe = false;
               hitProxyLimit = false;
@@ -6543,15 +6558,15 @@ window.zyMvSubmitUpload = function() {
             }
 
             const totalBps = smoothedBps || res.bps;
-            if (!hitProxyLimit && maxAllowedChunk > SAFE_PROXY_CHUNK && totalBps > 4 * 1024 * 1024 && currentChunkSize < maxAllowedChunk) {
-              currentChunkSize = Math.min(maxAllowedChunk, 8 * 1024 * 1024);
-            } else if (!hitProxyLimit && totalBps > 0 && totalBps < 350 * 1024 && currentChunkSize > 1024 * 1024) {
-              currentChunkSize = 1024 * 1024;
+            if (!hitProxyLimit && maxAllowedChunk > SAFE_PROXY_CHUNK && totalBps > 3 * 1024 * 1024 && currentChunkSize < maxAllowedChunk) {
+              currentChunkSize = Math.min(maxAllowedChunk, 4 * 1024 * 1024);
+            } else if (!hitProxyLimit && totalBps > 0 && totalBps < 300 * 1024 && currentChunkSize > SAFE_PROXY_CHUNK) {
+              currentChunkSize = SAFE_PROXY_CHUNK;
             }
           } catch (chunkErr) {
             if (aborted || chunkErr.aborted) return;
 
-            // Proxy 413 Payload Too Large: jump STRAIGHT to safe 768 KB (never retry > 1 MB!) & cache for session
+            // Proxy 413 Payload Too Large: jump STRAIGHT to safe 768 KB & cache for session
             if (chunkErr.httpStatus === 413 && (task.end - task.start) > 512 * 1024) {
               hitProxyLimit = true;
               needsSingleProbe = false;
@@ -6559,14 +6574,12 @@ window.zyMvSubmitUpload = function() {
               const nextLimit = prevLen > SAFE_PROXY_CHUNK ? SAFE_PROXY_CHUNK : 512 * 1024;
               maxAllowedChunk = Math.min(maxAllowedChunk, nextLimit);
               currentChunkSize = maxAllowedChunk;
-              targetConcurrency = 6;
               try { sessionStorage.setItem('zy_mv_proxy_cap', String(maxAllowedChunk)); } catch (_) {}
               const pieces = [];
               for (let p = task.start; p < task.end; p += maxAllowedChunk) {
                 pieces.push({ start: p, end: Math.min(task.end, p + maxAllowedChunk), attempts: 0, isProbe: false });
               }
               for (let idx = pieces.length - 1; idx >= 0; idx--) retryQueue.unshift(pieces[idx]);
-              ensureWorkers();
               continue;
             }
 
@@ -6581,41 +6594,65 @@ window.zyMvSubmitUpload = function() {
               return;
             }
             refreshProgress(`Connection dip — retrying (${task.attempts}/5)…`);
-            await new Promise(r => setTimeout(r, 600 * task.attempts));
+            await new Promise(r => setTimeout(r, 700 * task.attempts));
             if (!aborted && !fatalError) retryQueue.push(task);
           }
         }
       };
 
-      ensureWorkers();
-      let awaitedCount = 0;
-      while (awaitedCount < workerPromises.length) {
-        const batch = workerPromises.slice(awaitedCount);
-        awaitedCount = workerPromises.length;
-        await Promise.all(batch);
-      }
+      const workers = [];
+      for (let w = 0; w < targetConcurrency; w++) workers.push(runWorker());
+      await Promise.all(workers);
 
       if (aborted) return;
       if (fatalError) throw fatalError;
 
-      setProgress(file.size, file.size, 'Finalizing video…');
-      const compRes = await apiFetch('/api/method-vault/agent/upload-complete', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
-          upload_id: uploadId,
-          app_name: appName,
-          description: desc,
-          links,
-          default_hours: defaultHours,
-          active
-        })
-      });
+      // Finalize with explicit 30s timeout + up to 3 automatic retries (never hangs at 99%!)
+      setProgress(file.size, file.size, 'Finalizing & saving to Vault…');
+      let compRes = null;
+      let lastCompErr = '';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (aborted) return;
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const tmr = ctrl ? setTimeout(() => ctrl.abort(), 30000) : null;
+        try {
+          const resp = await fetch('/api/method-vault/agent/upload-complete', {
+            method: 'POST',
+            credentials: 'include',
+            signal: ctrl ? ctrl.signal : undefined,
+            headers: Object.assign({ 'Content-Type': 'application/json', 'X-Agent-ID': String(window.AGENT_ID || '') }, authHeaders),
+            body: JSON.stringify({
+              upload_id: uploadId,
+              app_name: appName,
+              description: desc,
+              links,
+              default_hours: defaultHours,
+              active
+            })
+          });
+          if (tmr) clearTimeout(tmr);
+          let data = null;
+          try { data = await resp.json(); } catch (_) {}
+          if (resp.ok && data && data.success) {
+            compRes = data;
+            break;
+          }
+          lastCompErr = (data && data.error) || `Finalize failed (HTTP ${resp.status})`;
+          if (resp.status >= 400 && resp.status < 500 && resp.status !== 408 && resp.status !== 429) break;
+        } catch (finErr) {
+          if (tmr) clearTimeout(tmr);
+          lastCompErr = (finErr && finErr.name === 'AbortError') ? 'Finalize timed out — retrying…' : (finErr.message || 'Network error finalizing video');
+        }
+        if (attempt < 3) {
+          setProgress(file.size, file.size, `Finalizing video (retry ${attempt + 1}/3)…`);
+          await new Promise(r => setTimeout(r, 900 * attempt));
+        }
+      }
       if (aborted) return;
       if (compRes && compRes.success) {
         await onUploadSuccess();
       } else {
-        onUploadError((compRes && compRes.error) || 'Could not finalize video');
+        onUploadError(lastCompErr || 'Could not finalize video');
       }
     } catch (err) {
       if (aborted) return;
@@ -6642,6 +6679,7 @@ window.zyMvSubmitUpload = function() {
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/method-vault/agent/items', true);
   xhr.withCredentials = true;
+  xhr.timeout = 60000;
   if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
 
   job.abortFn = () => {
@@ -6672,6 +6710,10 @@ window.zyMvSubmitUpload = function() {
   xhr.onerror = () => {
     if (singleAborted) return;
     onUploadError('Network error while uploading video');
+  };
+  xhr.ontimeout = () => {
+    if (singleAborted) return;
+    onUploadError('Upload timed out — please retry');
   };
   xhr.send(fd);
 };

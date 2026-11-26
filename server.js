@@ -6593,7 +6593,7 @@ app.use((req, res, next) => {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Token, X-Agent-ID, X-Client-ID, X-Inbound-Token');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Token, X-Agent-ID, X-Client-ID, X-Inbound-Token, X-Upload-Id, X-Chunk-Offset, X-Chunk-Length');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
@@ -27997,9 +27997,9 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
     res.json({
       success: true,
       upload_id: uploadId,
-      chunk_size: 4 * 1024 * 1024,
-      max_chunk_size: 8 * 1024 * 1024,
-      concurrency: 4,
+      chunk_size: 2 * 1024 * 1024,
+      max_chunk_size: 4 * 1024 * 1024,
+      concurrency: 3,
       mode: 'raw-parallel'
     });
   } catch (err) {
@@ -28010,6 +28010,20 @@ app.post('/api/method-vault/agent/upload-init', requireAuth, (req, res) => {
   }
 });
 
+function writeFullBufferAtOffset(fd, buffer, fileOffset, cb) {
+  let writtenTotal = 0;
+  const step = () => {
+    if (writtenTotal >= buffer.length) return cb(null, writtenTotal);
+    fs.write(fd, buffer, writtenTotal, buffer.length - writtenTotal, fileOffset + writtenTotal, (err, bytesWritten) => {
+      if (err) return cb(err);
+      if (!bytesWritten || bytesWritten <= 0) return cb(new Error('Disk write made no progress'));
+      writtenTotal += bytesWritten;
+      step();
+    });
+  };
+  step();
+}
+
 app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
   const sessionUser = req.sessionUser;
   if (normRole(sessionUser.role) !== 'agent' || !hasMethodVaultAccess(sessionUser)) {
@@ -28019,12 +28033,13 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   const isMultipart = contentType.startsWith('multipart/form-data');
 
-  // FAST PATH: Zero-copy raw binary stream directly into open file descriptor at exact byte offset
+  // FAST PATH: Raw binary chunk collected cleanly and written in a single atomic positional pwrite (zero pause/resume deadlock risk)
   if (!isMultipart) {
     const uploadId = String(req.headers['x-upload-id'] || req.query.upload_id || '').trim();
     const rawOffset = req.headers['x-chunk-offset'] !== undefined ? req.headers['x-chunk-offset'] : req.query.offset;
     const offset = Number(rawOffset);
-    const expectedLenHeader = req.headers['x-chunk-length'] !== undefined ? Number(req.headers['x-chunk-length']) : null;
+    const rawLen = req.headers['x-chunk-length'] !== undefined ? req.headers['x-chunk-length'] : req.query.len;
+    const expectedLenHeader = (rawLen !== undefined && rawLen !== '') ? Number(rawLen) : null;
     const contentLenHeader = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
 
     const sess = methodVaultChunkSessions.get(uploadId);
@@ -28044,91 +28059,64 @@ app.post('/api/method-vault/agent/upload-chunk', requireAuth, (req, res) => {
       }
     }
 
-    let writePos = offset;
-    let totalWritten = 0;
-    let streamEnded = false;
-    let pendingDiskWrites = 0;
+    const parts = [];
+    let receivedLen = 0;
     let finished = false;
-    let slotReleased = false;
     sess.activeWrites += 1;
     sess.updatedAt = Date.now();
-
-    const releaseWriteSlotIfDone = () => {
-      if (!slotReleased && finished && pendingDiskWrites === 0) {
-        slotReleased = true;
-        sess.activeWrites = Math.max(0, sess.activeWrites - 1);
-      }
-    };
 
     const finishOnce = (statusCode, payload) => {
       if (finished) return;
       finished = true;
-      releaseWriteSlotIfDone();
+      sess.activeWrites = Math.max(0, sess.activeWrites - 1);
       if (!res.headersSent) {
         res.setHeader('X-No-Compression', '1');
         res.status(statusCode).json(payload);
       }
     };
 
-    const tryComplete = () => {
-      if (finished || !streamEnded || pendingDiskWrites > 0) return;
-      if (totalWritten <= 0) {
-        return finishOnce(400, { error: 'Empty upload chunk.' });
-      }
-      if (expectedLenHeader !== null && Number.isFinite(expectedLenHeader) && totalWritten !== expectedLenHeader) {
-        return finishOnce(400, { error: 'Incomplete chunk received; please retry.' });
-      }
-      const receivedBytes = recordVaultSegment(sess, offset, offset + totalWritten);
-      finishOnce(200, { success: true, offset, written: totalWritten, received_bytes: receivedBytes });
-    };
-
     req.on('data', (buf) => {
-      if (finished) return;
-      if (!buf || !buf.length) return;
+      if (finished || !buf || !buf.length) return;
       if (sess.aborted || sess.fd === null) {
-        req.pause();
+        req.destroy();
         return finishOnce(409, { error: 'Upload was cancelled.' });
       }
-      if (totalWritten + buf.length > METHOD_VAULT_CHUNK_LIMIT || (writePos + buf.length) > sess.expectedSize) {
-        req.pause();
+      receivedLen += buf.length;
+      if (receivedLen > METHOD_VAULT_CHUNK_LIMIT || (offset + receivedLen) > sess.expectedSize) {
+        req.destroy();
         return finishOnce(413, { error: 'Chunk exceeded allowed size.' });
       }
-
-      const posForWrite = writePos;
-      writePos += buf.length;
-      totalWritten += buf.length;
-      pendingDiskWrites += 1;
-      // Only apply backpressure if disk queue backs up (>=16 buffers in flight); keeps full NIC line-rate!
-      if (pendingDiskWrites >= 16) req.pause();
-
-      fs.write(sess.fd, buf, 0, buf.length, posForWrite, (ioErr, writtenNow) => {
-        pendingDiskWrites -= 1;
-        if (finished) {
-          releaseWriteSlotIfDone();
-          return;
-        }
-        if (ioErr || writtenNow !== buf.length) {
-          console.error('[METHOD-VAULT] raw chunk write error:', ioErr);
-          return finishOnce(500, { error: 'Failed writing video chunk to storage.' });
-        }
-        sess.updatedAt = Date.now();
-        if (streamEnded) {
-          tryComplete();
-        } else if (pendingDiskWrites <= 4 && req.isPaused()) {
-          req.resume();
-        }
-      });
+      parts.push(buf);
+      sess.updatedAt = Date.now();
     });
 
     req.on('end', () => {
-      streamEnded = true;
-      tryComplete();
+      if (finished) return;
+      if (sess.aborted || sess.fd === null) {
+        return finishOnce(409, { error: 'Upload was cancelled.' });
+      }
+      if (receivedLen <= 0) {
+        return finishOnce(400, { error: 'Empty upload chunk.' });
+      }
+      if (expectedLenHeader !== null && Number.isFinite(expectedLenHeader) && receivedLen !== expectedLenHeader) {
+        return finishOnce(400, { error: 'Incomplete chunk received; please retry.' });
+      }
+      const chunkBuf = parts.length === 1 ? parts[0] : Buffer.concat(parts, receivedLen);
+      writeFullBufferAtOffset(sess.fd, chunkBuf, offset, (ioErr) => {
+        if (finished) return;
+        if (ioErr) {
+          console.error('[METHOD-VAULT] raw chunk write error:', ioErr);
+          return finishOnce(500, { error: 'Failed writing video chunk to storage.' });
+        }
+        const receivedBytes = recordVaultSegment(sess, offset, offset + chunkBuf.length);
+        finishOnce(200, { success: true, offset, written: chunkBuf.length, received_bytes: receivedBytes });
+      });
     });
 
     req.on('aborted', () => {
       if (!finished) {
         finished = true;
-        releaseWriteSlotIfDone();
+        sess.activeWrites = Math.max(0, sess.activeWrites - 1);
       }
     });
 

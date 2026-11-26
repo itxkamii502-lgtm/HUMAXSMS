@@ -28,7 +28,7 @@ async function pgSmsRanges() {
   try {
     const [rateCardRes, myNumsRes, policy] = await Promise.all([
       apiFetch('/api/client/rate-card').catch(() => ({ ranges: [] })),
-      apiFetch(`/api/numbers?client_id=${CLIENT_ID}&limit=1`).catch(() => ({ total: 0, data: [] })),
+      apiFetch(CLIENT_ID ? `/api/numbers?client_id=${encodeURIComponent(CLIENT_ID)}&limit=1` : '/api/numbers?limit=1').catch(() => ({ total: 0, data: [] })),
       typeof zyFetchAllocPolicy === 'function' ? zyFetchAllocPolicy() : Promise.resolve({ mode: 'request' })
     ]);
 
@@ -477,7 +477,7 @@ async function pgMyNumbers() {
     </div>`;
 
   const [nums, rateCardRes] = await Promise.all([
-    apiFetch(`/api/numbers?client_id=${CLIENT_ID}&limit=100000`),
+    apiFetch(CLIENT_ID ? `/api/numbers?client_id=${encodeURIComponent(CLIENT_ID)}&limit=100000` : '/api/numbers?limit=100000'),
     apiFetch('/api/client/rate-card').catch(() => ({ ranges: [] }))
   ]);
   ZY_RANGES = Array.isArray(rateCardRes?.ranges) ? rateCardRes.ranges : [];

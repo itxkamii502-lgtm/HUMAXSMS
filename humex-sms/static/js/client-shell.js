@@ -251,7 +251,7 @@ pgDashboard = async function () {
       }
     }
     const [numbersRes, blockedRes, daily, periodStats, rateCardRes, appLinksRes, earnRes, meRes] = await Promise.all([
-      apiFetch(`/api/numbers?client_id=${CLIENT_ID}&limit=1`, { silent: true }).catch(() => ({ total: 0, data: [] })),
+      apiFetch(CLIENT_ID ? `/api/numbers?client_id=${encodeURIComponent(CLIENT_ID)}&limit=1` : '/api/numbers?limit=1', { silent: true }).catch(() => ({ total: 0, data: [] })),
       apiFetch('/api/numbers/blocked', { silent: true }).catch(() => ({ count: 0, data: [] })),
       apiFetch(`/api/sms/daily-stats?client_id=${CLIENT_ID}`, { silent: true }),
       apiFetch(`/api/sms/period-stats?client_id=${CLIENT_ID}`, { silent: true }).catch(() => null),

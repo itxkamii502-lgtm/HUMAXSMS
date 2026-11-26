@@ -204,6 +204,16 @@ if (typeof apiFetch === 'function') {
   apiFetch('/api/auth/me', { silent: true })
     .then(me => {
       if (!me) return;
+      if (me.id != null) {
+        AGENT_ID = me.id;
+        AGENT_USER = Object.assign({}, AGENT_USER || {}, me);
+        AGENT_USERNAME = me.username || AGENT_USERNAME || 'Agent';
+        window.AGENT_ID = AGENT_ID;
+        window.AGENT_USER = AGENT_USER;
+        window.AGENT_USERNAME = AGENT_USERNAME;
+        const uEl = document.getElementById('panel-username-side') || document.getElementById('agent-username');
+        if (uEl) uEl.textContent = AGENT_USERNAME;
+      }
       window.zyRefreshWhitenoiseNav(me);
       if (window.BrandTheme && typeof window.BrandTheme.setUserTheme === 'function') {
         window.BrandTheme.setUserTheme(me.theme_key, me.theme_mode);
@@ -233,7 +243,7 @@ pgDashboard = async function () {
       apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=200`).catch(() => ({ data: [] })),
       apiFetch(`/api/sms/daily-stats?agent_id=${AGENT_ID}`),
       apiFetch(`/api/sms/period-stats?agent_id=${AGENT_ID}`).catch(() => null),
-      apiFetch(`/api/numbers?agent_id=${AGENT_ID}&limit=1`).catch(() => ({ total: 0, data: [] })),
+      apiFetch(AGENT_ID ? `/api/numbers?agent_id=${encodeURIComponent(AGENT_ID)}&limit=1` : '/api/numbers?limit=1').catch(() => ({ total: 0, data: [] })),
       apiFetch('/api/numbers/sms-ranges').catch(() => []),
       apiFetch('/api/app-links?dashboard=1&limit=10', { silent: true }).catch(() => ({ data: [] })),
       apiFetch(`/api/agent/${AGENT_ID}/earnings`).catch(() => null),

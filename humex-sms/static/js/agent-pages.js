@@ -39,7 +39,7 @@ async function pgSmsRanges() {
   try {
     const [rangesRes, myNumsRes, policy] = await Promise.all([
       apiFetch('/api/numbers/sms-ranges').catch(() => []),
-      apiFetch(`/api/numbers?agent_id=${AGENT_ID}&limit=100000`).catch(() => ({ total: 0, data: [] })),
+      apiFetch(AGENT_ID ? `/api/numbers?agent_id=${encodeURIComponent(AGENT_ID)}&limit=100000` : '/api/numbers?limit=100000').catch(() => ({ total: 0, data: [] })),
       typeof zyFetchAllocPolicy === 'function' ? zyFetchAllocPolicy() : Promise.resolve({ mode: 'request' })
     ]);
 
@@ -1000,7 +1000,7 @@ async function pgMySmsNumbers() {
 
 
   const [nums, ranges, clientsRes, crsRes] = await Promise.all([
-    apiFetch(`/api/numbers?agent_id=${AGENT_ID}&limit=100000`),
+    apiFetch(AGENT_ID ? `/api/numbers?agent_id=${encodeURIComponent(AGENT_ID)}&limit=100000` : '/api/numbers?limit=100000'),
     apiFetch('/api/numbers/sms-ranges').catch(() => []),
     apiFetch(`/api/clients?agent_id=${AGENT_ID}&limit=500`).catch(() => ({ data: [] })),
     zyFetchAgentClientRates(true).catch(() => null)
@@ -3748,7 +3748,7 @@ async function pgBulkAdd() {
   const [clientsRes, rangesRes, numsRes, crData] = await Promise.all([
     zyFillClients('ba-client', 'Select Client'),
     apiFetch('/api/numbers/sms-ranges').catch(() => []),
-    apiFetch(`/api/numbers?agent_id=${AGENT_ID}&limit=100000`).catch(() => ({ data: [] })),
+    apiFetch(AGENT_ID ? `/api/numbers?agent_id=${encodeURIComponent(AGENT_ID)}&limit=100000` : '/api/numbers?limit=100000').catch(() => ({ data: [] })),
     zyFetchAgentClientRates().catch(() => null)
   ]);
 

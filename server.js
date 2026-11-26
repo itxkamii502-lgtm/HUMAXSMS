@@ -2504,7 +2504,7 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
 
   // Direct allocations (self-allocate or manual agent assign) not originating from a number request
   const directTodayHistory = history.filter(h => {
-    if (!h || h.quota_reset) return false;
+    if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') return false;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) return false;
@@ -2535,7 +2535,7 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     if (Number.isFinite(ts) && ts >= weekCutoffMs) weeklyEventsMs.push(ts);
   }
   for (const h of history) {
-    if (!h || h.quota_reset) continue;
+    if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') continue;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) continue;
@@ -9231,7 +9231,7 @@ app.get('/api/numbers/sms-ranges', (req, res) => {
 
     const rangeNums = numbers.filter(n => n && matchesRangeRef(n, r.id, rangeName));
     const totalCount = rangeNums.length;
-    const ownerFreeCount = rangeNums.filter(n => !n.agent_id && !n.client_id).length;
+    const ownerFreeCount = rangeNums.filter(n => !n.agent_id && !n.client_id && String(n.status || '').toLowerCase() !== 'blocked').length;
     const heldCount = totalCount - ownerFreeCount;
 
     const base = {
@@ -10093,13 +10093,17 @@ function resetRangeQuotasForRange(targetRange, reason = 'Range numbers reset by 
   if (!targetRange) return { clearedRequests: 0, resetHistory: 0, clearedReturns: 0, resetAt: new Date().toISOString() };
   const nowIso = new Date().toISOString();
   const rid = Number(targetRange.id || 0);
-  const rNameLc = String(targetRange.range_name || targetRange.name || '').trim().toLowerCase();
+  const rawName = String(targetRange.range_name || targetRange.name || '').trim();
+  const rNameLc = rawName.toLowerCase();
+  const rScrubLc = rawName ? scrubWhitenoiseName(rawName, false).trim().toLowerCase() : '';
 
   const matchesTarget = (item) => {
     if (!item) return false;
     if (rid && item.range_id != null && Number(item.range_id) === rid) return true;
-    const iName = String(item.range_name || item.range || item.name || '').trim().toLowerCase();
+    const iRaw = String(item.range_name || item.range || item.name || '').trim();
+    const iName = iRaw.toLowerCase();
     if (rNameLc && iName && iName === rNameLc) return true;
+    if (item.range_id == null && rScrubLc && iName && iName === rScrubLc) return true;
     return false;
   };
 
@@ -10155,6 +10159,186 @@ function resetRangeQuotasForRange(targetRange, reason = 'Range numbers reset by 
   if (retDirty) writeDb('return_requests', retReqs);
 
   return { clearedRequests, resetHistory, clearedReturns, resetAt: nowIso };
+}
+
+// Automatically reset quotas whenever Owner deletes, recalls, or unassigns numbers from any route
+function resetQuotasForOwnerRemovedNumbers(removedNumbers, opts = {}) {
+  const removedList = Array.isArray(removedNumbers) ? removedNumbers.filter(Boolean) : [];
+  if (!removedList.length) return { fullRangeResets: 0, userRangeResets: 0, resetAt: new Date().toISOString() };
+
+  const reason = opts.reason || 'Numbers removed or recalled by Owner';
+  const nowIso = new Date().toISOString();
+  const remaining = Array.isArray(opts.remainingNumbers) ? opts.remainingNumbers : (readDb('numbers') || []);
+  const ranges = readDb('sms_ranges') || [];
+
+  const rangeById = new Map();
+  const rangeByName = new Map();
+  for (const r of ranges) {
+    if (!r) continue;
+    if (r.id != null) rangeById.set(Number(r.id), r);
+    const rn = String(r.range_name || r.name || '').trim().toLowerCase();
+    if (rn) rangeByName.set(rn, r);
+  }
+
+  const affectedRanges = new Map();
+  const affectedUsersByRange = new Map(); // key -> { role, userId, username, rid, rNameLc, rScrubLc }
+  const removedIdSet = new Set(removedList.map(n => Number(n.id)).filter(Number.isFinite));
+
+  for (const n of removedList) {
+    const rid = n.range_id != null && n.range_id !== '' ? Number(n.range_id) : null;
+    const rawRName = String(n.range_name || n.range || '').trim();
+    const rNameLc = rawRName.toLowerCase();
+    const matchedRng = (rid && rangeById.get(rid)) || (rNameLc && rangeByName.get(rNameLc)) || null;
+    const effRid = matchedRng ? Number(matchedRng.id) : rid;
+    const effRawName = (matchedRng && (matchedRng.range_name || matchedRng.name)) || rawRName;
+    const effNameLc = String(effRawName || '').trim().toLowerCase();
+    const effScrubLc = effRawName ? scrubWhitenoiseName(effRawName, false).trim().toLowerCase() : '';
+    const rKey = effRid ? `id:${effRid}` : (effNameLc ? `name:${effNameLc}` : '');
+
+    if (rKey && !affectedRanges.has(rKey)) {
+      affectedRanges.set(rKey, {
+        rng: matchedRng,
+        rid: effRid,
+        rawName: effRawName,
+        nameLc: effNameLc,
+        scrubLc: effScrubLc,
+        hadClientHeld: false
+      });
+    }
+    if (rKey && n.client_id) {
+      affectedRanges.get(rKey).hadClientHeld = true;
+    }
+
+    if (n.client_id && rKey) {
+      const cid = Number(n.client_id);
+      const uKey = `client:${cid}:${rKey}`;
+      if (!affectedUsersByRange.has(uKey)) {
+        affectedUsersByRange.set(uKey, {
+          role: 'client',
+          userId: cid,
+          username: String(n.client_username || n.user || '').trim().toLowerCase(),
+          rid: effRid,
+          nameLc: effNameLc,
+          scrubLc: effScrubLc
+        });
+      }
+    }
+    if (n.agent_id && rKey) {
+      const aid = Number(n.agent_id);
+      const uKey = `agent:${aid}:${rKey}`;
+      if (!affectedUsersByRange.has(uKey)) {
+        affectedUsersByRange.set(uKey, {
+          role: 'agent',
+          userId: aid,
+          username: String(n.agent_username || '').trim().toLowerCase(),
+          rid: effRid,
+          nameLc: effNameLc,
+          scrubLc: effScrubLc
+        });
+      }
+    }
+  }
+
+  // 1. Full range quota reset whenever a range now has 0 remaining numbers OR 0 remaining held numbers after Owner recall/removal
+  let fullRangeResets = 0;
+  let rangesDirty = false;
+  const fullyResetRangeKeys = new Set();
+
+  for (const [rKey, info] of affectedRanges.entries()) {
+    const remForRange = remaining.filter(x => x && matchesRangeRef(x, info.rid, info.rawName));
+    const remClientHeld = remForRange.filter(x => Boolean(x.client_id)).length;
+    const remAnyHeld = remForRange.filter(x => Boolean(x.client_id || x.agent_id)).length;
+    const shouldFullReset = remForRange.length === 0 || (info.hadClientHeld && remClientHeld === 0) || remAnyHeld === 0;
+    if (shouldFullReset) {
+      const targetObj = info.rng || { id: info.rid || 0, range_name: info.rawName };
+      const resetInfo = resetRangeQuotasForRange(targetObj, reason);
+      if (info.rng) {
+        info.rng.numbers_reset_at = resetInfo.resetAt;
+        rangesDirty = true;
+      }
+      fullyResetRangeKeys.add(rKey);
+      fullRangeResets++;
+    }
+  }
+  if (rangesDirty) writeDb('sms_ranges', ranges);
+
+  // 2. Targeted per-user range quota reset for any user whose numbers in a range were deleted/recalled by Owner
+  //    (covers partial recalls/deletions where other clients still hold numbers in the same range)
+  let userRangeResets = 0;
+  const matchUserRange = (item, u) => {
+    if (!item) return false;
+    const rMatch = (u.rid && item.range_id != null && Number(item.range_id) === u.rid)
+      || (u.nameLc && String(item.range_name || item.range || item.name || '').trim().toLowerCase() === u.nameLc)
+      || (item.range_id == null && u.scrubLc && String(item.range_name || item.range || item.name || '').trim().toLowerCase() === u.scrubLc);
+    if (!rMatch) return false;
+    return true;
+  };
+
+  if (affectedUsersByRange.size > 0) {
+    const requests = readDb('number_requests') || [];
+    let reqDirty = false;
+    for (const r of requests) {
+      if (!r || r.quota_reset) continue;
+      for (const u of affectedUsersByRange.values()) {
+        const userMatches = u.role === 'client'
+          ? (Number(r.client_id) === u.userId || (String(r.requester_role || '').toLowerCase() === 'client' && Number(r.requester_id) === u.userId))
+          : (String(r.requester_role || '').toLowerCase() === 'agent' && Number(r.agent_id || r.requester_id) === u.userId);
+        if (!userMatches) continue;
+        if (!matchUserRange(r, u)) continue;
+        r.quota_reset = true;
+        r.quota_reset_at = nowIso;
+        if (String(r.status || '').toLowerCase() === 'pending') {
+          r.status = 'cancelled';
+          r.resolved_at = nowIso;
+          r.cancelled_reason = reason;
+        }
+        reqDirty = true;
+        userRangeResets++;
+        break;
+      }
+    }
+    if (reqDirty) writeDb('number_requests', requests);
+
+    const history = readDb('allocation_history') || [];
+    let histDirty = false;
+    for (const h of history) {
+      if (!h || h.quota_reset) continue;
+      const hRole = String(h.to_role || '').toLowerCase();
+      for (const u of affectedUsersByRange.values()) {
+        if (hRole && hRole !== u.role) continue;
+        const userMatches = (h.to_user_id != null && Number(h.to_user_id) === u.userId)
+          || (h.target_id != null && Number(h.target_id) === u.userId)
+          || (u.username && String(h.to_user || '').trim().toLowerCase() === u.username);
+        if (!userMatches) continue;
+        if (!matchUserRange(h, u)) continue;
+        h.quota_reset = true;
+        h.quota_reset_at = nowIso;
+        histDirty = true;
+        userRangeResets++;
+        break;
+      }
+    }
+    if (histDirty) writeDb('allocation_history', history);
+  }
+
+  // 3. Cancel any stale pending return_requests referencing deleted/recalled number IDs
+  if (removedIdSet.size > 0) {
+    const retReqs = readDb('return_requests') || [];
+    let retDirty = false;
+    for (const rr of retReqs) {
+      if (!rr || String(rr.status || '').toLowerCase() !== 'pending') continue;
+      const rrIds = Array.isArray(rr.number_ids) ? rr.number_ids.map(Number) : [];
+      if (rrIds.some(id => removedIdSet.has(id))) {
+        rr.status = 'cancelled';
+        rr.resolved_at = nowIso;
+        rr.resolution_note = reason;
+        retDirty = true;
+      }
+    }
+    if (retDirty) writeDb('return_requests', retReqs);
+  }
+
+  return { fullRangeResets, userRangeResets, resetAt: nowIso };
 }
 
 // Delete Numbers Only for a specific SMS Range (keeps range, rates & SMS logs intact; auto-resets client holds/quotas/limits; PIN-protected Owner-only)
@@ -10327,6 +10511,7 @@ app.post('/api/numbers/import-to-range', (req, res) => {
     const duplicates = [];
     const targetRangeId = Number(rng.id);
     const targetRangeName = rng.range_name || rng.name || rng.country || 'Range';
+    const hadZeroNumbersBefore = !numbers.some(n => n && matchesRangeRef(n, targetRangeId, targetRangeName));
     const isWnTargetRng = isWhitenoiseRecord(rng);
     const targetPtInfo = resolveRangeActivePayterms(rng, isWnTargetRng);
     const targetPtMeta = getPaytermMeta(targetPtInfo.primary_payterm);
@@ -10389,6 +10574,11 @@ app.post('/api/numbers/import-to-range', (req, res) => {
     if (added.length > 0) {
       numbers.push(...added);
       writeDb('numbers', numbers);
+      if (hadZeroNumbersBefore) {
+        const resetInfo = resetRangeQuotasForRange(rng, 'Fresh numbers added to empty range by Owner');
+        rng.numbers_reset_at = resetInfo.resetAt;
+        writeDb('sms_ranges', ranges);
+      }
       logAudit('Admin', 'Import Numbers', `Imported ${added.length} numbers to range "${targetRangeName}" (skipped ${duplicates.length} duplicate(s))`, 'Numbers');
     }
 
@@ -11085,6 +11275,7 @@ app.post('/api/numbers/smart-sheet-commit', requireAuth, (req, res) => {
       }
 
       const targetRangeName = rng.range_name || rng.name || rng.country || `Range #${rng.id}`;
+      const hadZeroNumbersBefore = !numbersDb.some(n => n && matchesRangeRef(n, rng.id, targetRangeName));
       const isWnTarget = isWhitenoiseRecord(rng);
       const grpPt = isWnTarget ? 'Monthly' : normalizePaytermKey(rng.payterm || rng.payout_schedule || 'Weekly');
       const grpMeta = getPaytermMeta(grpPt);
@@ -11127,6 +11318,12 @@ app.post('/api/numbers/smart-sheet-commit', requireAuth, (req, res) => {
           notes: `Smart Sheet Import (${cached.filename})`
         });
         insertedHere++;
+      }
+
+      if (insertedHere > 0 && hadZeroNumbersBefore) {
+        const resetInfo = resetRangeQuotasForRange(rng, 'Fresh numbers added to empty range by Owner');
+        rng.numbers_reset_at = resetInfo.resetAt;
+        writeDb('sms_ranges', ranges);
       }
 
       grp.imported = true;
@@ -13927,14 +14124,46 @@ function registerPaginatedCrud(routePath, tableName) {
       }
     } else if (tableName === 'numbers') {
       if (isAgent) {
-        data = data.filter(n => Number(n.agent_id) === Number(sessionUser.id));
+        const myAgentId = Number(sessionUser.id);
+        const myAgentIdStr = String(sessionUser.id);
+        const myClients = (readDb('clients') || []).filter(c => c && (Number(c.agent_id) === myAgentId || String(c.agent_id) === myAgentIdStr));
+        const myClientIds = new Set(myClients.map(c => String(c.id)));
+        data = data.filter(n =>
+          Number(n.agent_id) === myAgentId ||
+          String(n.agent_id) === myAgentIdStr ||
+          (n.client_id != null && myClientIds.has(String(n.client_id)))
+        );
       } else if (isClient) {
-        data = data.filter(n => Number(n.client_id) === Number(sessionUser.id) || (n.user && String(n.user).toLowerCase() === String(sessionUser.username).toLowerCase()));
+        const myClientId = Number(sessionUser.id);
+        const myClientIdStr = String(sessionUser.id);
+        const myClientUser = String(sessionUser.username || '').trim().toLowerCase();
+        data = data.filter(n =>
+          Number(n.client_id) === myClientId ||
+          String(n.client_id) === myClientIdStr ||
+          (myClientUser && n.user && String(n.user).trim().toLowerCase() === myClientUser)
+        );
       }
       if (!isOwner && !hasWhitenoiseAccess(sessionUser)) {
         const wnRangesMap = buildRangesLookupMap();
         const wnTags = getWhitenoiseProviderTags();
-        data = data.filter(n => !isWhitenoiseRecord(n, wnRangesMap, wnTags));
+        data = data.filter(n => {
+          if (!isWhitenoiseRecord(n, wnRangesMap, wnTags)) return true;
+          // Never hide a number assigned to this user if its linked range is NOT a Whitenoise range
+          // (prevents dual-payterm Weekly+Monthly ranges from hiding allocated numbers)
+          const linkedRng = (n.range_id != null && wnRangesMap.get(`id:${Number(n.range_id)}`))
+            || (n.range_name && wnRangesMap.get(`name:${String(n.range_name).trim().toLowerCase()}`))
+            || null;
+          const explicitlyWn = n.is_whitenoise === true
+            || String(n.source || '').trim().toLowerCase() === 'whitenoise'
+            || (n.whitenoise_sms_id != null && n.whitenoise_sms_id !== '')
+            || wnTags.has(String(n.provider || '').trim().toLowerCase())
+            || String(n.provider || '').trim().toLowerCase().includes('whitenoise')
+            || String(n.range_name || '').trim().toLowerCase().includes('whitenoise');
+          if (!explicitlyWn && linkedRng && !isWhitenoiseRecord(linkedRng, null, wnTags)) {
+            return true;
+          }
+          return false;
+        });
       }
     } else if (tableName === 'number_transfers') {
       if (isAgent) {
@@ -13994,15 +14223,18 @@ function registerPaginatedCrud(routePath, tableName) {
       const allAgents = search ? (readDb('agents') || []) : [];
       const allRanges = (req.query.range || (isOwner && req.query.provider) || search) ? (readDb('sms_ranges') || []) : [];
 
-      if (agent_id && (isOwner || (isAgent && String(sessionUser.id) === String(agent_id)))) {
+      const cleanAgentIdParam = (agent_id && agent_id !== 'null' && agent_id !== 'undefined') ? String(agent_id).trim() : '';
+      const cleanClientIdParam = (req.query.client_id && req.query.client_id !== 'null' && req.query.client_id !== 'undefined') ? String(req.query.client_id).trim() : '';
+
+      if (cleanAgentIdParam && isOwner) {
         const agClientIds = new Set(
-          allClients.filter(c => String(c.agent_id) === String(agent_id)).map(c => String(c.id))
+          allClients.filter(c => String(c.agent_id) === cleanAgentIdParam).map(c => String(c.id))
         );
         const agClientUsers = new Set(
-          allClients.filter(c => String(c.agent_id) === String(agent_id) && c.username).map(c => String(c.username).toLowerCase())
+          allClients.filter(c => String(c.agent_id) === cleanAgentIdParam && c.username).map(c => String(c.username).toLowerCase())
         );
         data = data.filter(d => {
-          if (String(d.agent_id) === String(agent_id)) return true;
+          if (String(d.agent_id) === cleanAgentIdParam) return true;
           if (d.client_id && agClientIds.has(String(d.client_id))) return true;
           const u = String(d.client_username || d.user || '').toLowerCase();
           if (u && agClientUsers.has(u)) return true;
@@ -14010,8 +14242,8 @@ function registerPaginatedCrud(routePath, tableName) {
         });
       }
 
-      if (req.query.client_id) {
-        const targetClId = String(req.query.client_id);
+      if (!isClient && cleanClientIdParam) {
+        const targetClId = cleanClientIdParam;
         const targetCl = allClients.find(c => String(c.id) === targetClId);
         const targetClUser = targetCl && targetCl.username ? String(targetCl.username).toLowerCase() : '';
         data = data.filter(d => {
@@ -15118,13 +15350,25 @@ function registerPaginatedCrud(routePath, tableName) {
       cleanupDeletedAccountData(tableName, target);
     }
 
+    const removedItems = [];
     const filtered = data.filter(x => {
-      if (!isNaN(numId) && x.id === numId) return false;
-      if (String(x.id) === rawId) return false;
-      if (tableName === 'numbers' && String(x.number) === rawId) return false;
+      const shouldRemove = (!isNaN(numId) && x.id === numId)
+        || String(x.id) === rawId
+        || (tableName === 'numbers' && String(x.number) === rawId);
+      if (shouldRemove) {
+        removedItems.push(x);
+        return false;
+      }
       return true;
     });
     writeDb(tableName, filtered);
+    if (tableName === 'numbers' && removedItems.length > 0 && normRole(sessionUser?.role) === 'owner') {
+      resetQuotasForOwnerRemovedNumbers(removedItems, {
+        mode: 'delete',
+        reason: 'Number deleted by Owner',
+        remainingNumbers: filtered
+      });
+    }
     logAudit(sessionUser.username || 'Owner', `Delete ${tableName}`, `Deleted item #${rawId}${target && target.username ? ` (${target.username})` : ''}`, tableName);
     res.json({ success: true });
   });
@@ -15198,12 +15442,26 @@ app.post('/api/numbers/bulk-delete-many', (req, res) => {
     let numbers = readDb('numbers') || [];
     const initialCount = numbers.length;
     const idSet = new Set(numberIds.map(String));
-    numbers = numbers.filter(n => !idSet.has(String(n.id)) && !idSet.has(String(n.number)));
+    const removedItems = [];
+    numbers = numbers.filter(n => {
+      if (idSet.has(String(n.id)) || idSet.has(String(n.number))) {
+        removedItems.push(n);
+        return false;
+      }
+      return true;
+    });
     writeDb('numbers', numbers);
     const deleted = initialCount - numbers.length;
+    if (removedItems.length > 0) {
+      resetQuotasForOwnerRemovedNumbers(removedItems, {
+        mode: 'delete',
+        reason: 'Numbers deleted by Owner',
+        remainingNumbers: numbers
+      });
+    }
 
     logAudit('Admin', 'Bulk Delete Numbers', `Deleted ${deleted} numbers`, 'Numbers');
-    res.json({ success: true, deleted });
+    res.json({ success: true, deleted, quotas_reset: removedItems.length > 0 });
   } catch (err) {
     console.error('bulk-delete-many error:', err);
     res.status(500).json({ error: err.message });
@@ -15226,24 +15484,33 @@ app.post('/api/numbers/bulk-unassign-many', requireAuth, (req, res) => {
     const idSet = new Set(numberIds.map(String));
 
     let count = 0;
+    const ownerRecalled = [];
     numbers = numbers.map(n => {
       if (idSet.has(String(n.id)) || idSet.has(String(n.number))) {
         if (isAgent) {
           if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
           count++;
           // Agent unallocates from Client back into Agent pool (agent_id remains)
-          return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+          return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
         } else if (isOwner) {
           count++;
+          ownerRecalled.push(n);
           // Owner recalls downward into Owner pool
-          return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', status: 'active' };
+          return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, assigned_at: null, assigned_date: null, user: '', return_pending: false, return_request_id: null, status: 'active' };
         }
       }
       return n;
     });
     writeDb('numbers', numbers);
+    if (isOwner && ownerRecalled.length > 0) {
+      resetQuotasForOwnerRemovedNumbers(ownerRecalled, {
+        mode: 'recall',
+        reason: 'Numbers recalled by Owner',
+        remainingNumbers: numbers
+      });
+    }
 
-    res.json({ success: true, revoked: count, count });
+    res.json({ success: true, revoked: count, count, quotas_reset: isOwner && ownerRecalled.length > 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -15284,6 +15551,7 @@ app.post('/api/numbers/revoke', requireAuth, (req, res) => {
     }
     let revokedCount = 0;
     const revokedByTarget = new Map();
+    const ownerRecalled = [];
 
     numbers = numbers.map(n => {
       if (reqCount && revokedCount >= reqCount) return n;
@@ -15314,13 +15582,21 @@ app.post('/api/numbers/revoke', requireAuth, (req, res) => {
       }
 
       if (isAgent) {
-        return { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+        return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
       } else {
-        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, status: 'active' };
+        ownerRecalled.push(n);
+        return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
       }
     });
 
     writeDb('numbers', numbers);
+    if (isOwner && ownerRecalled.length > 0) {
+      resetQuotasForOwnerRemovedNumbers(ownerRecalled, {
+        mode: 'recall',
+        reason: 'Numbers recalled by Owner',
+        remainingNumbers: numbers
+      });
+    }
     for (const info of revokedByTarget.values()) {
       const rngTxt = Array.from(info.ranges).slice(0, 3).join(', ') || 'Direct';
       sendInstantNotification({
@@ -15339,7 +15615,7 @@ app.post('/api/numbers/revoke', requireAuth, (req, res) => {
         actor_name: sessionUser.username || (isAgent ? 'Agent' : 'Owner')
       });
     }
-    res.json({ success: true, revoked: revokedCount, count: revokedCount });
+    res.json({ success: true, revoked: revokedCount, count: revokedCount, quotas_reset: isOwner && ownerRecalled.length > 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -15368,7 +15644,7 @@ app.post('/api/numbers/:id/unassign', requireAuth, (req, res) => {
         }
         const prevClientId = n.client_id ? Number(n.client_id) : null;
         const prevClientUser = n.client_username || n.user || '';
-        numbers[idx] = { ...n, client_id: null, client_name: '', client_username: '', user: '', status: 'assigned' };
+        numbers[idx] = { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
         writeDb('numbers', numbers);
         if (prevClientId) {
           sendInstantNotification({
@@ -15389,8 +15665,13 @@ app.post('/api/numbers/:id/unassign', requireAuth, (req, res) => {
         }
       } else if (isOwner) {
         const prevAgentId = n.agent_id ? Number(n.agent_id) : null;
-        numbers[idx] = { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, status: 'active' };
+        numbers[idx] = { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
         writeDb('numbers', numbers);
+        resetQuotasForOwnerRemovedNumbers([n], {
+          mode: 'recall',
+          reason: 'Number recalled by Owner',
+          remainingNumbers: numbers
+        });
         if (prevAgentId) {
           sendInstantNotification({
             recipient_role: 'agent',
@@ -16821,6 +17102,7 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
             client_id: null,
             client_name: '',
             client_username: '',
+            client_assigned_at: null,
             user: '',
             payterm: ptMeta.key,
             payout_schedule: ptMeta.schedule,
@@ -16829,9 +17111,15 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
             ...(isWn ? { is_whitenoise: true } : {}),
             agent_rate: agRate,
             payout: agRate,
+            return_pending: false,
+            return_request_id: null,
+            inactivity_flagged: false,
+            blocked_at: null,
+            blocked_reason: '',
             status: 'assigned',
             assigned_at: bulkAssignedIso,
             assigned_date: bulkAssignedIso,
+            allocated_at: bulkAssignedIso,
             notes
           };
         } else {
@@ -16867,9 +17155,16 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
             fx_usd_to_pkr: rp.fx_usd_to_pkr,
             rate_source: rp.source,
             client_payterm: ptMeta.key,
+            return_pending: false,
+            return_request_id: null,
+            inactivity_flagged: false,
+            blocked_at: null,
+            blocked_reason: '',
             status: 'assigned',
             assigned_at: bulkAssignedIso,
             assigned_date: bulkAssignedIso,
+            client_assigned_at: bulkAssignedIso,
+            allocated_at: bulkAssignedIso,
             notes
           };
         }
@@ -17030,7 +17325,7 @@ function resolveAllocationPolicy(sessionUser) {
   } else {
     const history = readDb('allocation_history') || [];
     used_today = Array.isArray(history) ? history.filter(h => {
-      if (!h || h.quota_reset) return false;
+      if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') return false;
       const d = String(h.timestamp || h.created || '').slice(0, 10);
       if (d !== todayIso) return false;
       if (h.to_user_id != null && Number(h.to_user_id) === Number(sessionUser.id) && String(h.to_role || '').toLowerCase() === sRole) return true;
@@ -17099,7 +17394,11 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const cleanRangeName = String(range_name || '').trim().toLowerCase();
     const wnRangesMap = buildRangesLookupMap();
     const wnTags = getWhitenoiseProviderTags();
-    const matchedRng = (rId && wnRangesMap.get(rId)) || (readDb('sms_ranges') || []).find(r => cleanRangeName && String(r.range_name || r.name || '').trim().toLowerCase() === cleanRangeName);
+    const allSmsRanges = readDb('sms_ranges') || [];
+    const matchedRng = (rId && wnRangesMap.get(`id:${rId}`))
+      || allSmsRanges.find(r => cleanRangeName && String(r.range_name || r.name || '').trim().toLowerCase() === cleanRangeName)
+      || allSmsRanges.find(r => cleanRangeName && scrubWhitenoiseName(r.range_name || r.name || '', false).trim().toLowerCase() === cleanRangeName)
+      || null;
     const wnAllowed = hasWhitenoiseAccess(sessionUser);
     const isWnMatched = (matchedRng && isWhitenoiseRecord(matchedRng, wnRangesMap, wnTags)) || isWhitenoiseText(cleanRangeName);
 
@@ -17108,7 +17407,14 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     }
 
     const ptInfo = matchedRng ? resolveRangeActivePayterms(matchedRng, isWnMatched) : { active_payterms: ['Weekly'], primary_payterm: 'Weekly' };
-    const targetPayterm = isWnMatched ? 'Monthly' : normalizePaytermKey(payterm || ptInfo.primary_payterm);
+    let targetPayterm = isWnMatched ? 'Monthly' : normalizePaytermKey(payterm || ptInfo.primary_payterm);
+    if (!isOwner && !wnAllowed && targetPayterm === 'Monthly') {
+      if (ptInfo.active_payterms.includes('Weekly')) {
+        targetPayterm = 'Weekly';
+      } else {
+        return res.status(403).json({ error: 'Forbidden. CDR 2 / Monthly Route access is not enabled for your account.' });
+      }
+    }
     if (matchedRng && payterm && !isWnMatched && !ptInfo.active_payterms.includes(targetPayterm)) {
       return res.status(400).json({ error: `Payterm "${targetPayterm}" is not available on "${matchedRng.range_name || range_name}". Allowed: ${ptInfo.active_payterms.join(', ')}.` });
     }
@@ -17194,13 +17500,20 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
     const fromOwnerPoolCount = toAllocate.length - fromAgentPoolCount;
     const now = new Date().toISOString();
 
+    const sessUserIdNum = Number(sessionUser.id) || sessionUser.id;
     toAllocate.forEach(n => {
-      const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
+      const isWn = isWnMatched || isWhitenoiseRecord(n, wnRangesMap, wnTags);
       const effTerm = isWn ? 'Monthly' : targetPayterm;
       const ptMeta = getPaytermMeta(effTerm);
+      const rngForStamp = (n.range_id != null && wnRangesMap.get(`id:${Number(n.range_id)}`)) || matchedRng || null;
+      if (!n.range_id && (effMatchRid || (rngForStamp && rngForStamp.id))) {
+        n.range_id = effMatchRid || Number(rngForStamp.id);
+      }
+      if (!n.range_name && (effMatchRname || (rngForStamp && (rngForStamp.range_name || rngForStamp.name)))) {
+        n.range_name = effMatchRname || (rngForStamp && (rngForStamp.range_name || rngForStamp.name));
+      }
       if (isClient) {
         const effAgId = effClientAgentId || (n.agent_id ? Number(n.agent_id) : null);
-        const rngForStamp = (n.range_id != null && wnRangesMap.get(`id:${Number(n.range_id)}`)) || matchedRng || null;
         const agentRateUsd = Number(n.agent_rate || 0)
           || (rngForStamp ? getRangeAgentRate(rngForStamp, ptMeta.key) : 0)
           || Number((rngForStamp && (rngForStamp.agent_rate || rngForStamp.rate || rngForStamp.payout)) || 0);
@@ -17212,7 +17525,7 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
           agentRateUsd,
           clientRecord: clRecForStamp
         });
-        n.client_id = sessionUser.id;
+        n.client_id = sessUserIdNum;
         n.client_username = sessionUser.username;
         n.client_name = sessionUser.full_name || sessionUser.username;
         n.user = sessionUser.username;
@@ -17236,10 +17549,28 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
           n.rate_source = rp.source || 'agent_client_rates';
         }
       } else if (isAgent) {
-        n.agent_id = sessionUser.id;
+        const agentRateUsd = Number(n.agent_rate || 0)
+          || (rngForStamp ? getRangeAgentRate(rngForStamp, ptMeta.key) : 0)
+          || Number((rngForStamp && (rngForStamp.agent_rate || rngForStamp.rate || rngForStamp.payout)) || 0);
+        n.agent_id = sessUserIdNum;
         n.agent_username = sessionUser.username;
+        n.agent_name = sessionUser.full_name || sessionUser.username;
+        n.client_id = null;
+        n.client_username = '';
+        n.client_name = '';
+        n.client_assigned_at = null;
+        n.user = sessionUser.username;
+        if (agentRateUsd > 0) {
+          n.agent_rate = agentRateUsd;
+          n.payout = agentRateUsd;
+        }
       }
       n.status = 'assigned';
+      n.return_pending = false;
+      n.return_request_id = null;
+      n.inactivity_flagged = false;
+      n.blocked_at = null;
+      n.blocked_reason = '';
       n.payterm = ptMeta.key;
       n.payout_schedule = ptMeta.schedule;
       n.cycle_days = ptMeta.cycle_days;
@@ -17250,29 +17581,35 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
       }
       n.assigned_at = now;
       n.assigned_date = now;
+      n.allocated_at = now;
       n.updated_at = now;
     });
 
     writeDb('numbers', numbers);
 
+    const canonicalRangeId = effMatchRid || (toAllocate[0] && toAllocate[0].range_id ? Number(toAllocate[0].range_id) : null);
+    const canonicalRangeName = effMatchRname || toAllocate[0]?.range_name || range_name || 'General Range';
     const history = readDb('allocation_history') || [];
     const historyEntry = {
       id: nextId(history, 'allocation_history'),
       from_user: isClient && fromAgentPoolCount > 0 && fromOwnerPoolCount === 0
         ? (agRecForStamp?.username || 'Agent Pool')
         : 'Owner',
-      agent_id: isClient ? effClientAgentId : (isAgent ? sessionUser.id : null),
+      agent_id: isClient ? effClientAgentId : (isAgent ? sessUserIdNum : null),
       agent_username: isClient ? (agRecForStamp?.username || '') : (isAgent ? sessionUser.username : ''),
-      to_user_id: sessionUser.id,
+      to_user_id: sessUserIdNum,
       to_user: sessionUser.username,
       to_role: sessionUser.role,
-      range_name: range_name || toAllocate[0]?.range_name || 'General Range',
+      range_id: canonicalRangeId,
+      range_name: canonicalRangeName,
       payterm: targetPayterm,
       count: toAllocate.length,
+      number_ids: toAllocate.map(n => n.id),
       from_agent_pool: fromAgentPoolCount,
       from_owner_pool: fromOwnerPoolCount,
       sample_start: toAllocate[0]?.number,
       sample_end: toAllocate[toAllocate.length - 1]?.number,
+      status: 'completed',
       timestamp: now,
       created: now
     };
@@ -17281,7 +17618,13 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
 
     logAudit(sessionUser.username, 'Range Self-Allocation', `Self-allocated ${toAllocate.length} numbers from ${historyEntry.range_name}`, 'Numbers');
 
-    res.json({ success: true, allocated: toAllocate.length, range_name: historyEntry.range_name });
+    res.json({
+      success: true,
+      allocated: toAllocate.length,
+      allocated_count: toAllocate.length,
+      range_id: canonicalRangeId,
+      range_name: scrubWhitenoiseName(canonicalRangeName, isOwner)
+    });
   } catch (err) {
     console.error('agent-allocate error:', err);
     res.status(500).json({ error: err.message });
@@ -17460,7 +17803,7 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
           : { payterm: ptMeta.key, payout_schedule: ptMeta.schedule, cycle_days: ptMeta.cycle_days, hold_days: ptMeta.hold_days };
         if (targetType === 'agent') {
           const agRate = getRangeAgentRate(rObj, ptMeta.key);
-          return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', user: toUsername, status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
+          return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: toUsername, return_pending: false, return_request_id: null, inactivity_flagged: false, blocked_at: null, blocked_reason: '', status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
         } else {
           const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
           const candClTerm = normalizePaytermKey(req.body.client_payterm || allocPayterm || n.client_payterm || n.payterm || ptInfo.primary_payterm);
@@ -17494,6 +17837,11 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
             client_currency: rp.client_currency,
             fx_usd_to_pkr: rp.fx_usd_to_pkr,
             rate_source: rp.source,
+            return_pending: false,
+            return_request_id: null,
+            inactivity_flagged: false,
+            blocked_at: null,
+            blocked_reason: '',
             status: 'assigned',
             assigned_at: bulkAllocNowIso,
             assigned_date: bulkAllocNowIso,
@@ -17627,9 +17975,11 @@ app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => 
     }
 
     let revertedCount = 0;
+    const recalledItems = [];
     numbers = numbers.map(n => {
       if (!numIdSet.has(Number(n.id))) return n;
       revertedCount++;
+      recalledItems.push(n);
 
       if (toRole === 'client' || n.client_id) {
         const agentStillAssigned = Boolean(n.agent_id || entry.agent_id);
@@ -17638,8 +17988,11 @@ app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => 
           client_id: null,
           client_name: '',
           client_username: '',
+          client_assigned_at: null,
           client_rate: 0,
           user: n.agent_name || n.agent_username || '',
+          return_pending: false,
+          return_request_id: null,
           status: agentStillAssigned ? 'assigned' : 'unassigned'
         };
       } else {
@@ -17648,22 +18001,37 @@ app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => 
           client_id: null,
           client_name: '',
           client_username: '',
+          client_assigned_at: null,
           client_rate: 0,
           agent_id: null,
           agent_name: '',
           agent_username: '',
           agent_rate: 0,
+          assigned_at: null,
+          assigned_date: null,
           user: '',
+          return_pending: false,
+          return_request_id: null,
           status: 'unassigned'
         };
       }
     });
 
     writeDb('numbers', numbers);
+    const undoneNowIso = new Date().toISOString();
     entry.status = 'undone';
-    entry.undone_at = new Date().toISOString();
+    entry.undone_at = undoneNowIso;
     entry.undone_by = sessionUser.username;
+    entry.quota_reset = true;
+    entry.quota_reset_at = undoneNowIso;
     writeDb('allocation_history', history);
+    if (isOwner && recalledItems.length > 0) {
+      resetQuotasForOwnerRemovedNumbers(recalledItems, {
+        mode: 'recall',
+        reason: 'Allocation undone by Owner',
+        remainingNumbers: numbers
+      });
+    }
 
     // Notify the recipient user
     if (entry.to_user) {
@@ -18713,6 +19081,11 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
           cycle_days: ptMeta.cycle_days,
           hold_days: ptMeta.hold_days,
           ...(isWn ? { is_whitenoise: true } : {}),
+          return_pending: false,
+          return_request_id: null,
+          inactivity_flagged: false,
+          blocked_at: null,
+          blocked_reason: '',
           status: 'assigned',
           assigned_at: assignNowIso,
           assigned_date: assignNowIso,
@@ -18752,6 +19125,11 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
         cycle_days: ptMeta.cycle_days,
         hold_days: ptMeta.hold_days,
         ...(isWn ? { is_whitenoise: true } : {}),
+        return_pending: false,
+        return_request_id: null,
+        inactivity_flagged: false,
+        blocked_at: null,
+        blocked_reason: '',
         status: 'assigned',
         assigned_at: assignNowIso,
         assigned_date: assignNowIso,
@@ -21741,6 +22119,7 @@ app.post('/api/numbers/blocked/delete', requireAuth, (req, res) => {
 
   const numbers = readDb('numbers') || [];
   let deleted = 0;
+  const removedBlocked = [];
   const remaining = numbers.filter(n => {
     if (!n || !idSet.has(Number(n.id))) return true;
     const isBlockedOrFlagged = String(n.status || '').toLowerCase() === 'blocked' || n.inactivity_flagged === true;
@@ -21748,11 +22127,19 @@ app.post('/api/numbers/blocked/delete', requireAuth, (req, res) => {
       if (Number(n.agent_id) !== Number(sessionUser.id) || !isBlockedOrFlagged) return true;
     }
     deleted++;
+    removedBlocked.push(n);
     return false;
   });
 
   if (deleted > 0) {
     writeDb('numbers', remaining);
+    if (isOwner && removedBlocked.length > 0) {
+      resetQuotasForOwnerRemovedNumbers(removedBlocked, {
+        mode: 'delete',
+        reason: 'Blocked numbers deleted by Owner',
+        remainingNumbers: remaining
+      });
+    }
     logAudit(sessionUser.username, 'Delete Blocked Numbers', `Permanently deleted ${deleted} blocked number(s) from system pool`, 'Numbers');
   }
   res.json({ success: true, deleted });

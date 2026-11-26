@@ -1055,7 +1055,8 @@ window.zySubmitSelfAllocate = async function(rangeName, rangeId) {
       throw new Error(cleanMsg);
     }
     if (typeof closeModal === 'function') closeModal();
-    const msg = res.message || `Allocated ${res.allocated_count || qty} number(s) from ${rangeName}`;
+    const allocatedActual = Number(res.allocated ?? res.allocated_count ?? qty) || 0;
+    const msg = res.message || `Allocated ${allocatedActual} number(s) from ${res.range_name || rangeName}`;
     if (typeof toast === 'function') toast(msg, 'success');
     else if (typeof zyFlash === 'function') zyFlash(msg);
     if (typeof window._zyOnAllocModalDone === 'function') window._zyOnAllocModalDone();

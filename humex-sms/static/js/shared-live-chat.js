@@ -2109,6 +2109,12 @@
         state.seenModal.loading = false;
         state.seenModal.data = data;
         state.seenModal.error = '';
+        if (state.seenModal.activeEmoji && state.seenModal.activeEmoji !== 'all') {
+          const groups = Array.isArray(data.reactions_detail) ? data.reactions_detail : [];
+          if (!groups.some(g => g.emoji === state.seenModal.activeEmoji)) {
+            state.seenModal.activeEmoji = 'all';
+          }
+        }
         renderSeenModalOverlay();
       }
     } catch (err) {
@@ -2120,12 +2126,14 @@
     }
   }
 
-  function openMessageSeenModal(convId, msgId) {
+  function openMessageSeenModal(convId, msgId, initialTab = 'seen', initialEmoji = 'all') {
     state.reactionPickerMsgId = null;
     state.seenModal = {
       loading: true,
       convId: Number(convId),
       msgId: Number(msgId),
+      activeTab: initialTab === 'reactions' ? 'reactions' : 'seen',
+      activeEmoji: initialEmoji || 'all',
       data: null,
       error: ''
     };
@@ -2748,10 +2756,11 @@
         : '';
 
       const reactionsSummary = !m.deleted && Array.isArray(m.reactions_summary) ? m.reactions_summary : [];
+      const canInspectReactInfo = Boolean(isGroupAdmin && isMulti && !m._optimistic);
       const reactionsBarHtml = reactionsSummary.length
         ? `<div class="zy-chat-reactions ${isCh ? 'is-channel-reacts' : (isMine ? 'is-out' : 'is-in')}">
              ${reactionsSummary.map(r => `
-               <button type="button" class="zy-chat-react-chip ${r.me ? 'is-mine' : ''}" data-chip-react="${m.id}" data-emoji="${esc(r.emoji)}" title="Tap to react">
+               <button type="button" class="zy-chat-react-chip ${r.me ? 'is-mine' : ''}" data-chip-react="${m.id}" data-emoji="${esc(r.emoji)}" title="${canInspectReactInfo ? 'Tap to see who reacted' : 'Tap to react'}">
                  <span class="zy-chat-react-em">${esc(r.emoji)}</span>
                  <span class="zy-chat-react-cnt">${Number(r.count || 1)}</span>
                </button>
@@ -3123,7 +3132,13 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (state.selectMode) return;
-        toggleMessageReaction(conv.id, Number(btn.dataset.chipReact), btn.dataset.emoji);
+        const mid = Number(btn.dataset.chipReact);
+        const emoji = btn.dataset.emoji || '';
+        if (isGroupAdmin && isMulti) {
+          openMessageSeenModal(conv.id, mid, 'reactions', emoji || 'all');
+          return;
+        }
+        toggleMessageReaction(conv.id, mid, emoji);
       });
     });
 
@@ -3822,96 +3837,166 @@
     const sm = state.seenModal;
     if (!sm) return '';
     const d = sm.data;
+    const activeTab = sm.activeTab === 'reactions' ? 'reactions' : 'seen';
+    const activeEmoji = sm.activeEmoji || 'all';
+    const reactionGroups = (d && Array.isArray(d.reactions_detail)) ? d.reactions_detail : [];
+    const allReactors = (() => {
+      if (!d) return [];
+      if (Array.isArray(d.reactions_list)) return d.reactions_list;
+      const flat = [];
+      reactionGroups.forEach(g => {
+        if (Array.isArray(g.users)) {
+          g.users.forEach(u => flat.push({ ...u, emoji: u.emoji || g.emoji }));
+        } else if (g.display_name || g.username) {
+          flat.push(g);
+        }
+      });
+      return flat;
+    })();
+    const totalReactionsCount = Number(d && typeof d.reactions_count === 'number' ? d.reactions_count : allReactors.length);
+    const filteredReactors = activeEmoji === 'all'
+      ? allReactors
+      : allReactors.filter(r => r.emoji === activeEmoji);
+    const myKey = state.me ? state.me.key : '';
+
     return `
       <div class="zy-chat-modal-backdrop" id="zy-seen-backdrop">
-        <div class="zy-chat-modal zy-chat-seen-modal" role="dialog" aria-modal="true" aria-label="Message Seen Info">
+        <div class="zy-chat-modal zy-chat-seen-modal" role="dialog" aria-modal="true" aria-label="Message Info">
           <div class="zy-chat-modal-head">
-            <span><i class="fas fa-eye" style="margin-right:6px;color:#0ea5e9;"></i>Message Seen Info</span>
+            <span><i class="fas ${activeTab === 'reactions' ? 'fa-face-smile' : 'fa-eye'}" style="margin-right:6px;color:#0ea5e9;"></i>Message Info</span>
             <button type="button" class="zy-chat-icon-btn" id="zy-seen-close" aria-label="Close"><i class="fas fa-times"></i></button>
           </div>
           <div class="zy-chat-modal-body">
             ${sm.loading ? `
-              <div class="zy-seen-loading"><i class="fas fa-spinner fa-spin"></i> Loading member read status...</div>
+              <div class="zy-seen-loading"><i class="fas fa-spinner fa-spin"></i> Loading message info...</div>
             ` : sm.error ? `
               <div class="zy-seen-error"><i class="fas fa-circle-exclamation"></i> ${esc(sm.error)}</div>
             ` : d ? `
-              <div class="zy-seen-summary-grid">
-                <div class="zy-seen-stat is-total">
-                  <div class="zy-seen-stat-val">${Number(d.total_members || 0)}</div>
-                  <div class="zy-seen-stat-lbl">Total Clients</div>
-                </div>
-                <div class="zy-seen-stat is-seen">
-                  <div class="zy-seen-stat-val">${Number(d.seen_count || 0)}</div>
-                  <div class="zy-seen-stat-lbl">Seen</div>
-                </div>
-                <div class="zy-seen-stat is-unseen">
-                  <div class="zy-seen-stat-val">${Number(d.unseen_count || 0)}</div>
-                  <div class="zy-seen-stat-lbl">Not Seen Yet</div>
-                </div>
+              <div class="zy-seen-tabs" role="tablist">
+                <button type="button" class="zy-seen-tab ${activeTab === 'seen' ? 'is-active' : ''}" data-seen-tab="seen" role="tab" aria-selected="${activeTab === 'seen'}">
+                  <i class="fas fa-eye"></i>
+                  <span>Seen</span>
+                  <span class="zy-seen-tab-cnt">${Number(d.seen_count || 0)}/${Number(d.total_members || 0)}</span>
+                </button>
+                <button type="button" class="zy-seen-tab ${activeTab === 'reactions' ? 'is-active' : ''}" data-seen-tab="reactions" role="tab" aria-selected="${activeTab === 'reactions'}">
+                  <i class="far fa-face-smile"></i>
+                  <span>Reactions</span>
+                  <span class="zy-seen-tab-cnt">${totalReactionsCount}</span>
+                </button>
               </div>
 
-              <div class="zy-seen-sec">
-                <div class="zy-seen-sec-head is-seen">
-                  <i class="fas fa-check-double"></i> Seen By (${(d.seen || []).length})
-                </div>
-                ${(d.seen && d.seen.length) ? `
-                  <div class="zy-seen-list">
-                    ${d.seen.map(u => `
-                      <div class="zy-seen-row">
-                        <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
-                          ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
-                        </div>
-                        <div class="zy-seen-info">
-                          <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
-                          <div class="zy-seen-sub">${u.seen_at ? `Seen ${esc(formatInboxTime(u.seen_at))} · ${esc(formatTime(u.seen_at))}` : 'Seen'}</div>
-                        </div>
-                        <span class="zy-seen-tick is-ok"><i class="fas fa-check-double"></i></span>
-                      </div>
-                    `).join('')}
+              ${activeTab === 'seen' ? `
+                <div class="zy-seen-summary-grid">
+                  <div class="zy-seen-stat is-total">
+                    <div class="zy-seen-stat-val">${Number(d.total_members || 0)}</div>
+                    <div class="zy-seen-stat-lbl">Total Clients</div>
                   </div>
-                ` : `<div class="zy-gd-muted" style="padding:8px 2px;">No members have seen this message yet.</div>`}
-              </div>
-
-              <div class="zy-seen-sec">
-                <div class="zy-seen-sec-head is-unseen">
-                  <i class="far fa-clock"></i> Not Seen Yet (${(d.unseen || []).length})
-                </div>
-                ${(d.unseen && d.unseen.length) ? `
-                  <div class="zy-seen-list">
-                    ${d.unseen.map(u => `
-                      <div class="zy-seen-row">
-                        <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
-                          ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
-                        </div>
-                        <div class="zy-seen-info">
-                          <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
-                          <div class="zy-seen-sub">${u.online ? 'Online · Unread' : 'Offline · Unread'}</div>
-                        </div>
-                        <span class="zy-seen-tick is-wait"><i class="far fa-clock"></i></span>
-                      </div>
-                    `).join('')}
+                  <div class="zy-seen-stat is-seen">
+                    <div class="zy-seen-stat-val">${Number(d.seen_count || 0)}</div>
+                    <div class="zy-seen-stat-lbl">Seen</div>
                   </div>
-                ` : `<div class="zy-gd-muted" style="padding:8px 2px;">All members have seen this message!</div>`}
-              </div>
+                  <div class="zy-seen-stat is-unseen">
+                    <div class="zy-seen-stat-val">${Number(d.unseen_count || 0)}</div>
+                    <div class="zy-seen-stat-lbl">Not Seen Yet</div>
+                  </div>
+                </div>
 
-              ${Array.isArray(d.reactions_detail) && d.reactions_detail.length ? `
                 <div class="zy-seen-sec">
-                  <div class="zy-seen-sec-head">
-                    <i class="far fa-face-smile"></i> Reactions (${d.reactions_detail.length})
+                  <div class="zy-seen-sec-head is-seen">
+                    <i class="fas fa-check-double"></i> Seen By (${(d.seen || []).length})
                   </div>
-                  <div class="zy-seen-list">
-                    ${d.reactions_detail.map(r => `
-                      <div class="zy-seen-row">
-                        <div class="zy-seen-info">
-                          <div class="zy-seen-name">${esc(r.display_name || r.username)}${r.chat_id ? ` <span class="zy-seen-id">ID: ${esc(r.chat_id)}</span>` : ''}</div>
-                          <div class="zy-seen-sub">${r.role === 'agent' ? 'Admin' : 'Client'}</div>
+                  ${(d.seen && d.seen.length) ? `
+                    <div class="zy-seen-list">
+                      ${d.seen.map(u => `
+                        <div class="zy-seen-row">
+                          <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
+                            ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
+                          </div>
+                          <div class="zy-seen-info">
+                            <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
+                            <div class="zy-seen-sub">${u.seen_at ? `Seen ${esc(formatInboxTime(u.seen_at))} · ${esc(formatTime(u.seen_at))}` : 'Seen'}</div>
+                          </div>
+                          <span class="zy-seen-tick is-ok"><i class="fas fa-check-double"></i></span>
                         </div>
-                        <span class="zy-seen-react-em">${esc(r.emoji)}</span>
-                      </div>
+                      `).join('')}
+                    </div>
+                  ` : `<div class="zy-gd-muted" style="padding:8px 2px;">No members have seen this message yet.</div>`}
+                </div>
+
+                <div class="zy-seen-sec">
+                  <div class="zy-seen-sec-head is-unseen">
+                    <i class="far fa-clock"></i> Not Seen Yet (${(d.unseen || []).length})
+                  </div>
+                  ${(d.unseen && d.unseen.length) ? `
+                    <div class="zy-seen-list">
+                      ${d.unseen.map(u => `
+                        <div class="zy-seen-row">
+                          <div class="zy-chat-ava is-sm ${u.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(u.key)};">
+                            ${renderAvatarInner(u.avatar_url || '', u.display_name || u.username, false, Boolean(u.online), false)}
+                          </div>
+                          <div class="zy-seen-info">
+                            <div class="zy-seen-name">${esc(u.display_name || u.username)}${u.chat_id ? ` <span class="zy-seen-id">ID: ${esc(u.chat_id)}</span>` : ''}</div>
+                            <div class="zy-seen-sub">${u.online ? 'Online · Unread' : 'Offline · Unread'}</div>
+                          </div>
+                          <span class="zy-seen-tick is-wait"><i class="far fa-clock"></i></span>
+                        </div>
+                      `).join('')}
+                    </div>
+                  ` : `<div class="zy-gd-muted" style="padding:8px 2px;">All members have seen this message!</div>`}
+                </div>
+              ` : `
+                ${totalReactionsCount > 0 ? `
+                  <div class="zy-react-filter-bar">
+                    <button type="button" class="zy-react-filter-pill ${activeEmoji === 'all' ? 'is-active' : ''}" data-react-filter="all">
+                      <span>All</span>
+                      <span class="zy-react-filter-cnt">${totalReactionsCount}</span>
+                    </button>
+                    ${reactionGroups.map(g => `
+                      <button type="button" class="zy-react-filter-pill ${activeEmoji === g.emoji ? 'is-active' : ''}" data-react-filter="${esc(g.emoji)}">
+                        <span class="zy-react-filter-em">${esc(g.emoji)}</span>
+                        <span class="zy-react-filter-cnt">${Number(g.count || (g.users ? g.users.length : 0))}</span>
+                      </button>
                     `).join('')}
                   </div>
-                </div>
-              ` : ''}
+
+                  <div class="zy-seen-sec">
+                    <div class="zy-seen-sec-head">
+                      <i class="far fa-face-smile"></i> ${activeEmoji === 'all' ? `All Reactions (${filteredReactors.length})` : `Reacted ${esc(activeEmoji)} (${filteredReactors.length})`}
+                    </div>
+                    <div class="zy-seen-list is-tall">
+                      ${filteredReactors.map(r => {
+                        const isSelf = Boolean(myKey && r.key === myKey);
+                        const roleLbl = r.role === 'agent' ? 'Admin' : 'Client';
+                        const timeLbl = r.reacted_at ? `${formatInboxTime(r.reacted_at)} · ${formatTime(r.reacted_at)}` : '';
+                        const subText = isSelf
+                          ? `${roleLbl}${timeLbl ? ` · ${timeLbl}` : ''} · Tap to remove`
+                          : `${roleLbl}${timeLbl ? ` · ${timeLbl}` : (r.online ? ' · Online' : '')}`;
+                        return `
+                          <div class="zy-seen-row ${isSelf ? 'is-self-react' : ''}" ${isSelf ? `data-remove-my-react="${esc(r.emoji)}" role="button" tabindex="0" title="Tap to remove your reaction"` : ''}>
+                            <div class="zy-chat-ava is-sm ${r.avatar_url ? 'has-img' : ''}" style="--ava-bg:${colorForKey(r.key || r.username)};">
+                              ${renderAvatarInner(r.avatar_url || '', r.display_name || r.username, false, Boolean(r.online), false)}
+                            </div>
+                            <div class="zy-seen-info">
+                              <div class="zy-seen-name">
+                                ${esc(r.display_name || r.username || 'Member')}
+                                ${isSelf ? `<span class="zy-seen-you-tag">You</span>` : ''}
+                                ${r.chat_id ? `<span class="zy-seen-id">ID: ${esc(r.chat_id)}</span>` : ''}
+                              </div>
+                              <div class="zy-seen-sub">${esc(subText)}</div>
+                            </div>
+                            <span class="zy-seen-react-em">${esc(r.emoji)}</span>
+                          </div>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+                ` : `
+                  <div class="zy-seen-empty-reacts">
+                    <i class="far fa-face-smile"></i>
+                    <div>No reactions on this message yet.</div>
+                  </div>
+                `}
+              `}
             ` : ''}
           </div>
           <div class="zy-chat-modal-foot">
@@ -3944,6 +4029,39 @@
         if (e.target === bd) closeMessageSeenModal();
       });
     }
+    host.querySelectorAll('[data-seen-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!state.seenModal) return;
+        const nextTab = btn.dataset.seenTab === 'reactions' ? 'reactions' : 'seen';
+        if (state.seenModal.activeTab === nextTab) return;
+        state.seenModal.activeTab = nextTab;
+        renderSeenModalOverlay();
+      });
+    });
+    host.querySelectorAll('[data-react-filter]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!state.seenModal) return;
+        state.seenModal.activeEmoji = btn.dataset.reactFilter || 'all';
+        renderSeenModalOverlay();
+      });
+    });
+    host.querySelectorAll('[data-remove-my-react]').forEach(row => {
+      const removeMine = async () => {
+        if (!state.seenModal) return;
+        const { convId, msgId } = state.seenModal;
+        const emoji = row.dataset.removeMyReact || '';
+        if (!emoji) return;
+        await toggleMessageReaction(convId, msgId, emoji);
+        refreshSeenModalData(convId, msgId);
+      };
+      row.addEventListener('click', removeMine);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          removeMine();
+        }
+      });
+    });
   }
 
   function renderThreadArea(scrollBottom = false) {

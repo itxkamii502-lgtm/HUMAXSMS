@@ -26159,6 +26159,7 @@ app.post('/api/chat/conversations/:id/messages/:msgId/react', requireAuth, (req,
   }
 
   if (!msg.reactions || typeof msg.reactions !== 'object') msg.reactions = {};
+  if (!msg.reaction_times || typeof msg.reaction_times !== 'object') msg.reaction_times = {};
   const alreadyHasSame = Array.isArray(msg.reactions[rawEmoji]) && msg.reactions[rawEmoji].includes(actor.key);
 
   // WhatsApp behavior: 1 active reaction per user per message (tap same emoji to remove, tap another to switch)
@@ -26171,6 +26172,9 @@ app.post('/api/chat/conversations/:id/messages/:msgId/react', requireAuth, (req,
   if (!alreadyHasSame) {
     if (!Array.isArray(msg.reactions[rawEmoji])) msg.reactions[rawEmoji] = [];
     msg.reactions[rawEmoji].push(actor.key);
+    msg.reaction_times[actor.key] = new Date().toISOString();
+  } else {
+    delete msg.reaction_times[actor.key];
   }
 
   writeDb('chat_messages', allMessages);
@@ -26183,7 +26187,7 @@ app.post('/api/chat/conversations/:id/messages/:msgId/react', requireAuth, (req,
   });
 });
 
-// GET /api/chat/conversations/:id/messages/:msgId/seen — Admin-only seen/unseen breakdown for Group & Announcement Channel
+// GET /api/chat/conversations/:id/messages/:msgId/seen — Admin-only seen/unseen & reactions breakdown for Group & Announcement Channel
 app.get('/api/chat/conversations/:id/messages/:msgId/seen', requireAuth, (req, res) => {
   const actor = resolveLiveChatActor(req.sessionUser);
   if (!actor) return res.status(401).json({ error: 'Unauthorized' });
@@ -26228,26 +26232,59 @@ app.get('/api/chat/conversations/:id/messages/:msgId/seen', requireAuth, (req, r
   seen.sort((a, b) => new Date(b.seen_at || 0) - new Date(a.seen_at || 0));
   unseen.sort((a, b) => String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' }));
 
+  const reactTimes = (msg.reaction_times && typeof msg.reaction_times === 'object') ? msg.reaction_times : {};
   const reactions_detail = [];
+  const reactions_list = [];
   if (msg.reactions && typeof msg.reactions === 'object') {
     for (const [emoji, keys] of Object.entries(msg.reactions)) {
       if (!Array.isArray(keys) || !keys.length) continue;
+      const users = keys.map(k => {
+        const base = resolveActorSummaryByKey(k) || {
+          key: k,
+          role: String(k).startsWith('agent:') ? 'agent' : 'client',
+          username: k,
+          display_name: k,
+          chat_id: '',
+          avatar_url: '',
+          online: false
+        };
+        const entry = {
+          ...base,
+          emoji,
+          reacted_at: reactTimes[k] || null
+        };
+        reactions_list.push(entry);
+        return entry;
+      });
+      users.sort((a, b) => {
+        const dt = new Date(b.reacted_at || 0) - new Date(a.reacted_at || 0);
+        if (dt !== 0) return dt;
+        return String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' });
+      });
       reactions_detail.push({
         emoji,
-        count: keys.length,
-        users: keys.map(k => resolveActorSummaryByKey(k) || { key: k, username: k, display_name: k })
+        count: users.length,
+        users
       });
     }
   }
+  reactions_detail.sort((a, b) => b.count - a.count);
+  reactions_list.sort((a, b) => {
+    const dt = new Date(b.reacted_at || 0) - new Date(a.reacted_at || 0);
+    if (dt !== 0) return dt;
+    return String(a.display_name || a.username || '').localeCompare(String(b.display_name || b.username || ''), undefined, { sensitivity: 'base' });
+  });
 
   res.json({
     message_id: msgId,
     total_members: clientKeys.length,
     seen_count: seen.length,
     unseen_count: unseen.length,
+    reactions_count: reactions_list.length,
     seen,
     unseen,
-    reactions_detail
+    reactions_detail,
+    reactions_list
   });
 });
 

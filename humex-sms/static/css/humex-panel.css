@@ -17119,6 +17119,130 @@ body.zy-is-live-chat .zy-chat-input {
   font-size: 19px;
   line-height: 1;
 }
+.zy-seen-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  padding: 4px;
+  border-radius: 11px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 12px;
+}
+.zy-seen-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.zy-seen-tab:hover {
+  color: #0f172a;
+}
+.zy-seen-tab.is-active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+.zy-seen-tab-cnt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  background: #e2e8f0;
+  color: #334155;
+}
+.zy-seen-tab.is-active .zy-seen-tab-cnt {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.zy-react-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.zy-react-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.zy-react-filter-pill:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.zy-react-filter-pill.is-active {
+  background: #eff6ff;
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+.zy-react-filter-em {
+  font-size: 15px;
+  line-height: 1;
+}
+.zy-react-filter-cnt {
+  font-size: 11.5px;
+  font-weight: 800;
+}
+.zy-seen-list.is-tall {
+  max-height: 310px;
+}
+.zy-seen-row.is-self-react {
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+.zy-seen-row.is-self-react:hover {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.zy-seen-you-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  background: #dcfce7;
+  color: #15803d;
+  vertical-align: middle;
+}
+.zy-seen-empty-reacts {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 14px;
+  text-align: center;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+}
+.zy-seen-empty-reacts i {
+  font-size: 28px;
+  color: #94a3b8;
+}
 
 /* Dark Theme Support */
 [data-theme="dark"] .zy-chat-ch-badge,
@@ -17218,6 +17342,52 @@ body.dark .zy-seen-id {
 [data-theme="dark"] .zy-seen-sec-head,
 body.dark .zy-seen-sec-head {
   border-bottom-color: #334155;
+}
+[data-theme="dark"] .zy-seen-tabs,
+body.dark .zy-seen-tabs {
+  background: #0f172a;
+  border-color: #334155;
+}
+[data-theme="dark"] .zy-seen-tab,
+body.dark .zy-seen-tab {
+  color: #94a3b8;
+}
+[data-theme="dark"] .zy-seen-tab.is-active,
+body.dark .zy-seen-tab.is-active {
+  background: #1e293b;
+  color: #f8fafc;
+}
+[data-theme="dark"] .zy-seen-tab-cnt,
+body.dark .zy-seen-tab-cnt {
+  background: #334155;
+  color: #cbd5e1;
+}
+[data-theme="dark"] .zy-seen-tab.is-active .zy-seen-tab-cnt,
+body.dark .zy-seen-tab.is-active .zy-seen-tab-cnt {
+  background: rgba(59, 130, 246, 0.25);
+  color: #93c5fd;
+}
+[data-theme="dark"] .zy-react-filter-pill,
+body.dark .zy-react-filter-pill {
+  background: #1e293b;
+  border-color: #334155;
+  color: #cbd5e1;
+}
+[data-theme="dark"] .zy-react-filter-pill.is-active,
+body.dark .zy-react-filter-pill.is-active {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+[data-theme="dark"] .zy-seen-row.is-self-react:hover,
+body.dark .zy-seen-row.is-self-react:hover {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+[data-theme="dark"] .zy-seen-you-tag,
+body.dark .zy-seen-you-tag {
+  background: rgba(34, 197, 94, 0.22);
+  color: #86efac;
 }
 
 @media (max-width: 768px) {

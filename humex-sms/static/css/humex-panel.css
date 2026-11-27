@@ -17993,6 +17993,38 @@ body.zy-is-live-chat .zy-chat-bubble,
 .zy-chat-bubble.is-out .zy-chat-text {
   color: #ffffff;
 }
+.zy-chat-link {
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  cursor: pointer;
+}
+.zy-chat-link:hover {
+  color: #1e40af;
+  text-decoration-thickness: 2px;
+}
+[data-theme="dark"] .zy-chat-link,
+body.dark .zy-chat-link {
+  color: #60a5fa;
+}
+[data-theme="dark"] .zy-chat-link:hover,
+body.dark .zy-chat-link:hover {
+  color: #93c5fd;
+}
+.zy-chat-bubble.is-out .zy-chat-link,
+[data-theme="dark"] .zy-chat-bubble.is-out .zy-chat-link,
+body.dark .zy-chat-bubble.is-out .zy-chat-link {
+  color: #ffffff;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.82);
+}
+.zy-chat-bubble.is-out .zy-chat-link:hover {
+  color: #e0f2fe;
+  text-decoration-color: #ffffff;
+}
 .zy-chat-bubble.is-out .zy-chat-ts {
   color: rgba(255, 255, 255, 0.88);
   font-size: 11px;

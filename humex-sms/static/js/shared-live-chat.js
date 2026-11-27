@@ -293,6 +293,62 @@
       .replace(/'/g, '&#39;');
   }
 
+  // Safely convert http(s), www., and bare domain links inside chat/group messages into clickable new-tab links
+  const CHAT_URL_RE = /(?:https?:\/\/[^\s<>"'`]+|(?<![@\w./-])(?:www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:\/[^\s<>"'`]*)?|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.(?:com|net|org|io|co|me|ly|app|dev|pk|uk|in|us|gg|tv|xyz|info|biz|site|online|store|live|pro|cloud|ai|shop|link|click|top|vip|cc|to|be|nz|ru|de|fr|ca|au|edu|gov)(?:\/[^\s<>"'`]*)?))/gi;
+
+  function linkifyChatText(raw) {
+    const str = String(raw == null ? '' : raw);
+    if (!str) return '';
+    let out = '';
+    let lastIdx = 0;
+    CHAT_URL_RE.lastIndex = 0;
+    let m;
+    while ((m = CHAT_URL_RE.exec(str)) !== null) {
+      const start = m.index;
+      let token = m[0];
+      let trail = '';
+      // Strip trailing sentence punctuation while keeping balanced parentheses inside URLs
+      while (token.length > 0) {
+        const ch = token[token.length - 1];
+        if (/[.,!?;:'"\]}>]/.test(ch)) {
+          trail = ch + trail;
+          token = token.slice(0, -1);
+        } else if (ch === ')' && (token.split('(').length - 1) < (token.split(')').length - 1)) {
+          trail = ch + trail;
+          token = token.slice(0, -1);
+        } else {
+          break;
+        }
+      }
+      if (start > lastIdx) {
+        out += esc(str.slice(lastIdx, start)).replace(/\n/g, '<br>');
+      }
+      let safeHref = '';
+      if (token) {
+        const candidate = /^https?:\/\//i.test(token) ? token : `https://${token}`;
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            safeHref = parsed.href;
+          }
+        } catch (_) {}
+      }
+      if (safeHref) {
+        out += `<a class="zy-chat-link" href="${esc(safeHref)}" target="_blank" rel="noopener noreferrer">${esc(token)}</a>`;
+      } else {
+        out += esc(token).replace(/\n/g, '<br>');
+      }
+      if (trail) {
+        out += esc(trail).replace(/\n/g, '<br>');
+      }
+      lastIdx = start + m[0].length;
+    }
+    if (lastIdx < str.length) {
+      out += esc(str.slice(lastIdx)).replace(/\n/g, '<br>');
+    }
+    return out;
+  }
+
   function initials(name) {
     const parts = String(name || '?').trim().split(/[\s_.-]+/).filter(Boolean);
     if (!parts.length) return '?';
@@ -2745,7 +2801,7 @@
                   <i class="fas fa-hourglass-half"></i> ${esc(cd.expired ? 'Expired for Client' : (cd.text + ' left'))}
                 </span>
               </div>
-              ${mc.description ? `<div class="zy-mv-chat-desc">${esc(mc.description).replace(/\n/g, '<br>')}</div>` : ''}
+              ${mc.description ? `<div class="zy-mv-chat-desc">${linkifyChatText(mc.description)}</div>` : ''}
               ${safeLinks.length ? `
                 <div class="zy-mv-chat-links">
                   ${safeLinks.map(l => `
@@ -2796,7 +2852,7 @@
                 <div class="zy-chat-del-preview-box">
                   <div class="zy-chat-del-preview-tag">Original message</div>
                   ${prevImg ? `<div class="zy-chat-img-wrap" data-open-del-img="${esc(prevImg.url)}" data-img-mid="${m.id}" style="margin-bottom:${prevBody ? '6px' : '0'};"><img class="zy-chat-img" src="${esc(prevImg.url)}" alt="Deleted photo" loading="lazy" decoding="async"></div>` : ''}
-                  ${prevBody ? `<div class="zy-chat-del-preview-txt">${esc(prevBody).replace(/\n/g, '<br>')}</div>` : (!prevImg ? '<div class="zy-chat-del-preview-txt" style="opacity:.7;">(Empty message)</div>' : '')}
+                  ${prevBody ? `<div class="zy-chat-del-preview-txt">${linkifyChatText(prevBody)}</div>` : (!prevImg ? '<div class="zy-chat-del-preview-txt" style="opacity:.7;">(Empty message)</div>' : '')}
                 </div>
               ` : ''}
             </div>`;
@@ -2804,7 +2860,7 @@
           textHtml = `<div class="zy-chat-text"><i class="fas fa-ban"></i> This message was deleted</div>`;
         }
       } else if (hasCaption) {
-        textHtml = `<div class="${isCh ? 'zy-ch-post-body' : 'zy-chat-text'}">${esc(m.body).replace(/\n/g, '<br>')}</div>`;
+        textHtml = `<div class="${isCh ? 'zy-ch-post-body' : 'zy-chat-text'}">${linkifyChatText(m.body)}</div>`;
       }
 
       const autoBadgeHtml = m.is_auto_schedule && !m.deleted
@@ -2914,6 +2970,17 @@
         });
       });
     }
+
+    // Ensure clicking any chat/group link opens cleanly in a new tab (and blocks accidental open in selectMode)
+    feed.querySelectorAll('a.zy-chat-link').forEach(linkEl => {
+      linkEl.addEventListener('click', (e) => {
+        if (state.selectMode) {
+          e.preventDefault();
+          return;
+        }
+        e.stopPropagation();
+      });
+    });
 
     // Bind upline deleted-message preview toggles
     feed.querySelectorAll('[data-toggle-del-preview]').forEach(btn => {

@@ -2774,18 +2774,39 @@
           : { expired: Boolean(mc.expired), text: mc.expired ? 'Expired' : 'Active' };
         const isExpiredNow = Boolean(mc.expired) || (isClientViewer && cd.expired);
         const safeLinks = (Array.isArray(mc.links) ? mc.links : [])
-          .map(l => ({
-            label: String(l?.label || l?.url || 'Open Link').trim(),
-            href: (typeof window.zyMvSafeHref === 'function') ? window.zyMvSafeHref(l?.url || l) : ''
-          }))
+          .map(l => {
+            const rawUrl = String(l?.url || (typeof l === 'string' ? l : '')).trim();
+            const rawLbl = String(l?.label || '').trim();
+            const href = (typeof window.zyMvSafeHref === 'function') ? window.zyMvSafeHref(rawUrl) : '';
+            const normUrl = rawUrl.replace(/\/+$/, '').toLowerCase();
+            const normLbl = rawLbl.replace(/\/+$/, '').toLowerCase();
+            const hasCustomLabel = Boolean(rawLbl && normLbl !== normUrl && !/^https?:\/\//i.test(rawLbl));
+            return { label: hasCustomLabel ? rawLbl : '', href };
+          })
           .filter(l => l.href);
+
+        const fmtDur = (sec) => {
+          const s = Math.max(0, Math.round(Number(sec || 0)));
+          if (!s) return '';
+          const mins = Math.floor(s / 60);
+          const rem = s % 60;
+          return `${mins}:${String(rem).padStart(2, '0')}`;
+        };
+        const durText = fmtDur(mc.video_duration_sec);
+        const sizeMb = Number(mc.video_size || 0) > 0
+          ? `${(Number(mc.video_size) / (1024 * 1024)).toFixed(1)} MB`
+          : '';
+        const metaBadgeText = durText || sizeMb || 'Video';
+        const isPortrait = Number(mc.video_height || 0) > Number(mc.video_width || 0);
+        const thumbUrl = String(mc.thumb_url || '').trim();
+        const expText = cd.expired ? 'Expired' : `${cd.text} left`;
 
         if (isExpiredNow) {
           methodCardHtml = `
-            <div class="zy-mv-chat-card is-expired" data-mv-chat-card="${m.id}">
-              <div class="zy-mv-chat-head">
-                <span class="zy-mv-chat-app"><i class="fas fa-film"></i> ${esc(mc.app_name || 'App Method')}</span>
-                <span class="zy-mv-chat-exp is-expired"><i class="fas fa-lock"></i> Expired</span>
+            <div class="zy-mv-wa-wrap is-expired" data-mv-chat-card="${m.id}">
+              <div class="zy-mv-wa-exp-row">
+                <span class="zy-mv-wa-title">${esc(mc.app_name || 'App Method')}</span>
+                <span class="zy-mv-wa-exp-pill is-expired"><i class="fas fa-lock"></i> Expired</span>
               </div>
               <div class="zy-mv-chat-expired-msg">
                 <i class="fas fa-eye-slash"></i> Method access timer ended — automatically hidden.
@@ -2793,30 +2814,48 @@
             </div>
           `;
         } else {
+          const allUnlabeled = safeLinks.length > 0 && safeLinks.every(l => !l.label);
+          const linksHtml = safeLinks.length
+            ? `<div class="zy-mv-wa-links">
+                 ${allUnlabeled ? `<div class="zy-mv-wa-link-heading">${safeLinks.length === 1 ? 'App link' : 'App links'}</div>` : ''}
+                 ${safeLinks.map(l => `
+                   <div class="zy-mv-wa-link-item">
+                     ${l.label ? `<div class="zy-mv-wa-link-heading">${esc(l.label)}</div>` : ''}
+                     <a class="zy-mv-wa-link zy-chat-link" href="${esc(l.href)}" target="_blank" rel="noopener noreferrer">${esc(l.href)}</a>
+                   </div>
+                 `).join('')}
+               </div>`
+            : '';
+
+          const videoPosterHtml = mc.has_video
+            ? `<div class="zy-mv-wa-media ${isPortrait ? 'is-portrait' : ''}" data-open-mv-player="${m.id}" role="button" tabindex="0" aria-label="Play ${esc(mc.app_name || 'Method')} video">
+                 ${thumbUrl ? `<img class="zy-mv-wa-thumb" src="${esc(thumbUrl)}" alt="${esc(mc.app_name || 'Method video')}" loading="lazy" decoding="async" onload="if(this.naturalHeight>this.naturalWidth&&this.parentElement)this.parentElement.classList.add('is-portrait')" onerror="this.style.display='none'">` : ''}
+                 <div class="zy-mv-wa-scrim"></div>
+                 <span class="zy-mv-wa-exp-overlay ${cd.expired ? 'is-expired' : ''}" data-zy-mv-exp="${esc(mc.expires_at || '')}">
+                   <i class="fas fa-hourglass-half"></i> ${esc(cd.expired ? 'Expired for Client' : expText)}
+                 </span>
+                 <span class="zy-mv-wa-play" aria-hidden="true">
+                   <i class="fas fa-play"></i>
+                 </span>
+                 <span class="zy-mv-wa-dur">
+                   <span class="zy-mv-wa-hd">HD</span>
+                   <span>${esc(metaBadgeText)}</span>
+                 </span>
+               </div>`
+            : `<div class="zy-mv-wa-exp-row">
+                 <span class="zy-mv-wa-exp-pill ${cd.expired ? 'is-expired' : ''}" data-zy-mv-exp="${esc(mc.expires_at || '')}">
+                   <i class="fas fa-hourglass-half"></i> ${esc(cd.expired ? 'Expired for Client' : expText)}
+                 </span>
+               </div>`;
+
           methodCardHtml = `
-            <div class="zy-mv-chat-card" data-mv-chat-card="${m.id}" data-mv-exp="${esc(mc.expires_at || '')}">
-              <div class="zy-mv-chat-head">
-                <span class="zy-mv-chat-app"><i class="fas fa-film"></i> ${esc(mc.app_name || 'App Method')}</span>
-                <span class="zy-mv-chat-exp ${cd.expired ? 'is-expired' : ''}" data-zy-mv-exp="${esc(mc.expires_at || '')}">
-                  <i class="fas fa-hourglass-half"></i> ${esc(cd.expired ? 'Expired for Client' : (cd.text + ' left'))}
-                </span>
+            <div class="zy-mv-wa-wrap ${mc.has_video ? 'has-video' : 'no-video'}" data-mv-chat-card="${m.id}" data-mv-exp="${esc(mc.expires_at || '')}">
+              ${videoPosterHtml}
+              <div class="zy-mv-wa-body">
+                <div class="zy-mv-wa-title">${esc(mc.app_name || 'App Method')}</div>
+                ${mc.description ? `<div class="zy-mv-wa-caption">${linkifyChatText(mc.description)}</div>` : ''}
+                ${linksHtml}
               </div>
-              ${mc.description ? `<div class="zy-mv-chat-desc">${linkifyChatText(mc.description)}</div>` : ''}
-              ${safeLinks.length ? `
-                <div class="zy-mv-chat-links">
-                  ${safeLinks.map(l => `
-                    <a class="zy-mv-chat-link" href="${esc(l.href)}" target="_blank" rel="noopener noreferrer">
-                      <i class="fas fa-arrow-up-right-from-square"></i> <span>${esc(l.label)}</span>
-                    </a>
-                  `).join('')}
-                </div>
-              ` : ''}
-              ${mc.has_video ? `
-                <button type="button" class="zy-mv-chat-play-btn" data-open-mv-player="${m.id}">
-                  <i class="fas fa-play-circle"></i>
-                  <span>Play Method Video (Protected)</span>
-                </button>
-              ` : ''}
             </div>
           `;
         }
@@ -3028,7 +3067,7 @@
 
     // Bind Protected Method Video Card playback
     feed.querySelectorAll('[data-open-mv-player]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      const openMvPlayer = (e) => {
         if (state.selectMode || Date.now() < state.ignoreOutsideClickUntil) return;
         e.stopPropagation();
         const mid = Number(btn.dataset.openMvPlayer);
@@ -3046,6 +3085,13 @@
           isAgentPreview: isAgentSelf,
           onExpired: () => renderMessagesPane(false)
         });
+      };
+      btn.addEventListener('click', openMvPlayer);
+      btn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openMvPlayer(e);
+        }
       });
     });
     startMethodCardCountdownTick();

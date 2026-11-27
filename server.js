@@ -6494,7 +6494,7 @@ app.use(compression({
   filter: (req, res) => {
     if (req.headers['x-no-compression']) return false;
     const p = req.path || '';
-    if (p.startsWith('/api/method-vault/stream/') || p === '/api/method-vault/agent/upload-chunk') return false;
+    if (p.startsWith('/api/method-vault/stream/') || p.startsWith('/api/method-vault/thumb/') || p === '/api/method-vault/agent/upload-chunk') return false;
     return compression.filter(req, res);
   },
   threshold: 512
@@ -7810,7 +7810,8 @@ const API_RULES = [
   { m: new Set(['GET']), p: /^\/client\/rate-card$/, roles: ['client', 'agent'] },
   { p: /^\/method-vault\/agent(\/|$)/, roles: ['agent'] },
   { p: /^\/method-vault\/client(\/|$)/, roles: ['client'] },
-  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/, roles: ['agent', 'client'] }
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/, roles: ['agent', 'client'] },
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/thumb(\/|$)/, roles: ['agent', 'client'] }
 ];
 // Client is default-deny: only these routes exist for them.
 const CLIENT_ALLOW = [
@@ -7837,7 +7838,8 @@ const CLIENT_ALLOW = [
   { m: new Set(['GET', 'POST']), p: /^\/payout-requests(\/|$)/ },
   { m: new Set(['GET']), p: /^\/payments(\/|$)/ },
   { m: new Set(['GET', 'POST']), p: /^\/method-vault\/client(\/|$)/ },
-  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/ }
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/stream(\/|$)/ },
+  { m: new Set(['GET', 'HEAD']), p: /^\/method-vault\/thumb(\/|$)/ }
 ];
 function ruleHit(list, p, method) { return list.some(r => (!r.m || r.m.has(method)) && r.p.test(p)); }
 
@@ -27494,6 +27496,7 @@ app.get('/api/reports/orphans', requireAuth, (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 const MEDIA_VAULT_ROOT = path.join(__dirname, 'media_vault');
 const MEDIA_VAULT_VIDEOS_DIR = path.join(MEDIA_VAULT_ROOT, 'videos');
+const MEDIA_VAULT_THUMBS_DIR = path.join(MEDIA_VAULT_ROOT, 'thumbs');
 const METHOD_VAULT_MAX_BYTES = 25 * 1024 * 1024 * 1024;       // Hard 25 GB total cap
 const METHOD_VAULT_MIN_FREE_BYTES = 15 * 1024 * 1024 * 1024;  // Require >= 15 GB free disk space on VPS
 const METHOD_VAULT_MAX_FILE_BYTES = 500 * 1024 * 1024;        // Max 500 MB per video file
@@ -27506,6 +27509,9 @@ function ensureMethodVaultDir() {
   try {
     if (!fs.existsSync(MEDIA_VAULT_VIDEOS_DIR)) {
       fs.mkdirSync(MEDIA_VAULT_VIDEOS_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(MEDIA_VAULT_THUMBS_DIR)) {
+      fs.mkdirSync(MEDIA_VAULT_THUMBS_DIR, { recursive: true });
     }
   } catch (e) {
     console.error('[METHOD-VAULT] Failed to create media directory:', e && e.message);
@@ -27524,10 +27530,26 @@ function safeResolveVaultVideoPath(fileName) {
   return resolved;
 }
 
+function safeResolveVaultThumbPath(videoFileName) {
+  const clean = path.basename(String(videoFileName || '').trim());
+  if (!clean || clean !== String(videoFileName || '').trim() || clean.includes('..') || clean.includes('/') || clean.includes('\\')) {
+    return null;
+  }
+  const baseName = clean.replace(/\.[^.]+$/, '') + '.jpg';
+  const baseDir = path.resolve(MEDIA_VAULT_THUMBS_DIR);
+  const resolved = path.resolve(baseDir, baseName);
+  if (!resolved.startsWith(baseDir + path.sep)) return null;
+  return resolved;
+}
+
 function unlinkVaultVideoSafe(fileName) {
   try {
     const p = safeResolveVaultVideoPath(fileName);
     if (p && fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (_) {}
+  try {
+    const t = safeResolveVaultThumbPath(fileName);
+    if (t && fs.existsSync(t)) fs.unlinkSync(t);
   } catch (_) {}
 }
 
@@ -27686,6 +27708,15 @@ function projectMethodCardForActor(rawCard, actor, msgObj) {
   const isTimeExpired = !Number.isFinite(expMs) || Date.now() >= expMs;
   const isExpired = isRevoked || isDeletedMethod || isTimeExpired;
 
+  const hasVideo = Boolean(method && method.video_file && safeResolveVaultVideoPath(method.video_file) && fs.existsSync(safeResolveVaultVideoPath(method.video_file)));
+  if (hasVideo && method) {
+    const vPath = safeResolveVaultVideoPath(method.video_file);
+    const tPath = safeResolveVaultThumbPath(method.video_file);
+    if (!Number(method.video_duration_sec) || (tPath && !fs.existsSync(tPath))) {
+      probeAndThumbMethodVideoInBackground(method.id, vPath, method.video_file);
+    }
+  }
+
   if (actor && actor.role === 'client') {
     const clientHasAccess = hasMethodVaultAccess({ role: 'Client', id: actor.id });
     if (!clientHasAccess) {
@@ -27707,8 +27738,12 @@ function projectMethodCardForActor(rawCard, actor, msgObj) {
       app_name: String(method.app_name || rawCard.app_name || 'App Method'),
       description: String(rawCard.custom_note || method.description || ''),
       links: Array.isArray(method.links) ? method.links : (Array.isArray(rawCard.links) ? rawCard.links : []),
-      has_video: Boolean(method.video_file && safeResolveVaultVideoPath(method.video_file) && fs.existsSync(safeResolveVaultVideoPath(method.video_file))),
+      has_video: hasVideo,
       video_size: Number(method.video_size || 0),
+      video_duration_sec: Number(method.video_duration_sec || 0),
+      video_width: Number(method.video_width || 0),
+      video_height: Number(method.video_height || 0),
+      thumb_url: hasVideo ? `/api/method-vault/thumb/${grantId}` : '',
       expires_at: expiresAt,
       duration_minutes: Number(rawCard.duration_minutes || grant?.duration_minutes || 0),
       expired: false
@@ -27722,8 +27757,12 @@ function projectMethodCardForActor(rawCard, actor, msgObj) {
     app_name: String(method?.app_name || rawCard.app_name || 'App Method'),
     description: String(rawCard.custom_note || method?.description || ''),
     links: Array.isArray(method?.links) ? method.links : (Array.isArray(rawCard.links) ? rawCard.links : []),
-    has_video: Boolean(method && method.video_file && safeResolveVaultVideoPath(method.video_file) && fs.existsSync(safeResolveVaultVideoPath(method.video_file))),
+    has_video: hasVideo,
     video_size: Number(method?.video_size || rawCard.video_size || 0),
+    video_duration_sec: Number(method?.video_duration_sec || 0),
+    video_width: Number(method?.video_width || 0),
+    video_height: Number(method?.video_height || 0),
+    thumb_url: hasVideo && method ? `/api/method-vault/thumb/${Number(method.id)}?preview=1` : '',
     expires_at: expiresAt,
     duration_minutes: Number(rawCard.duration_minutes || grant?.duration_minutes || 0),
     expired: isExpired,
@@ -28081,6 +28120,7 @@ app.post('/api/method-vault/agent/items', requireAuth, (req, res) => {
       writeDb('method_vault_items', items);
       if (uploadedFile && uploadedFile.path) {
         optimizeMp4FastStartInBackground(uploadedFile.path);
+        probeAndThumbMethodVideoInBackground(record.id, uploadedFile.path, record.video_file);
       }
       logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${record.video_size ? Math.round(record.video_size / 1048576 * 10) / 10 + ' MB' : 'text/links only'})`, 'method_vault_items');
 
@@ -28515,6 +28555,7 @@ app.post('/api/method-vault/agent/upload-complete', requireAuth, async (req, res
     items.unshift(record);
     writeDb('method_vault_items', items);
     optimizeMp4FastStartInBackground(finalPath);
+    probeAndThumbMethodVideoInBackground(record.id, finalPath, finalFilename);
     logAudit(sessionUser.username || 'Agent', 'Add Method Vault Item', `Saved "${appName}" (${Math.round(record.video_size / 1048576 * 10) / 10} MB)`, 'method_vault_items');
 
     res.json({ success: true, item: record, storage: getMethodVaultStorageStats() });
@@ -29021,6 +29062,93 @@ function optimizeMp4FastStartInBackground(filePath) {
   });
 }
 
+// Non-blocking video metadata (duration/dimensions) + WhatsApp-style JPEG poster thumbnail extraction
+const vaultThumbInFlight = new Map();
+const vaultMetaProbed = new Set();
+
+function ensureVaultVideoThumb(videoFilePath, videoFileName) {
+  const thumbPath = safeResolveVaultThumbPath(videoFileName);
+  if (!videoFilePath || !thumbPath) return Promise.resolve(null);
+  if (fs.existsSync(thumbPath)) return Promise.resolve(thumbPath);
+  if (vaultThumbInFlight.has(thumbPath)) return vaultThumbInFlight.get(thumbPath);
+  ensureMethodVaultDir();
+  const tmpThumb = `${thumbPath}.${process.pid}.${Date.now()}.tmp.jpg`;
+  const runExtract = (seekSec) => new Promise((resolve) => {
+    execFile(
+      'ffmpeg',
+      ['-y', '-loglevel', 'error', '-ss', seekSec, '-i', videoFilePath, '-frames:v', '1', '-vf', "scale='min(560,iw)':-2", '-q:v', '4', tmpThumb],
+      { timeout: 15000 },
+      (err) => {
+        if (!err && fs.existsSync(tmpThumb)) {
+          try {
+            const st = fs.statSync(tmpThumb);
+            if (st && st.size > 256) {
+              fs.renameSync(tmpThumb, thumbPath);
+              return resolve(thumbPath);
+            }
+          } catch (_) {}
+        }
+        try { if (fs.existsSync(tmpThumb)) fs.unlinkSync(tmpThumb); } catch (_) {}
+        resolve(null);
+      }
+    );
+  });
+  const p = runExtract('00:00:01')
+    .then(res => res || runExtract('00:00:00'))
+    .finally(() => { vaultThumbInFlight.delete(thumbPath); });
+  vaultThumbInFlight.set(thumbPath, p);
+  return p;
+}
+
+function probeAndThumbMethodVideoInBackground(methodId, videoFilePath, videoFileName) {
+  if (!videoFilePath || !videoFileName || !fs.existsSync(videoFilePath)) return;
+  ensureVaultVideoThumb(videoFilePath, videoFileName).catch(() => {});
+  const probeKey = `${Number(methodId) || 0}:${videoFileName}`;
+  if (!methodId || vaultMetaProbed.has(probeKey)) return;
+  vaultMetaProbed.add(probeKey);
+  execFile(
+    'ffprobe',
+    ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,side_data_list:stream_tags=rotate:format=duration', '-of', 'json', videoFilePath],
+    { timeout: 10000 },
+    (err, stdout) => {
+      if (err || !stdout) return;
+      try {
+        const parsed = JSON.parse(stdout);
+        const durSec = Math.max(0, Math.round(Number(parsed?.format?.duration || 0)));
+        const stream0 = Array.isArray(parsed?.streams) ? parsed.streams[0] : null;
+        let w = Number(stream0?.width || 0);
+        let h = Number(stream0?.height || 0);
+        const rotTag = Number(stream0?.tags?.rotate || 0);
+        const sideRot = Array.isArray(stream0?.side_data_list)
+          ? Number((stream0.side_data_list.find(sd => sd && sd.rotation != null) || {}).rotation || 0)
+          : 0;
+        const rot = Math.abs(rotTag || sideRot) % 360;
+        if (rot === 90 || rot === 270) {
+          const tmp = w;
+          w = h;
+          h = tmp;
+        }
+        if (!durSec && !w && !h) return;
+        const items = readDb('method_vault_items') || [];
+        const idx = items.findIndex(m => m && Number(m.id) === Number(methodId));
+        if (idx !== -1) {
+          let dirty = false;
+          if (durSec > 0 && Number(items[idx].video_duration_sec || 0) !== durSec) {
+            items[idx].video_duration_sec = durSec;
+            dirty = true;
+          }
+          if (w > 0 && h > 0 && (Number(items[idx].video_width || 0) !== w || Number(items[idx].video_height || 0) !== h)) {
+            items[idx].video_width = w;
+            items[idx].video_height = h;
+            dirty = true;
+          }
+          if (dirty) writeDb('method_vault_items', items);
+        }
+      } catch (_) {}
+    }
+  );
+}
+
 // ── PROTECTED HTTP 206 RANGE VIDEO STREAMING (High-Speed Continuous + Timed + Role-Verified) ─
 function handleMethodVaultStream(req, res) {
   const sessionUser = req.sessionUser;
@@ -29177,6 +29305,67 @@ function handleMethodVaultStream(req, res) {
 
 app.get('/api/method-vault/stream/:id', requireAuth, handleMethodVaultStream);
 app.head('/api/method-vault/stream/:id', requireAuth, handleMethodVaultStream);
+
+async function handleMethodVaultThumb(req, res) {
+  const sessionUser = req.sessionUser;
+  const role = normRole(sessionUser.role);
+  if (!hasMethodVaultAccess(sessionUser)) {
+    return res.status(403).end();
+  }
+  const rawId = Number(req.params.id);
+  if (!Number.isInteger(rawId) || rawId <= 0) {
+    return res.status(400).end();
+  }
+  const isPreview = String(req.query.preview || '') === '1';
+  const items = readDb('method_vault_items') || [];
+  let methodItem = null;
+
+  if (role === 'agent' && isPreview) {
+    methodItem = items.find(m => m && Number(m.id) === rawId && Number(m.agent_id) === Number(sessionUser.id));
+    if (!methodItem) return res.status(404).end();
+  } else {
+    const grants = readDb('method_vault_grants') || [];
+    const grant = grants.find(g => g && Number(g.id) === rawId);
+    if (!grant) return res.status(404).end();
+    if (role === 'agent') {
+      if (Number(grant.agent_id) !== Number(sessionUser.id)) return res.status(403).end();
+    } else if (role === 'client') {
+      const clients = readDb('clients') || [];
+      const cl = clients.find(c => Number(c.id) === Number(sessionUser.id)) || sessionUser;
+      const aid = Number(cl.agent_id || sessionUser.agent_id || 0);
+      if (!isGrantActiveForClient(grant, sessionUser.id, aid)) return res.status(403).end();
+    } else {
+      return res.status(403).end();
+    }
+    methodItem = items.find(m => m && Number(m.id) === Number(grant.method_id));
+    if (!methodItem) return res.status(404).end();
+  }
+
+  const videoPath = safeResolveVaultVideoPath(methodItem.video_file);
+  if (!videoPath || !fs.existsSync(videoPath)) return res.status(404).end();
+
+  const thumbPath = await ensureVaultVideoThumb(videoPath, methodItem.video_file);
+  if (!thumbPath || !fs.existsSync(thumbPath)) return res.status(404).end();
+
+  let st;
+  try { st = fs.statSync(thumbPath); } catch (_) { return res.status(404).end(); }
+  const etag = `"mvth-${st.size}-${Math.floor(st.mtimeMs)}"`;
+  res.setHeader('Cache-Control', 'private, max-age=600');
+  res.setHeader('ETag', etag);
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Content-Length', st.size);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.headers['if-none-match'] && String(req.headers['if-none-match']).trim() === etag) {
+    return res.status(304).end();
+  }
+  if (req.method.toUpperCase() === 'HEAD') return res.status(200).end();
+  const stream = fs.createReadStream(thumbPath);
+  stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+  stream.pipe(res);
+}
+
+app.get('/api/method-vault/thumb/:id', requireAuth, handleMethodVaultThumb);
+app.head('/api/method-vault/thumb/:id', requireAuth, handleMethodVaultThumb);
 
 // ── CRITICAL: Safe API 404 handler (Must ALWAYS return JSON, never HTML) ─────
 app.all(['/api/*', '/crapi/*'], (req, res) => {

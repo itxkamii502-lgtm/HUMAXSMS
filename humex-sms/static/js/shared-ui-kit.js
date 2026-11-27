@@ -1146,6 +1146,13 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
         ? (b.sample_end && b.sample_end !== b.sample_start ? `${b.sample_start} → ${b.sample_end}` : b.sample_start)
         : '—';
       const ptsText = Array.isArray(b.payterms) && b.payterms.length ? b.payterms.join(', ') : '';
+      const admCnt = Number(b.admin_assigned_count || 0);
+      const selfCnt = Number(b.self_allocated_count || 0);
+      const sourceTagHtml = admCnt > 0
+        ? (selfCnt > 0
+            ? `<span class="zy-ret-pt-tag" style="background:#fef3c7;color:#92400e;border-color:#fde68a;">${admCnt} Admin · ${selfCnt} Self</span>`
+            : `<span class="zy-ret-pt-tag" style="background:#fef3c7;color:#92400e;border-color:#fde68a;">Admin Added</span>`)
+        : '';
       return `
         <label class="zy-ret-batch-row ${isLockedToday ? 'is-locked-today' : ''}" data-date="${zyEsc(b.date)}" ${isLockedToday ? 'title="Allocated today — return unlocks tomorrow"' : `onclick="zyToggleReturnDateRow(this, '${zyEsc(b.date)}')"`}>
           <input type="checkbox" class="zy-ret-chk" value="${zyEsc(b.date)}" data-count="${Number(b.count || 0)}" ${isLockedToday ? 'disabled' : ''} onclick="event.stopPropagation();zySyncReturnDateCheckboxes()">
@@ -1154,6 +1161,7 @@ window.zyOpenRangeReturnModal = async function(rangeId, rangeName, onDone) {
               <span class="zy-ret-date-badge"><i class="fas fa-calendar-day"></i> ${zyEsc(b.date)}</span>
               <span class="zy-ret-count-badge">${Number(b.count || 0)} Number${Number(b.count) === 1 ? '' : 's'}</span>
               ${ptsText ? `<span class="zy-ret-pt-tag">${zyEsc(ptsText)}</span>` : ''}
+              ${sourceTagHtml}
               ${isLockedToday ? `<span class="zy-ret-lock-tag"><i class="fas fa-clock"></i> Locked Today · Returnable Tomorrow</span>` : ''}
             </div>
             <div class="zy-ret-sample monospace">${zyEsc(sampleText)}</div>

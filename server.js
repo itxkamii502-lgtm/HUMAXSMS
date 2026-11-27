@@ -2463,6 +2463,23 @@ function matchesRangeRef(item, rangeId, rangeName) {
   return false;
 }
 
+function isClientAdminAssigned(n) {
+  if (!n) return false;
+  return String(n.client_assign_source || '').trim().toLowerCase() === 'admin';
+}
+
+function isHistoryAdminAssigned(h) {
+  if (!h) return false;
+  const src = String(h.assign_source || h.client_assign_source || '').trim().toLowerCase();
+  if (src === 'admin') return true;
+  if (src === 'self') return false;
+  // Backward compatibility: legacy bulk-allocate to Client logged target_id without to_user_id or request_id
+  if (String(h.to_role || '').toLowerCase() === 'client' && h.target_id != null && h.to_user_id == null && !h.request_id) {
+    return true;
+  }
+  return false;
+}
+
 function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null, limitsOverride = null) {
   const cid = Number(clientId);
   const numbers = (preloaded && preloaded.numbers) || readDb('numbers') || [];
@@ -2500,9 +2517,14 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     return Number.isFinite(t) && t <= resetCutoffMs;
   };
 
-  const heldCount = numbers.filter(n =>
+  // Admin/Agent manually assigned numbers do NOT count toward Client self-allocate limits;
+  // they remain tracked separately in admin_assigned_count & total_held_count for Return by Date.
+  const heldInRangeAll = numbers.filter(n =>
     n && Number(n.client_id) === cid && matchesRangeRef(n, rangeId, rangeName)
-  ).length;
+  );
+  const adminAssignedCount = heldInRangeAll.filter(n => isClientAdminAssigned(n)).length;
+  const heldCount = heldInRangeAll.length - adminAssignedCount;
+  const totalHeldCount = heldInRangeAll.length;
 
   const clientRangeReqs = requests.filter(r => {
     if (!r || Number(r.client_id) !== cid) return false;
@@ -2526,9 +2548,10 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   const todayReqNums = todayReqItems
     .reduce((sum, r) => sum + (parseInt(r.quantity, 10) || 0), 0);
 
-  // Direct allocations (self-allocate or manual agent assign) not originating from a number request
+  // Direct self-allocations ONLY (exclude manual Agent/Admin assignments)
   const directTodayHistory = history.filter(h => {
     if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') return false;
+    if (isHistoryAdminAssigned(h)) return false;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) return false;
@@ -2540,6 +2563,7 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
 
   const directTodayNums = numbers.filter(n => {
     if (!n || Number(n.client_id) !== cid) return false;
+    if (isClientAdminAssigned(n)) return false;
     if (!matchesRangeRef(n, rangeId, rangeName)) return false;
     const assignedTs = n.client_assigned_at || n.assigned_at || n.assigned_date || '';
     if (isBeforeReset(assignedTs)) return false;
@@ -2560,6 +2584,7 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
   }
   for (const h of history) {
     if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') continue;
+    if (isHistoryAdminAssigned(h)) continue;
     const isThisClient = (h.to_user_id != null && Number(h.to_user_id) === cid && String(h.to_role || '').toLowerCase() === 'client')
       || (h.target_id != null && Number(h.target_id) === cid && String(h.to_role || '').toLowerCase() === 'client');
     if (!isThisClient) continue;
@@ -2605,6 +2630,8 @@ function getClientRangeQuota(clientId, rangeId, rangeName = '', preloaded = null
     daily_remaining: dailyRemaining,
     max_hold_limit: maxHoldLimit,
     held_count: heldCount,
+    admin_assigned_count: adminAssignedCount,
+    total_held_count: totalHeldCount,
     pending_qty: pendingQty,
     pending_request_count: pendingRequestCount,
     has_pending_request: hasPendingRequest,
@@ -10391,7 +10418,75 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
     const ptInfo = resolveRangeActivePayterms(r, isWnRng);
     const acr = acrList.find(x => Number(x.range_id) === Number(r.id)) ||
                 acrList.find(x => String(x.range_name || '').trim().toLowerCase() === rangeName.trim().toLowerCase());
-    if (!acr || acr.published === false || !(Number(acr.client_rate_pkr) > 0)) continue;
+    const isPublishedForClient = Boolean(acr && acr.published !== false && Number(acr.client_rate_pkr) > 0);
+    if (!isPublishedForClient) {
+      // If Agent/Admin manually assigned numbers in an unpublished range to this Client,
+      // expose a Return-Only row so the Client can return those numbers by date.
+      if (role !== 'client') continue;
+      const clientNumsInRange = numbers.filter(n => n && Number(n.client_id) === Number(sessionUser.id) && matchesRangeRef(n, r.id, rangeName));
+      if (!clientNumsInRange.length) continue;
+      const adminCnt = clientNumsInRange.filter(n => isClientAdminAssigned(n)).length;
+      const selfCnt = clientNumsInRange.length - adminCnt;
+      const firstNum = clientNumsInRange[0] || {};
+      const fallbackRatePkr = round2(Number(firstNum.client_rate_pkr || (acr && acr.client_rate_pkr) || 0));
+      const paytermsPkrFallback = {};
+      if (fallbackRatePkr > 0) {
+        for (const ptKey of ptInfo.active_payterms) paytermsPkrFallback[ptKey] = fallbackRatePkr;
+      }
+      const visRangeName = scrubWhitenoiseName(rangeName, false);
+      card.push({
+        id: r.id,
+        range_id: r.id,
+        range_name: visRangeName,
+        name: visRangeName,
+        country: r.country || '',
+        prefix: r.prefix || '',
+        is_whitenoise: isWnRng,
+        active: r.active !== false,
+        payterm: ptInfo.primary_payterm,
+        active_payterms: ptInfo.active_payterms,
+        payterms_pkr: paytermsPkrFallback,
+        max_sms_day: r.max_sms_day ?? r.otp_limit ?? null,
+        memo: r.memo || '',
+        cli_list: r.cli_list || (Array.isArray(r.clis) && r.clis.length ? r.clis.join(', ') : (r.cli || 'All CLIs')),
+        currency: 'PKR',
+        rate: fallbackRatePkr,
+        payout: fallbackRatePkr,
+        client_rate_pkr: fallbackRatePkr,
+        allowed_quantities: [],
+        batch_size: CLIENT_RANGE_DEFAULT_BATCH_SIZE,
+        daily_request_limit: 0,
+        daily_adds_limit: 0,
+        today_adds_used: 0,
+        daily_adds_remaining: 0,
+        daily_numbers_limit: 0,
+        today_numbers: 0,
+        daily_remaining: 0,
+        max_hold_limit: 0,
+        held_count: selfCnt,
+        admin_assigned_count: adminCnt,
+        total_held_count: clientNumsInRange.length,
+        admin_return_only: true,
+        pending_qty: 0,
+        pending_request_count: 0,
+        has_pending_request: false,
+        hold_remaining: 0,
+        weekly_adds_limit: 0,
+        weekly_adds_used: 0,
+        weekly_adds_remaining: 0,
+        next_weekly_slot_at: null,
+        max_requestable_now: 0,
+        can_request_now: false,
+        block_reason: 'admin_assigned_only',
+        requests_today: 0,
+        requested_today: true,
+        can_request_today: false,
+        available: 0,
+        free_count: 0,
+        agent_free_count: 0
+      });
+      continue;
+    }
 
     const lim = resolveRangeClientLimits(acr, { unconfiguredFallbackHold: CLIENT_RANGE_DEFAULT_MAX_HOLD });
     const allowedQty = lim.allowed_quantities;
@@ -10419,6 +10514,8 @@ app.get('/api/client/rate-card', requireAuth, (req, res) => {
           daily_remaining: lim.daily_numbers_limit,
           max_hold_limit: lim.max_hold_limit,
           held_count: 0,
+          admin_assigned_count: 0,
+          total_held_count: 0,
           pending_qty: 0,
           pending_request_count: 0,
           has_pending_request: false,
@@ -14506,6 +14603,7 @@ function cleanupDeletedAccountData(tableName, target, opts = {}) {
           assigned_at: null,
           assigned_date: null,
           client_assigned_at: null,
+          client_assign_source: null,
           allocated_at: null,
           status: 'active',
           updated_at: nowIso
@@ -14533,6 +14631,7 @@ function cleanupDeletedAccountData(tableName, target, opts = {}) {
             assigned_at: null,
             assigned_date: null,
             client_assigned_at: null,
+            client_assign_source: null,
             allocated_at: null,
             status: 'active',
             updated_at: nowIso
@@ -14549,6 +14648,7 @@ function cleanupDeletedAccountData(tableName, target, opts = {}) {
           client_rate_pkr: null,
           client_payterm: null,
           client_assigned_at: null,
+          client_assign_source: null,
           status: n.agent_id ? 'assigned' : 'active',
           updated_at: nowIso
         };
@@ -16207,12 +16307,12 @@ app.post('/api/numbers/bulk-unassign-many', requireAuth, (req, res) => {
           if (Number(n.agent_id) !== Number(sessionUser.id)) return n;
           count++;
           // Agent unallocates from Client back into Agent pool (agent_id remains)
-          return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
+          return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
         } else if (isOwner) {
           count++;
           ownerRecalled.push(n);
           // Owner recalls downward into Owner pool
-          return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, assigned_at: null, assigned_date: null, user: '', return_pending: false, return_request_id: null, status: 'active' };
+          return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, assigned_at: null, assigned_date: null, user: '', return_pending: false, return_request_id: null, status: 'active' };
         }
       }
       return n;
@@ -16298,10 +16398,10 @@ app.post('/api/numbers/revoke', requireAuth, (req, res) => {
       }
 
       if (isAgent) {
-        return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
+        return { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
       } else {
         ownerRecalled.push(n);
-        return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
+        return { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
       }
     });
 
@@ -16360,7 +16460,7 @@ app.post('/api/numbers/:id/unassign', requireAuth, (req, res) => {
         }
         const prevClientId = n.client_id ? Number(n.client_id) : null;
         const prevClientUser = n.client_username || n.user || '';
-        numbers[idx] = { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
+        numbers[idx] = { ...n, client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: '', return_pending: false, return_request_id: null, status: 'assigned' };
         writeDb('numbers', numbers);
         if (prevClientId) {
           sendInstantNotification({
@@ -16381,7 +16481,7 @@ app.post('/api/numbers/:id/unassign', requireAuth, (req, res) => {
         }
       } else if (isOwner) {
         const prevAgentId = n.agent_id ? Number(n.agent_id) : null;
-        numbers[idx] = { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
+        numbers[idx] = { ...n, agent_id: null, agent_name: '', agent_username: '', client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: '', assigned_at: null, assigned_date: null, return_pending: false, return_request_id: null, status: 'active' };
         writeDb('numbers', numbers);
         resetQuotasForOwnerRemovedNumbers([n], {
           mode: 'recall',
@@ -16491,6 +16591,8 @@ app.post(['/api/numbers/:id/move', '/api/numbers/move'], requireAuth, (req, res)
     n.status = 'assigned';
     n.assigned_at = new Date().toISOString();
     n.assigned_date = n.assigned_at;
+    n.client_assigned_at = n.assigned_at;
+    n.client_assign_source = 'admin';
 
     writeDb('numbers', numbers);
 
@@ -16549,6 +16651,7 @@ function applyClientReturnWithVault(numRec, returningClientId, nowIso, vaultCach
         client_name: vaultClient.full_name || vaultClient.name || vaultClient.username || '',
         user: vaultClient.username || '',
         client_assigned_at: nowIso,
+        client_assign_source: 'admin',
         status: numRec.status === 'blocked' ? 'blocked' : 'assigned',
         returned_to_vault: true,
         returned_from_client_id: Number(returningClientId) || null,
@@ -16568,6 +16671,7 @@ function applyClientReturnWithVault(numRec, returningClientId, nowIso, vaultCach
       client_username: '',
       user: '',
       client_assigned_at: null,
+      client_assign_source: null,
       return_pending: false,
       return_request_id: null,
       status: numRec.status === 'blocked' ? 'blocked' : (numRec.agent_id ? 'assigned' : 'active')
@@ -16831,7 +16935,7 @@ app.post(['/api/numbers/:id/return', '/api/numbers/return', '/api/numbers/bulk-r
           return n;
         }
         count++;
-        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, client_assigned_at: null, return_pending: false, return_request_id: null, status: n.status === 'blocked' ? 'blocked' : 'active' };
+        return { ...n, agent_id: null, client_id: null, client_name: '', client_username: '', user: '', assigned_at: null, assigned_date: null, client_assigned_at: null, client_assign_source: null, return_pending: false, return_request_id: null, status: n.status === 'blocked' ? 'blocked' : 'active' };
       }
       return n;
     });
@@ -16893,6 +16997,8 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
 
     const groups = new Map();
     let pendingReturnCount = 0;
+    let adminAssignedTotal = 0;
+    let selfAllocatedTotal = 0;
     for (const n of heldInRange) {
       if (isClient && isWnTarget && n.return_pending) {
         pendingReturnCount++;
@@ -16903,7 +17009,7 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
         : (n.assigned_at || n.assigned_date || n.allocated_at || n.created || '');
       const dateStr = /^\d{4}-\d{2}-\d{2}/.test(String(rawTs)) ? String(rawTs).slice(0, 10) : 'Unknown';
       if (!groups.has(dateStr)) {
-        groups.set(dateStr, { date: dateStr, count: 0, nums: [], payterms: new Set(), assigned_to_clients: 0 });
+        groups.set(dateStr, { date: dateStr, count: 0, nums: [], payterms: new Set(), assigned_to_clients: 0, admin_assigned_count: 0, self_allocated_count: 0 });
       }
       const g = groups.get(dateStr);
       g.count++;
@@ -16911,6 +17017,15 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
       const pt = n.client_payterm || n.payterm || '';
       if (pt) g.payterms.add(pt);
       if (isAgent && n.client_id) g.assigned_to_clients++;
+      if (isClient) {
+        if (isClientAdminAssigned(n)) {
+          g.admin_assigned_count++;
+          adminAssignedTotal++;
+        } else {
+          g.self_allocated_count++;
+          selfAllocatedTotal++;
+        }
+      }
     }
 
     const todayIso = getTodayUtcDateKey();
@@ -16930,6 +17045,8 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
           sample_end: g.nums[g.nums.length - 1] || '',
           payterms: Array.from(g.payterms),
           assigned_to_clients: g.assigned_to_clients,
+          admin_assigned_count: g.admin_assigned_count,
+          self_allocated_count: g.self_allocated_count,
           is_today: isToday,
           returnable: !isToday
         };
@@ -16947,6 +17064,8 @@ app.get('/api/numbers/range-return-batches', requireAuth, (req, res) => {
       pending_return_count: pendingReturnCount,
       today_date: todayIso,
       total_held: heldInRange.length,
+      admin_assigned_total: adminAssignedTotal,
+      self_allocated_total: selfAllocatedTotal,
       returnable_count: returnableCount,
       locked_today_count: lockedTodayCount,
       min_date: validDates[0] || '',
@@ -17130,6 +17249,7 @@ app.post('/api/numbers/return-by-date', requireAuth, (req, res) => {
         assigned_at: null,
         assigned_date: null,
         client_assigned_at: null,
+        client_assign_source: null,
         return_pending: false,
         return_request_id: null,
         status: 'active'
@@ -17464,6 +17584,8 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
       n.client_id = null;
       n.client_name = '';
       n.client_username = '';
+      n.client_assigned_at = null;
+      n.client_assign_source = null;
       n.user = '';
       n.payterm = ptMeta.key;
       n.payout_schedule = ptMeta.schedule;
@@ -17499,18 +17621,7 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
       if (rngPtInfo && rawReqPt && !isWnNumber && !rngPtInfo.active_payterms.includes(clientPayterm)) {
         return res.status(400).json({ error: `Payterm "${clientPayterm}" is not available on range "${rng.range_name || rng.name}". Allowed: ${rngPtInfo.active_payterms.join(', ')}.` });
       }
-      // Enforce per-range max active numbers per client (from Agent Client Rate Set)
-      const holdCheckAgentId = effectiveAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || cl.agent_id || null);
-      const holdAcr = holdCheckAgentId ? findAgentClientRate(holdCheckAgentId, n.range_id || (rng && rng.id), n.range_name || (rng && rng.range_name)) : null;
-      const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
-      const curHeldInRange = numbers.filter(x =>
-        x && Number(x.client_id) === Number(targetId) &&
-        Number(x.id) !== Number(n.id) &&
-        matchesRangeRef(x, n.range_id || (rng && rng.id), n.range_name || (rng && rng.range_name))
-      ).length;
-      if (curHeldInRange + 1 > effMaxHold) {
-        return res.status(400).json({ error: `Client "${cl.username}" already holds ${curHeldInRange}/${effMaxHold} numbers in this range (max ${effMaxHold} per range).` });
-      }
+      // Agent/Owner manual assignment bypasses client self-allocate holding limits and tags client_assign_source = 'admin'
       const ptMeta = getPaytermMeta(clientPayterm);
       const agentRate = (n.agent_rate !== undefined && n.agent_rate !== null && Number(n.agent_rate) > 0)
         ? Number(n.agent_rate)
@@ -17534,6 +17645,7 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
       n.client_id = targetId;
       n.client_name = cl.username;
       n.client_username = cl.username;
+      n.client_assign_source = 'admin';
       n.user = cl.username;
       if (isWnNumber) {
         n.payterm = 'Monthly';
@@ -17556,6 +17668,7 @@ app.post('/api/numbers/:id/assign', requireAuth, (req, res) => {
     n.status = 'assigned';
     n.assigned_at = new Date().toISOString();
     n.assigned_date = n.assigned_at;
+    if (targetType === 'client') n.client_assigned_at = n.assigned_at;
     n.notes = notes;
     writeDb('numbers', numbers);
 
@@ -17764,34 +17877,19 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
     const bulkRanges = readDb('sms_ranges') || [];
     const explicitBulkPayterm = req.body.client_payterm || req.body.payterm || null;
 
-    // Enforce strict active payterms & max 50 held per range per client
-    if (targetType === 'client' && bulkClientRecord) {
-      const perRangeCounts = new Map();
+    // Enforce strict active payterms (manual Agent/Admin bulk-assign is NOT blocked by client self-allocate holding limits)
+    if (targetType === 'client' && bulkClientRecord && explicitBulkPayterm) {
       for (const n of numbers) {
         if (!numberIds.has(Number(n.id))) continue;
         const rObj = bulkRanges.find(r => Number(r.id) === Number(n.range_id)) || bulkRanges.find(r => r.range_name === n.range_name);
         const isWn = isWhitenoiseRecord(n, wnRangesMap, wnTags);
-        if (explicitBulkPayterm && rObj) {
+        if (rObj) {
           const ptInfo = resolveRangeActivePayterms(rObj, isWn);
           if (!ptInfo.active_payterms.includes(normalizePaytermKey(explicitBulkPayterm))) {
             return res.status(400).json({
               error: `Payterm "${explicitBulkPayterm}" is not active on range "${rObj.range_name || rObj.name}". Allowed: ${ptInfo.active_payterms.join(', ')}.`
             });
           }
-        }
-        const key = n.range_id ? `id:${n.range_id}` : `name:${String(n.range_name || '').trim().toLowerCase()}`;
-        if (!perRangeCounts.has(key)) perRangeCounts.set(key, { rid: n.range_id, rname: n.range_name || (rObj && rObj.range_name) || '', add: 0 });
-        perRangeCounts.get(key).add++;
-      }
-      const bulkHoldAgentId = bulkClientRecord.agent_id || (isAgent ? Number(sessionUser.id) : null);
-      for (const info of perRangeCounts.values()) {
-        const holdAcr = bulkHoldAgentId ? findAgentClientRate(bulkHoldAgentId, info.rid, info.rname) : null;
-        const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
-        const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && !numberIds.has(Number(x.id)) && matchesRangeRef(x, info.rid, info.rname)).length;
-        if (curHeld + info.add > effMaxHold) {
-          return res.status(400).json({
-            error: `Client "${bulkClientRecord.username}" cannot hold more than ${effMaxHold} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
-          });
         }
       }
     }
@@ -17819,6 +17917,7 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
             client_name: '',
             client_username: '',
             client_assigned_at: null,
+            client_assign_source: null,
             user: '',
             payterm: ptMeta.key,
             payout_schedule: ptMeta.schedule,
@@ -17880,6 +17979,7 @@ app.post('/api/numbers/bulk-assign-many', requireAuth, (req, res) => {
             assigned_at: bulkAssignedIso,
             assigned_date: bulkAssignedIso,
             client_assigned_at: bulkAssignedIso,
+            client_assign_source: 'admin',
             allocated_at: bulkAssignedIso,
             notes
           };
@@ -18012,6 +18112,7 @@ function resolveAllocationPolicy(sessionUser) {
   const total_held = Array.isArray(numbers) ? numbers.filter(n => {
     if (!n) return false;
     if (sRole === 'agent') return Number(n.agent_id) === Number(sessionUser.id);
+    if (isClientAdminAssigned(n)) return false;
     return Number(n.client_id) === Number(sessionUser.id);
   }).length : 0;
 
@@ -18042,6 +18143,7 @@ function resolveAllocationPolicy(sessionUser) {
     const history = readDb('allocation_history') || [];
     used_today = Array.isArray(history) ? history.filter(h => {
       if (!h || h.quota_reset || String(h.status || '').toLowerCase() === 'undone') return false;
+      if (sRole === 'client' && isHistoryAdminAssigned(h)) return false;
       const d = String(h.timestamp || h.created || '').slice(0, 10);
       if (d !== todayIso) return false;
       if (h.to_user_id != null && Number(h.to_user_id) === Number(sessionUser.id) && String(h.to_role || '').toLowerCase() === sRole) return true;
@@ -18256,6 +18358,7 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
         }
         n.client_payterm = ptMeta.key;
         n.client_assigned_at = now;
+        n.client_assign_source = 'self';
         if (rp && !rp.error && Number(rp.client_rate_pkr) > 0) {
           n.client_rate = rp.client_rate;
           n.client_payout = rp.client_rate;
@@ -18275,6 +18378,7 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
         n.client_username = '';
         n.client_name = '';
         n.client_assigned_at = null;
+        n.client_assign_source = null;
         n.user = sessionUser.username;
         if (agentRateUsd > 0) {
           n.agent_rate = agentRateUsd;
@@ -18325,6 +18429,7 @@ app.post('/api/numbers/agent-allocate', requireAuth, (req, res) => {
       from_owner_pool: fromOwnerPoolCount,
       sample_start: toAllocate[0]?.number,
       sample_end: toAllocate[toAllocate.length - 1]?.number,
+      assign_source: isClient ? 'self' : 'agent_self',
       status: 'completed',
       timestamp: now,
       created: now
@@ -18453,26 +18558,8 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
     const selectedNumbers = pool.slice(0, allocCount);
     const hasWnSelected = selectedNumbers.some(n => isWhitenoiseRecord(n, wnRangesMap, wnTags)) || (rng && isWhitenoiseRecord(rng, wnRangesMap, wnTags));
 
-    // Enforce max 50 active held numbers per range per client on bulk allocation
-    if (targetType === 'client' && targetClientRec) {
-      const perRangeAddCounts = new Map();
-      for (const sn of selectedNumbers) {
-        const key = sn.range_id ? `id:${sn.range_id}` : `name:${String(sn.range_name || '').trim().toLowerCase()}`;
-        if (!perRangeAddCounts.has(key)) perRangeAddCounts.set(key, { rid: sn.range_id, rname: sn.range_name || (rng && rng.range_name) || '', add: 0 });
-        perRangeAddCounts.get(key).add++;
-      }
-      const allocHoldAgentId = targetClientRec.agent_id || (isAgent ? Number(sessionUser.id) : null);
-      for (const info of perRangeAddCounts.values()) {
-        const holdAcr = allocHoldAgentId ? findAgentClientRate(allocHoldAgentId, info.rid, info.rname) : null;
-        const effMaxHold = resolveRangeClientLimits(holdAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
-        const curHeld = numbers.filter(x => x && Number(x.client_id) === Number(targetId) && matchesRangeRef(x, info.rid, info.rname)).length;
-        if (curHeld + info.add > effMaxHold) {
-          return res.status(400).json({
-            error: `Client "${targetClientRec.username}" cannot hold more than ${effMaxHold} numbers in "${info.rname || 'this range'}" (currently ${curHeld} held, trying to add ${info.add}).`
-          });
-        }
-      }
-    }
+    // Manual Agent/Admin bulk-allocate is NOT blocked by client self-allocate holding limits;
+    // assigned numbers are tagged client_assign_source = 'admin' so they remain returnable by date only.
 
     if (hasWnSelected) {
       if (!wnAllowed) {
@@ -18519,7 +18606,7 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
           : { payterm: ptMeta.key, payout_schedule: ptMeta.schedule, cycle_days: ptMeta.cycle_days, hold_days: ptMeta.hold_days };
         if (targetType === 'agent') {
           const agRate = getRangeAgentRate(rObj, ptMeta.key);
-          return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', client_assigned_at: null, user: toUsername, return_pending: false, return_request_id: null, inactivity_flagged: false, blocked_at: null, blocked_reason: '', status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
+          return { ...n, ...paytermUpdate, agent_rate: agRate || n.agent_rate, payout: agRate || n.payout, agent_id: targetId, agent_name: toUsername, agent_username: toUsername, client_id: null, client_name: '', client_username: '', client_assigned_at: null, client_assign_source: null, user: toUsername, return_pending: false, return_request_id: null, inactivity_flagged: false, blocked_at: null, blocked_reason: '', status: 'assigned', assigned_at: bulkAllocNowIso, assigned_date: bulkAllocNowIso, allocated_at: bulkAllocNowIso, notes };
         } else {
           const effAgId = parentAgentId || (isAgent ? Number(sessionUser.id) : n.agent_id || null);
           const candClTerm = normalizePaytermKey(req.body.client_payterm || allocPayterm || n.client_payterm || n.payterm || ptInfo.primary_payterm);
@@ -18562,6 +18649,7 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
             assigned_at: bulkAllocNowIso,
             assigned_date: bulkAllocNowIso,
             client_assigned_at: bulkAllocNowIso,
+            client_assign_source: 'admin',
             allocated_at: bulkAllocNowIso,
             notes
           };
@@ -18587,6 +18675,7 @@ app.post('/api/numbers/bulk-allocate', (req, res) => {
       range_end: rangeEnd,
       count: allocCount,
       number_ids: Array.from(selectedIds),
+      assign_source: targetType === 'client' ? 'admin' : 'agent_bulk',
       timestamp: new Date().toISOString(),
       status: 'completed',
       notes: notes
@@ -18705,6 +18794,7 @@ app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => 
           client_name: '',
           client_username: '',
           client_assigned_at: null,
+          client_assign_source: null,
           client_rate: 0,
           user: n.agent_name || n.agent_username || '',
           return_pending: false,
@@ -18718,6 +18808,7 @@ app.post('/api/numbers/allocation-history/:id/undo', requireAuth, (req, res) => 
           client_name: '',
           client_username: '',
           client_assigned_at: null,
+          client_assign_source: null,
           client_rate: 0,
           agent_id: null,
           agent_name: '',
@@ -19764,10 +19855,10 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
     if (isClientReq && reqItem.client_id) {
       const fulfillHoldAcr = effAgentId ? findAgentClientRate(effAgentId, rangeId, rangeLabel) : null;
       const effMaxHold = resolveRangeClientLimits(fulfillHoldAcr, { unconfiguredFallbackHold: CLIENT_RANGE_ACTIVE_HOLD_MAX }).max_hold_limit;
-      const curHeld = numbers.filter(n => n && Number(n.client_id) === Number(reqItem.client_id) && matchesRangeRef(n, rangeId, rangeLabel)).length;
+      const curHeld = numbers.filter(n => n && Number(n.client_id) === Number(reqItem.client_id) && !isClientAdminAssigned(n) && matchesRangeRef(n, rangeId, rangeLabel)).length;
       if (curHeld + allocCount > effMaxHold) {
         return res.status(400).json({
-          error: `Client "${reqItem.client_username || reqItem.client_id}" cannot hold more than ${effMaxHold} numbers in "${rangeLabel}" (currently ${curHeld} held, trying to fulfill ${allocCount}).`
+          error: `Client "${reqItem.client_username || reqItem.client_id}" cannot hold more than ${effMaxHold} self-requested numbers in "${rangeLabel}" (currently ${curHeld} held, trying to fulfill ${allocCount}).`
         });
       }
     }
@@ -19791,6 +19882,8 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
           client_id: null,
           client_name: '',
           client_username: '',
+          client_assigned_at: null,
+          client_assign_source: null,
           user: targetRecipientName,
           payterm: ptMeta.key,
           payout_schedule: ptMeta.schedule,
@@ -19850,6 +19943,7 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
         assigned_at: assignNowIso,
         assigned_date: assignNowIso,
         client_assigned_at: assignNowIso,
+        client_assign_source: 'self',
         allocated_at: assignNowIso,
         notes: `Allocated via Request #${reqItem.id}`
       };
@@ -20006,6 +20100,7 @@ app.post('/api/agent-requests/:id/fulfill', requireAuth, (req, res) => {
       timestamp: new Date().toISOString(),
       status: 'completed',
       request_id: reqItem.id,
+      assign_source: isClientReq ? 'self' : 'agent_request',
       notes: `Request #${reqItem.id} fulfilled`
     });
     writeDb('allocation_history', history);

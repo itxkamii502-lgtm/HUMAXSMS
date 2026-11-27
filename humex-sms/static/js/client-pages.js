@@ -66,6 +66,9 @@ async function pgSmsRanges() {
       const monthlyRatePkr = hasMonthly ? Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? clientRatePkr) : null;
 
       const heldCount = Number(r.held_count || 0);
+      const adminAssignedCount = Number(r.admin_assigned_count || 0);
+      const totalHeldCount = Number(r.total_held_count != null ? r.total_held_count : (heldCount + adminAssignedCount));
+      const isAdminReturnOnly = Boolean(r.admin_return_only || r.block_reason === 'admin_assigned_only');
       const roomCount = Math.max(0, Number(r.available || 0));
       const batchSize = Math.max(1, Number(r.batch_size || (Array.isArray(r.allowed_quantities) ? r.allowed_quantities[0] : 25) || 25));
       const dailyAddsLimit = Math.max(1, Number(r.daily_adds_limit || r.daily_request_limit || 1));
@@ -73,16 +76,19 @@ async function pgSmsRanges() {
       const dailyLimitNums = Math.max(batchSize, Number(r.daily_numbers_limit || (batchSize * dailyAddsLimit)));
       const maxHoldNums = Math.max(batchSize, Number(r.max_hold_limit || 25));
       const todayNums = Number(r.today_numbers || 0);
-      const maxReqNow = r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(batchSize, dailyLimitNums - todayNums, maxHoldNums - heldCount));
+      const maxReqNow = isAdminReturnOnly ? 0 : (r.max_requestable_now != null ? Number(r.max_requestable_now) : Math.max(0, Math.min(batchSize, dailyLimitNums - todayNums, maxHoldNums - heldCount)));
       const hasPendingReq = Boolean(r.has_pending_request || Number(r.pending_request_count || 0) > 0 || r.block_reason === 'pending_request');
-      const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false || maxReqNow <= 0 || hasPendingReq;
-      const blockReason = r.block_reason || (hasPendingReq ? 'pending_request' : (r.requested_today ? 'daily_limit' : ''));
+      const reqBlocked = isAdminReturnOnly || r.can_request_now === false || r.requested_today === true || r.can_request_today === false || maxReqNow <= 0 || hasPendingReq;
+      const blockReason = r.block_reason || (isAdminReturnOnly ? 'admin_assigned_only' : (hasPendingReq ? 'pending_request' : (r.requested_today ? 'daily_limit' : '')));
 
       let lockLabel = 'Daily Limit';
       let lockTip = `Daily limit reached (${todayAddsUsed}/${dailyAddsLimit} additions today). Resets at 00:00 UTC (05:00 AM PKT).`;
-      if (blockReason === 'hold_limit') {
+      if (isAdminReturnOnly) {
+        lockLabel = 'Return Only';
+        lockTip = `These ${totalHeldCount} number(s) were assigned directly by Admin/Agent. Self-allocate is not enabled on this range, only date-wise Return is available.`;
+      } else if (blockReason === 'hold_limit') {
         lockLabel = `Hold Full (${heldCount}/${maxHoldNums})`;
-        lockTip = `Maximum ${maxHoldNums} active numbers held in this range. Return previous-day numbers to add more.`;
+        lockTip = `Maximum ${maxHoldNums} self-allocated active numbers held in this range. Return previous-day numbers to add more.`;
       } else if (blockReason === 'daily_limit') {
         lockLabel = `Daily (${todayAddsUsed}/${dailyAddsLimit})`;
         lockTip = `Daily limit reached for this range (${todayAddsUsed}/${dailyAddsLimit} additions · ${todayNums}/${dailyLimitNums} numbers today). Resets at 00:00 UTC (05:00 AM PKT).`;
@@ -91,14 +97,18 @@ async function pgSmsRanges() {
         lockTip = 'You already have a pending request on this range. Please wait for your Agent to review it.';
       }
 
-      const quotaHtml = reqBlocked
-        ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`
-        : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} / batch)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`;
+      const quotaHtml = isAdminReturnOnly
+        ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" style="background:#fef3c7;color:#92400e;border-color:#fde68a;" title="${zyEsc(lockTip)}"><i class="fas fa-user-shield"></i> Admin Assigned</span><div class="zy-quota-sub">${totalHeldCount} returnable by date</div></div>`
+        : (reqBlocked
+          ? `<div class="zy-quota-mini"><span class="zy-cl-rc-lock" title="${zyEsc(lockTip)}"><i class="fas ${blockReason === 'pending_request' ? 'fa-clock' : 'fa-lock'}"></i> ${zyEsc(lockLabel)}</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`
+          : `<div class="zy-quota-mini"><span class="zy-cl-rc-ready"><i class="fas fa-check-circle"></i> Ready (${maxReqNow} / batch)</span><div class="zy-quota-sub">Held ${heldCount}/${maxHoldNums} · Day ${todayAddsUsed}/${dailyAddsLimit}</div></div>`);
 
       const isWn = ptInfo.isWn;
       let actionBtnHtml = '';
       // Clients can Self-Allocate both Weekly and Whitenoise {W} ranges when Self-Allocate mode is active
-      if (isSelfAlloc) {
+      if (isAdminReturnOnly) {
+        actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#92400e;border-color:#fde68a;background:#fffbeb;cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas fa-user-shield"></i> Return Only</button>`;
+      } else if (isSelfAlloc) {
         if (reqBlocked) {
           actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small" style="color:#94a3b8;border-color:#cbd5e1;background:#f8fafc;cursor:not-allowed;" disabled title="${zyEsc(lockTip)}"><i class="fas fa-lock"></i> ${zyEsc(lockLabel)}</button>`;
         } else if (roomCount <= 0) {
@@ -113,8 +123,13 @@ async function pgSmsRanges() {
         actionBtnHtml = `<button type="button" class="apx-btn apx-btn-small zy-btn-alloc-solid" onclick="zyOpenClientRateCardRequestModal(${i})" title="Request Numbers (up to ${maxReqNow} now)"><i class="fas fa-phone-volume"></i> Request</button>`;
       }
 
-      const returnBtnHtml = heldCount > 0
-        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="${isWn ? 'Submit Monthly Route {W} return request to your Agent' : `Return numbers from ${zyEsc(rName)} by date`}"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>`
+      const returnTip = isWn
+        ? 'Submit Monthly Route {W} return request to your Agent'
+        : (adminAssignedCount > 0
+          ? `Return numbers from ${rName} by date (${heldCount} self-allocated, ${adminAssignedCount} admin-added)`
+          : `Return numbers from ${rName} by date`);
+      const returnBtnHtml = totalHeldCount > 0
+        ? `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid" onclick="zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)" title="${zyEsc(returnTip)}"><i class="fas fa-rotate-left"></i> Return (${totalHeldCount})</button>`
         : `<button type="button" class="apx-btn apx-btn-small zy-btn-return-solid is-disabled" disabled title="No numbers held in this range to return"><i class="fas fa-rotate-left"></i> Return</button>`;
 
       const fmtPkrRate = (val) => {
@@ -149,10 +164,14 @@ async function pgSmsRanges() {
         ? `Monthly ${monthlyRatePkr}`
         : (weeklyRatePkr !== null ? `Weekly ${weeklyRatePkr}` : '');
 
+      const heldPoolHtml = isAdminReturnOnly
+        ? `<span class="monospace zy-cl-rc-hp" title="Admin/Agent Assigned: ${totalHeldCount} (Return Only)"><b style="color:#b45309;">${totalHeldCount} Admin</b></span>`
+        : `<span class="monospace zy-cl-rc-hp" title="Self-Allocated Held: ${heldCount}/${maxHoldNums}${adminAssignedCount > 0 ? ` · Admin Added (excluded from limit): ${adminAssignedCount}` : ''} · Available Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b>${adminAssignedCount > 0 ? ` <span style="font-size:10.5px;color:#b45309;font-weight:700;" title="Assigned directly by Admin/Agent — excluded from self-allocate limits">(+${adminAssignedCount} Adm)</span>` : ''} <span class="zy-cl-rc-dot">·</span> <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:800;">${roomCount.toLocaleString()}</span></span>`;
+
       return [
         { v: rName, h: `<strong class="zy-cl-rc-rname ${isWn ? 'zy-wn-range-name' : ''}">${zyEsc(rName)}</strong>` },
         { v: paytermSortVal, h: paytermCellHtml },
-        `<span class="monospace zy-cl-rc-hp" title="Your Held: ${heldCount}/${maxHoldNums} · Available Pool: ${roomCount}"><b>${heldCount}/${maxHoldNums}</b> <span class="zy-cl-rc-dot">·</span> <span style="color:${roomCount > 0 ? '#10b981' : '#dc2626'};font-weight:800;">${roomCount.toLocaleString()}</span></span>`,
+        heldPoolHtml,
         { v: reqBlocked ? 'locked' : 'ready', h: quotaHtml },
         { v: '', h: `<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <button type="button" class="apx-btn apx-btn-icon apx-btn-small" style="color:#0284c7;border-color:#bae6fd;background:#f0f9ff;" onclick="zyViewClientRange(${i})" title="View Details"><i class="fas fa-eye"></i></button>
@@ -341,13 +360,16 @@ function zyViewClientRange(i) {
   const monthlyVal = hasMonthly ? Number(ptsPkr['Monthly'] ?? ptsPkr['30/5'] ?? clientRatePkr) : null;
 
   const heldCount = Number(r.held_count || 0);
+  const adminAssignedCount = Number(r.admin_assigned_count || 0);
+  const totalHeldCount = Number(r.total_held_count != null ? r.total_held_count : (heldCount + adminAssignedCount));
+  const isAdminReturnOnly = Boolean(r.admin_return_only || r.block_reason === 'admin_assigned_only');
   const batchSize = Math.max(1, Number(r.batch_size || 25));
   const dailyAddsLimit = Math.max(1, Number(r.daily_adds_limit || r.daily_request_limit || 1));
   const todayAddsUsed = Number(r.today_adds_used || 0);
   const dailyLimitNums = Math.max(batchSize, Number(r.daily_numbers_limit || (batchSize * dailyAddsLimit)));
   const maxHoldNums = Math.max(batchSize, Number(r.max_hold_limit || 25));
   const todayNums = Number(r.today_numbers || 0);
-  const reqBlocked = r.can_request_now === false || r.requested_today === true || r.can_request_today === false;
+  const reqBlocked = isAdminReturnOnly || r.can_request_now === false || r.requested_today === true || r.can_request_today === false;
   const roomCount = Math.max(0, Number(r.available || 0));
   const naCell = `<span class="zy-na">N/A</span>`;
 
@@ -372,9 +394,12 @@ function zyViewClientRange(i) {
         </h5>
         <div style="font-size:12px;line-height:22px;">
           <div><span style="color:#64748b;">Status:</span> ${r.active !== false ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Inactive</span>'}</div>
-          <div><span style="color:#64748b;">Batch Size:</span> <b>${batchSize} numbers</b></div>
-          <div><span style="color:#64748b;">Daily Limit:</span> <b>${todayAddsUsed}/${dailyAddsLimit} adds (${todayNums}/${dailyLimitNums} nums)</b></div>
-          <div><span style="color:#64748b;">Max Hold (Range):</span> <b>${heldCount} / ${maxHoldNums} active</b></div>
+          ${isAdminReturnOnly
+            ? `<div><span style="color:#64748b;">Mode:</span> <b style="color:#b45309;">Admin Assigned (Return Only)</b></div>`
+            : `<div><span style="color:#64748b;">Batch Size:</span> <b>${batchSize} numbers</b></div>
+               <div><span style="color:#64748b;">Daily Limit:</span> <b>${todayAddsUsed}/${dailyAddsLimit} adds (${todayNums}/${dailyLimitNums} nums)</b></div>
+               <div><span style="color:#64748b;">Max Hold (Self-Alloc):</span> <b>${heldCount} / ${maxHoldNums} active</b></div>`}
+          ${adminAssignedCount > 0 ? `<div><span style="color:#64748b;">Admin Assigned:</span> <b style="color:#b45309;">${adminAssignedCount} numbers</b> <small style="color:#64748b;">(not counted in limit)</small></div>` : ''}
           <div><span style="color:#64748b;">Room in Agent Pool:</span> <b style="color:#10b981;">${roomCount.toLocaleString()} numbers</b></div>
           <div><span style="color:#64748b;">Allowed CLIs:</span> <small style="display:block;color:#64748b;line-height:1.3;margin-top:2px;">${zyEsc(r.cli_list || 'All CLIs')}</small></div>
         </div>
@@ -400,14 +425,16 @@ function zyViewClientRange(i) {
       </div>
     </div>`,
     `<button class="zy-btn-grey" onclick="closeModal()">Close</button>
-     ${heldCount > 0 ? `<button class="zy-btn-grey" style="color:#dc2626;border-color:#fecaca;" onclick="closeModal();zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)"><i class="fas fa-rotate-left"></i> Return (${heldCount})</button>` : ''}
-     ${(window._zyClPolicy && window._zyClPolicy.mode === 'self_allocate')
-       ? (reqBlocked
-         ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
-         : `<button class="zy-btn-blue" onclick="closeModal();zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])"><i class="fas fa-bolt"></i> Self-Allocate Numbers</button>`)
-       : (reqBlocked
-         ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
-         : `<button class="zy-btn-blue" onclick="closeModal();zyOpenClientRateCardRequestModal(${i})"><i class="fas fa-phone-volume"></i> Request Numbers</button>`)}`);
+     ${totalHeldCount > 0 ? `<button class="zy-btn-grey" style="color:#dc2626;border-color:#fecaca;" onclick="closeModal();zyOpenRangeReturnModal(${rId || 'null'}, '${zyEsc(rName)}', pgSmsRanges)"><i class="fas fa-rotate-left"></i> Return (${totalHeldCount})</button>` : ''}
+     ${isAdminReturnOnly
+       ? ''
+       : ((window._zyClPolicy && window._zyClPolicy.mode === 'self_allocate')
+         ? (reqBlocked
+           ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
+           : `<button class="zy-btn-blue" onclick="closeModal();zyOpenSelfAllocateModal('${zyEsc(rName)}', ${rId || 'null'}, window._zyClPolicy, pgSmsRanges, ZY_CLIENT_RANGE_LIST[${i}])"><i class="fas fa-bolt"></i> Self-Allocate Numbers</button>`)
+         : (reqBlocked
+           ? `<button class="zy-btn-grey" disabled><i class="fas fa-lock"></i> Limit Reached</button>`
+           : `<button class="zy-btn-blue" onclick="closeModal();zyOpenClientRateCardRequestModal(${i})"><i class="fas fa-phone-volume"></i> Request Numbers</button>`))}`);
 }
 
 /* ═══ MY SMS NUMBERS ════════════════════════════════════════ */
